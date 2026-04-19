@@ -1,0 +1,18 @@
+# France layer definitions
+
+bounds:
+  west: -5.15
+  east: 9.56
+  south: 41.33
+  north: 51.09
+
+layers:
+  fr_basemap:
+    name: "France basemap"
+    description: "IGN Géoportail standard basemap"
+    type: raster
+    source: ign_wmts
+    wmts_layer: GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2
+    zoom_levels: [10, 12, 14]
+    exporter: garmin_img
+    output: fr_basemap.img

@@ -1,0 +1,10 @@
+services:
+  cartoload:
+    build: .
+    volumes:
+      - ./cache:/app/cache
+      - ./output:/app/output
+      - ./examples/configs:/app/configs
+    environment:
+      WMTS_DELAY_MS: "150"
+      WMTS_THREADS: "4"

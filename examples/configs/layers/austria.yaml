@@ -1,0 +1,18 @@
+# Austria layer definitions
+
+bounds:
+  west: 9.53
+  east: 17.16
+  south: 46.37
+  north: 49.02
+
+layers:
+  at_basemap:
+    name: "Austria basemap"
+    description: "basemap.at standard basemap"
+    type: raster
+    source: basemap_at_wmts
+    wmts_layer: geolandbasemap
+    zoom_levels: [10, 12, 14]
+    exporter: garmin_img
+    output: at_basemap.img

@@ -1,0 +1,70 @@
+[project]
+name = "cartoload"
+version = "0.1.0"
+description = "Convert official geodata into GPS device maps"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: GIS",
+]
+dependencies = [
+    "click>=8.0",
+    "PyYAML>=6.0",
+    "requests>=2.28",
+    "pystac-client>=0.6",
+    "numpy>=1.24",
+    "rich>=13.0",
+]
+
+[project.scripts]
+cartoload = "cartoload.cli:main"
+
+[project.urls]
+Repository = "https://github.com/burgdev/cartoload"
+Documentation = "https://burgdev.github.io/cartoload/"
+Changelog = "https://github.com/burgdev/cartoload/blob/main/CHANGELOG.md"
+Releases = "https://github.com/burgdev/cartoload/releases"
+
+[dependency-groups]
+dev = [
+    "bump2version>=1.0.1",
+    "deptry>=0.21",
+    "git-cliff>=2.7",
+    "pre-commit>=4.0",
+    "ruff>=0.8",
+    "ty>=0.0.1a23",
+]
+docs = [
+    "zensical>=0.0.33",
+]
+test = [
+    "pytest>=8.3",
+    "pytest-cov>=4.1",
+    "pytest-xdist>=3.8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[tool.deptry]
+extend_exclude = ["tasks/__init__.py"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cartoload"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/cartoload"]

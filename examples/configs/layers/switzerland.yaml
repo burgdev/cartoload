@@ -1,0 +1,41 @@
+# Switzerland layer definitions
+
+# Default bounding box for all layers in this file
+bounds:
+  west: 5.96
+  east: 10.49
+  south: 45.82
+  north: 47.81
+
+layers:
+  ch_basemap_25k:
+    name: "Switzerland 1:25k"
+    description: "swisstopo national map, colour, 1:25000"
+    type: raster
+    source: swisstopo_stac
+    wmts_fallback: swisstopo_wmts
+    wmts_layer: ch.swisstopo.pixelkarte-farbe
+    geotiff_product: ch.swisstopo.swissmap-raster25_komb
+    zoom_levels: [10, 12, 14]
+    exporter: garmin_img
+    output: ch_basemap_25k.img
+
+  ch_basemap_10k:
+    name: "Switzerland 1:10k"
+    description: "swisstopo national map, colour, 1:10000"
+    type: raster
+    source: swisstopo_stac
+    geotiff_product: ch.swisstopo.swissmap-raster10_komb
+    zoom_levels: [12, 14, 15, 16]
+    exporter: garmin_img
+    output: ch_basemap_10k.img
+
+  ch_steepness:
+    name: "Switzerland steepness"
+    description: "Terrain steepness shading overlay"
+    type: raster_overlay
+    source: swisstopo_wmts
+    wmts_layer: ch.swisstopo-ov.hangneigungskarte
+    zoom_levels: [12, 14]
+    exporter: garmin_img
+    output: ch_steepness.img

@@ -1,0 +1,10 @@
+# IGN France source definitions
+# https://geoservices.ign.fr
+
+sources:
+  ign_wmts:
+    type: wmts
+    url_template: "https://wxs.ign.fr/geoportail/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER={layer}&STYLE=normal&FORMAT=image/png&TILEMATRIXSET=PM&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}"
+    attribution: "© IGN France"
+    rate_limit_ms: 200
+    max_threads: 2

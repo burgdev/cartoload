@@ -1,0 +1,15 @@
+# swisstopo source definitions
+# https://wmts.geo.admin.ch/1.0.0/WMTSCapabilities.xml
+
+sources:
+  swisstopo_wmts:
+    type: wmts
+    url_template: "https://wmts.geo.admin.ch/1.0.0/{layer}/default/current/3857/{z}/{x}/{y}.jpeg"
+    attribution: "© swisstopo"
+    rate_limit_ms: 150
+    max_threads: 4
+
+  swisstopo_stac:
+    type: geotiff
+    stac_url: "https://data.geo.admin.ch/api/stac/v0.9/"
+    attribution: "© swisstopo"

@@ -1,0 +1,21 @@
+site_name = "cartoload"
+site_description = "Convert official geodata into GPS device maps"
+site_url = "https://burgdev.github.io/cartoload/"
+docs_dir = "."
+site_dir = "site"
+
+nav = [
+    { title = "Home", path = "index.md" },
+    { title = "Getting started", path = "getting-started.md" },
+    { title = "Configuration", children = [
+        { title = "Sources", path = "configuration/sources.md" },
+        { title = "Layers", path = "configuration/layers.md" },
+        { title = "Style files (vector)", path = "configuration/style.md" },
+    ]},
+    { title = "Exporters", children = [
+        { title = "Garmin raster IMG", path = "exporters/garmin-img.md" },
+        { title = "Garmin vector IMG", path = "exporters/garmin-img-vector.md" },
+        { title = "Adding exporters", path = "exporters/adding-exporters.md" },
+    ]},
+    { title = "CLI reference", path = "cli.md" },
+]
