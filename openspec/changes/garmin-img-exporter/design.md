@@ -9,6 +9,7 @@ The existing codebase provides stubs: `exporters/base.py` defines a `BaseExporte
 ## Goals / Non-Goals
 
 **Goals:**
+
 - Write valid Garmin raster `.img` files from processed GeoTIFF data that pass `gmt -i -v` validation
 - Support multi-resolution tile pyramids (multiple zoom levels in a single `.img` file)
 - Embed attribution strings in the map name header so they appear on Garmin devices
@@ -18,6 +19,7 @@ The existing codebase provides stubs: `exporters/base.py` defines a `BaseExporte
 - Use numpy for binary packing — no new dependencies beyond what is already in `pyproject.toml`
 
 **Non-Goals:**
+
 - Vector `.img` writing — that is a Phase 2 feature covered by a separate change
 - Format research — already completed in the format-research change
 - Parsing or reading existing `.img` files — the writer only produces new files
@@ -87,3 +89,28 @@ The existing codebase provides stubs: `exporters/base.py` defines a `BaseExporte
 - **3.5 MB tile cell limit requires careful chunking** — Incorrect splitting produces files that crash Garmin firmware. Mitigation: strict size accounting during the offset-calculation pass, with assertions before each write.
 - **No reference implementation** — Unlike WMTS or GeoTIFF where libraries exist, there is no open-source raster `.img` writer to compare against. Bugs must be caught through binary comparison with known-good files and device testing.
 - **Large file performance** — 4 GB files require careful memory management. Mitigation: chunk-based streaming writes, avoid loading full tile pyramids into memory simultaneously.
+
+## Implementation Status (Updated 2026-04-22)
+
+### Completed Fixes
+
+1. **Map ID generation** — `map_id` now generated deterministically from layer config (bounds hash). Was defaulting to 0, causing FAT name "00000000" and MPS map_id=0.
+
+2. **Map ID in TRE header** — Written at TRE offsets 116 and 207 (uint32 LE). GMT uses these to display the map ID. Previously zeros.
+
+3. **MPS subfile format** — Corrected to match reference SwissTopo files: "LE" signature (not "MP"), map_id at offset 7, hex ID string, repeated map name. Previously had wrong format causing "Wrong MPS records size" from GMT.
+
+4. **PDF specification analysis** — Analyzed John Mechalas' `imgformat-1.0.pdf` (2005). Key findings:
+   - Vector vs raster use different subdivision formats (obj_types=0x0F for raster vs 0x10/0x20/0x40/0x80 for vector)
+   - Map level definition: zoom level in bits 0-3, inherited flag in bit 7
+   - LBL supports 6/8/10-bit label encoding (vector only)
+   - TRE header variants: 116, 120, 154, 188 (vector) vs 273 (raster)
+   - Checksum formula confirmed: `(-sum) & 0xFF` at offset 0x0F
+
+### Known Limitations
+
+1. **Subdivision records** — Currently written as zeros (8 bytes per zoom level). GMT reads `levels [0], zoom [0]` or derives values from subdivision data rather than the map_levels table. The reference SwissTopo files have complex subdivision records (8972 bytes) that encode zoom hierarchy and geographic boundaries. Proper raster subdivision encoding requires further reverse-engineering.
+
+2. **CP/encoding display** — GMT shows `CP 0` instead of `CP 1252`. The LBL sub-header encoding field is set to 6 (CP1252) but GMT may read it from a different location.
+
+3. **Parameters display** — GMT shows `parameters 0 0 0 1` instead of reference `parameters 1 4 36 1`. These come from TRE header fields at offsets 60-70.

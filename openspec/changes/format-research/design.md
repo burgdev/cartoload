@@ -9,6 +9,7 @@ This change is purely research and documentation — no `.img` writing code is p
 ## Goals / Non-Goals
 
 **Goals:**
+
 - Fully document the Garmin raster `.img` container format by inspecting real files with `gmt -i -v`
 - Document the IMG header structure, subfile organization, tile grid layout, zoom level encoding, draw order, attribution fields, and size constraints
 - Create Python dataclass models in `src/cartoload/exporters/garmin_img_model.py` representing all discovered structures
@@ -16,6 +17,7 @@ This change is purely research and documentation — no `.img` writing code is p
 - Produce the authoritative format reference at `docs/exporters/garmin-img.md`
 
 **Non-Goals:**
+
 - Writing any `.img` exporter code — that belongs to the `garmin-img-exporter` change
 - Creating a standalone `.img` parser library — only the data model is needed
 - Supporting vector `.img` format — mkgmap handles that

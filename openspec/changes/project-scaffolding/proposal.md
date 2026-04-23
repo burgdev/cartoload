@@ -7,7 +7,7 @@ The cartoload repository is currently empty — only openspec scaffolding exists
 - Create `pyproject.toml` with Python 3.11+, hatchling build, runtime deps (click, PyYAML, requests, pystac-client, numpy, rich), and dev/test/docs dependency groups (ruff, ty, pytest, pre-commit, bump2version, git-cliff, zensical)
 - Create modular `justfile` setup: root `.justfile` importing `tasks/main.just` with recipes for install, lint, typecheck, test, fmt, docs, docker-build, build, bump, changelog — following the django-admin-runner pattern
 - Create `.pre-commit-config.yaml` with ruff, prettier, and basic hooks
-- Create `.gitignore` for Python projects (uv, __pycache__, .egg-info, cache/, output/, site/, etc.)
+- Create `.gitignore` for Python projects (uv, **pycache**, .egg-info, cache/, output/, site/, etc.)
 - Create `Dockerfile` (GDAL, Java, osmium, gmt, mkgmap, uv) and `docker-compose.yml`
 - Create `src/cartoload/` package skeleton with `__init__.py`, `cli.py` (click entry point), `config.py` (dataclasses), `pipeline.py`, and empty `downloader/`, `processor/`, `exporters/` sub-packages
 - Create `.bumpversion.cfg` for version management

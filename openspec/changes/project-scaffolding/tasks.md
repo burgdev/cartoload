@@ -44,7 +44,7 @@
 ## 7. CI/CD
 
 - [x] 7.1 Create `.github/workflows/ci.yml` — runs on push/PR, uses uv, runs lint + typecheck + test
-- [x] 7.2 Create `.github/workflows/publish.yml` — runs on tag push (v*), builds and publishes to PyPI
+- [x] 7.2 Create `.github/workflows/publish.yml` — runs on tag push (v\*), builds and publishes to PyPI
 
 ## 8. Tests
 

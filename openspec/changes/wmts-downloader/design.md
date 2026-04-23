@@ -5,6 +5,7 @@ WMTS is the primary input source for raster basemaps. swisstopo, basemap.at, and
 The project scaffolding change established stubs in `src/cartoload/downloader/base.py` (abstract `BaseDownloader`) and `src/cartoload/downloader/wmts.py` (empty `WMTSDownloader`). This change fills those stubs with working implementations.
 
 The WMTS download process has three stages:
+
 1. **Tile grid computation** -- convert a bounding box (min_lon, min_lat, max_lon, max_lat) and zoom level into the set of (x, y) tile indices that cover the area, using the standard Web Mercator (EPSG:3857) tile scheme.
 2. **URL template interpolation** -- expand a URL template like `https://wmts.example.com/{zoom}/{x}/{y}.jpeg` or a KVP-style WMTS URL with the computed tile coordinates.
 3. **Concurrent download loop** -- fetch all tiles, respecting rate limits, caching completed tiles to disk, and retrying on transient failures.
@@ -14,6 +15,7 @@ The `requests` library is already a runtime dependency and handles HTTP. The `ri
 ## Goals / Non-Goals
 
 **Goals:**
+
 - Working WMTS downloader with tile grid computation from bbox + zoom
 - Concurrent downloads with configurable thread count
 - Rate limiting between requests to avoid provider throttling
@@ -22,6 +24,7 @@ The `requests` library is already a runtime dependency and handles HTTP. The `ri
 - Rich progress bar output during downloads
 
 **Non-Goals:**
+
 - GeoTIFF downloading (separate `geotiff-downloader` change)
 - Raster processing (merging, reprojecting -- separate `raster-processor` change)
 - Exporting tiles to Garmin `.img` (separate `garmin-img-exporter` change)

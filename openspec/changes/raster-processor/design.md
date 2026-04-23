@@ -9,6 +9,7 @@ The existing `src/cartoload/processor/raster.py` is currently a stub. This chang
 ## Goals / Non-Goals
 
 **Goals:**
+
 - Reproject downloaded tiles to a configurable target CRS using `gdalwarp`
 - Mosaic multiple tiles into a single raster via VRT (Virtual Raster Table) using `gdalbuildvrt`
 - Build overviews (pyramid levels) on the output raster using `gdaladdo`
@@ -16,6 +17,7 @@ The existing `src/cartoload/processor/raster.py` is currently a stub. This chang
 - Validate GDAL tool availability at runtime and surface clear error messages
 
 **Non-Goals:**
+
 - Downloading tiles from WMTS, WMS, or STAC sources -- that is the downloader's responsibility
 - Exporting to Garmin `.img` format -- that is the exporter's responsibility
 - Supporting non-raster (vector) data -- vector processing is a separate concern

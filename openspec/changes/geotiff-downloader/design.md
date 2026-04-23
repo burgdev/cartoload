@@ -7,6 +7,7 @@ Layer configs reference a GeoTIFF source by `source` (e.g., `swisstopo_stac`) an
 ## Goals / Non-Goals
 
 **Goals:**
+
 - Query STAC API by product ID and bounding box using pystac-client
 - Download GeoTIFF assets from STAC items via requests
 - Cache downloaded files locally with a structured directory layout
@@ -14,6 +15,7 @@ Layer configs reference a GeoTIFF source by `source` (e.g., `swisstopo_stac`) an
 - Show download progress via rich
 
 **Non-Goals:**
+
 - WMTS tile downloading (handled by wmts-downloader change)
 - Raster processing (reprojection, VRT mosaic, overviews -- handled by raster-processor change)
 - Exporting to Garmin .img (handled by garmin-img-exporter change)

@@ -20,6 +20,7 @@ dependencies = [
     "requests>=2.28",
     "pystac-client>=0.6",
     "numpy>=1.24",
+    "Pillow>=10.0",
     "rich>=13.0",
 ]
 
@@ -52,6 +53,10 @@ test = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "gmt: requires gmt (GMapTool) binary on PATH",
+    "gdal: requires GDAL/rasterio system libraries",
+]
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]

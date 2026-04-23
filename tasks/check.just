@@ -14,15 +14,15 @@ lock:
 # 🧹 Lint with ruff
 lint:
     @header "Linting..."
-    uv run ruff check src/ tests/
-    uv run ruff format --check src/ tests/
+    uv run ruff check .
+    uv run ruff format --check .
     @success "Linting passed!"
 
 # 🪄 Auto-fix with ruff
 fix:
     @header "Fixing..."
-    uv run ruff check --fix src/ tests/
-    uv run ruff format src/ tests/
+    uv run ruff check --fix .
+    uv run ruff format .
     @success "Fixes applied!"
 
 # 🔍 Static type checking with ty

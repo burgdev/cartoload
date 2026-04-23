@@ -5,6 +5,7 @@ The cartoload repository is empty — only `.claude/` and `openspec/` scaffoldin
 The django-admin-runner repo provides the proven pattern for: `src/` layout with hatchling, modular `tasks/*.just` files, `uv` for dependency management, `ruff` for linting/formatting, `pyright`/`ty` for type checking, `pre-commit` hooks, `git-cliff` for changelogs, GitHub Actions CI/CD, and Zensical for docs.
 
 Key differences from django-admin-runner:
+
 - **Type checker**: SPEC.md specifies `ty` (not `pyright`) — a newer Rust-based type checker from the Astral team
 - **Runtime deps**: heavier — click, PyYAML, requests, pystac-client, numpy, rich
 - **System deps**: GDAL, Java, osmium-tool, gmt, mkgmap — all in Docker
@@ -13,6 +14,7 @@ Key differences from django-admin-runner:
 ## Goals / Non-Goals
 
 **Goals:**
+
 - Establish a working `uv sync && just install && just test` development loop
 - Provide a CLI entry point (`cartoload`) that can be invoked immediately
 - Set up CI that runs lint + typecheck + test on every PR
@@ -21,10 +23,11 @@ Key differences from django-admin-runner:
 - Create docs site skeleton ready for content
 
 **Non-Goals:**
+
 - Implement any actual pipeline logic (downloader, processor, exporter) — that's future changes
 - Create a working Garmin `.img` writer — Phase 1 feature, not scaffolding
 - Set up `cartoload-server` integration — separate project
-- Publish to PyPI — only the publish *workflow* is set up; no actual release
+- Publish to PyPI — only the publish _workflow_ is set up; no actual release
 
 ## Decisions
 
