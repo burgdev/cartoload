@@ -19,30 +19,30 @@ The IMG file begins with a 512-byte header containing metadata and file system i
 
 ### 1.1 Header Field Reference
 
-| Offset      | Size | Field              | Description                                                                                     |
-| ----------- | ---- | ------------------ | ----------------------------------------------------------------------------------------------- |
-| 0x00        | 1    | XOR byte           | Encryption key (0x00 = no encryption)                                                           |
-| 0x01-0x07   | 7    | Reserved           | Zero padding                                                                                    |
-| 0x08-0x09   | 2    | Map version        | Typically 0x0000                                                                                |
-| 0x0A-0x0B   | 2    | Update month/year  | Update marker (0x0020 observed)                                                                 |
-| 0x0E        | 1    | MapSource flag     | 0 = Garmin map                                                                                  |
-| 0x0F        | 1    | Checksum           | Sum of all bytes 0x00-0x0E, then `(-sum) & 0xFF`. Note: MapSource does not validate this field. |
-| 0x10        | 6    | Magic signature    | `DSKIMG` (ASCII)                                                                                |
-| 0x16        | 1    | Unknown            | Always 0x00                                                                                     |
-| 0x17        | 1    | Format version     | Always 0x02                                                                                     |
-| 0x18-0x19   | 2    | Sectors per track  | 0x0020                                                                                          |
-| 0x1A-0x1B   | 2    | Heads per cylinder | 0x0001                                                                                          |
-| 0x39-0x3E   | 6    | Creation date      | `year_LE(2) + month(1) + day(1) + hour(1) + min(1) + sec(1)`                                    |
-| 0x40        | 1    | FAT block number   | Physical block number of FAT start (8 = 0x1000)                                                 |
-| 0x41-0x48   | 8    | Creator string     | `GARMIN\0\0` (null-padded to 8 bytes)                                                           |
-| 0x49-0x5C   | 20   | Map description    | ASCII, space-padded (20 bytes)                                                                  |
-| 0x5D-0x5E   | 2    | Heads (copy)       | 0x0001                                                                                          |
-| 0x5F-0x60   | 2    | Sectors (copy)     | 0x0020                                                                                          |
-| 0x61        | 1    | Block size exp E1  | 0x09 (base = 2^9 = 512)                                                                         |
-| 0x62        | 1    | Block size exp E2  | 0x06 (block_size = 512 × 2^6 = 32768)                                                           |
-| 0x63-0x64   | 2    | Total block count  | Total data blocks, or 0xFFFF if overflow                                                        |
-| 0x1BE-0x1CD | 16   | Partition entry    | MBR-style partition table entry                                                                 |
-| 0x1FE-0x1FF | 2    | Boot signature     | 0xAA55 (standard x86 boot sector signature)                                                     |
+| Offset      | Size | Field              | Description                                                                                                                                                                                                                                |
+| ----------- | ---- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 0x00        | 1    | XOR byte           | Encryption key (0x00 = no encryption)                                                                                                                                                                                                      |
+| 0x01-0x07   | 7    | Reserved           | Zero padding                                                                                                                                                                                                                               |
+| 0x08-0x09   | 2    | Map version        | Typically 0x0000                                                                                                                                                                                                                           |
+| 0x0A-0x0B   | 2    | Update month/year  | Update marker (0x0020 observed)                                                                                                                                                                                                            |
+| 0x0E-0x0F   | 2    | Checksum/ID        | 2-byte field. mkgmap always sets this to 0x0000 and notes "Checksum is not checked." GPXSee does not validate it either. SwissTopo reference files use non-zero values (e.g., 0x5000) but these are not required for device compatibility. |
+| 0x10        | 6    | Magic signature    | `DSKIMG` (ASCII)                                                                                                                                                                                                                           |
+| 0x16        | 1    | Unknown            | Always 0x00                                                                                                                                                                                                                                |
+| 0x17        | 1    | Format version     | Always 0x02                                                                                                                                                                                                                                |
+| 0x18-0x19   | 2    | Sectors per track  | CHS geometry (cosmetic). mkgmap picks from [4,8,16,32] so that sectors × heads × cylinders > file size in 512-byte sectors. Not validated by devices. SwissTopo: 32.                                                                       |
+| 0x1A-0x1B   | 2    | Heads per cylinder | CHS geometry (cosmetic). mkgmap picks from [16,32,64,128,256]. Not validated by devices. SwissTopo: 256. IOM: 16.                                                                                                                          |
+| 0x1C-0x1F   | 4    | Cylinders          | CHS geometry (cosmetic). 10-bit value, top 2 bits stored in sector field. Varies per file size.                                                                                                                                            |
+| 0x39-0x3E   | 6    | Creation date      | `year_LE(2) + month(1) + day(1) + hour(1) + min(1) + sec(1)`                                                                                                                                                                               |
+| 0x40        | 1    | FAT block number   | Physical block number of FAT start (8 = 0x1000)                                                                                                                                                                                            |
+| 0x41-0x48   | 8    | Creator string     | `GARMIN\0\0` (null-padded to 8 bytes)                                                                                                                                                                                                      |
+| 0x49-0x5C   | 20   | Map description    | ASCII, space-padded (20 bytes)                                                                                                                                                                                                             |
+| 0x5D-0x5E   | 2    | Heads (copy)       | 0x0001                                                                                                                                                                                                                                     |
+| 0x5F-0x60   | 2    | Sectors (copy)     | 0x0020                                                                                                                                                                                                                                     |
+| 0x61        | 1    | Block size exp E1  | 0x09 (base = 2^9 = 512)                                                                                                                                                                                                                    |
+| 0x62        | 1    | Block size exp E2  | 0x06 (block_size = 512 × 2^6 = 32768)                                                                                                                                                                                                      |
+| 0x63-0x64   | 2    | Total block count  | Total data blocks, or 0xFFFF if overflow                                                                                                                                                                                                   |
+| 0x1BE-0x1CD | 16   | Partition entry    | MBR-style partition table entry                                                                                                                                                                                                            |
+| 0x1FE-0x1FF | 2    | Boot signature     | 0xAA55 (standard x86 boot sector signature)                                                                                                                                                                                                |
 
 ### 1.2 Creation Date Encoding
 
@@ -377,15 +377,17 @@ RGN2 contains compound records that describe the raster tiles for each subdivisi
 
 **Record types within RGN2:**
 
-| Marker | Type                  | Description                                            |
-| ------ | --------------------- | ------------------------------------------------------ |
-| `0x0D` | POI-like record       | Variable-length, starts with `0D xx` where xx = length |
-| `0x06` | Polyline-like         | Fixed 8-byte record: `06 xx` + 6 bytes of data         |
-| `0xBC` | Boundary marker       | 3 bytes: `BC 00 00`                                    |
-| `0xDE` | Ext boundary marker   | 3 bytes: `DE 00 00`                                    |
-| `0xE0` | Raster tile (Type E0) | Tile bounds, JPEG size, image index (see below)        |
+| Marker | Type                   | Description                                                                                                                                                 |
+| ------ | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `0x06` | Polyline-like preamble | 18-byte record before each tile: `06 xx` + 16 bytes of coordinate bitstream. All-zeros is valid (degenerate polyline with delta=0 from subdivision center). |
+| `0xE0` | Raster tile (Type E0)  | Tile bounds, JPEG size, image index (see below)                                                                                                             |
+| `0x0D` | POI-like record        | Variable-length. Used in multi-map format (IOM) only. NOT present in SwissTopo single-map raster.                                                           |
+| `0xBC` | Boundary marker        | 3 bytes: `BC 00 00`. Multi-map format only.                                                                                                                 |
+| `0xDE` | Ext boundary marker    | 3 bytes: `DE 00 00`. Multi-map format only.                                                                                                                 |
 
-A typical RGN2 subdivision starts with boundary/preamble records followed by one or more Type E0 raster tile records.
+**Single-map raster format (SwissTopo):** RGN2 consists of consecutive `0x06` preamble + `0xE0` tile record pairs, with no outline records (`0x0D`), boundary markers (`0xBC`), or level separators (`0xDE`). Each subdivision's tiles are simply concatenated.
+
+**Multi-map raster format (IOM):** May include `0x0D`, `0xBC`, and `0xDE` records for boundaries between subdivisions and zoom levels.
 
 #### 4.5.2 Type E0 Raster Tile Record
 
@@ -500,33 +502,33 @@ The TRE sub-header in raster maps uses an extended 273-byte format, significantl
 
 **Bounds and section descriptors:**
 
-| TRE Offset | Size | Field                | Description                                                    |
-| ---------- | ---- | -------------------- | -------------------------------------------------------------- |
-| 0x15       | 3    | North bound          | 3-byte signed LE, map units                                    |
-| 0x18       | 3    | East bound           | 3-byte signed LE, map units                                    |
-| 0x1B       | 3    | South bound          | 3-byte signed LE, map units                                    |
-| 0x1E       | 3    | West bound           | 3-byte signed LE, map units                                    |
-| 0x21       | 8    | TRE1 (levels)        | pos(4) + size(4) — **GMP-relative** offset to level data       |
-| 0x29       | 8    | TRE2 (subdivisions)  | pos(4) + size(4) — **GMP-relative** offset to subdivision data |
-| 0x31       | 10   | TRE3 (copyright)     | pos(4) + size(4) + item_size(2) — **GMP-relative**             |
-| 0x3B       | 4    | Padding              | Zeros                                                          |
-| 0x3F       | 1    | Flags                | 0x00 or 0x01                                                   |
-| 0x40       | 2    | Display priority     | uint16 LE (20 for IOM, 24 for SwissTopo)                       |
-| 0x42       | 8    | More flags           | Typically zeros                                                |
-| 0x4A       | 14   | TRE4 descriptor      | pos(4) + size(4) + rec_size(2) + pad(4) — **GMP-relative**     |
-| 0x58       | 14   | TRE5 descriptor      | pos(4) + size(4) + rec_size(2) + pad(4) — **GMP-relative**     |
-| 0x66       | 14   | TRE6 descriptor      | pos(4) + size(4) + rec_size(2) + pad(4) — **GMP-relative**     |
-| 0x74       | 4    | Map ID               | uint32 LE                                                      |
-| 0x78       | 4    | Padding              | Zeros                                                          |
-| 0x7C       | 14   | TRE7 (raster layers) | pos(4) + size(4) + rec_size(2) + pad(4) — **GMP-relative**     |
-| 0x8A       | 14   | TRE8 (object types)  | pos(4) + size(4) + rec_size(2) + pad(6) — **GMP-relative**     |
-| 0x9A       | 16   | Map ID hash          | 16-byte hash value                                             |
-| 0xAA       | 4    | Padding              | Zeros                                                          |
-| 0xAE       | 14   | TRE9 descriptor      | pos(4) + size(4) + rec_size(2) + pad(4) — **GMP-relative**     |
-| 0xBC       | 14   | TRE10 descriptor     | pos(4) + size(4) + rec_size(2) + pad(4) — **GMP-relative**     |
-| 0xCA       | 5    | Padding              | Zeros                                                          |
-| 0xCF       | 4    | Matching number      | uint32 LE                                                      |
-| 0xD3       | rest | Map name             | Null-terminated ASCII string                                   |
+| TRE Offset | Size | Field                | Description                                                                                                                                                                                                                                               |
+| ---------- | ---- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0x15       | 3    | North bound          | 3-byte signed LE, map units                                                                                                                                                                                                                               |
+| 0x18       | 3    | East bound           | 3-byte signed LE, map units                                                                                                                                                                                                                               |
+| 0x1B       | 3    | South bound          | 3-byte signed LE, map units                                                                                                                                                                                                                               |
+| 0x1E       | 3    | West bound           | 3-byte signed LE, map units                                                                                                                                                                                                                               |
+| 0x21       | 8    | TRE1 (levels)        | pos(4) + size(4) — **GMP-relative** offset to level data                                                                                                                                                                                                  |
+| 0x29       | 8    | TRE2 (subdivisions)  | pos(4) + size(4) — **GMP-relative** offset to subdivision data                                                                                                                                                                                            |
+| 0x31       | 10   | TRE3 (copyright)     | pos(4) + size(4) + item_size(2) — **GMP-relative**                                                                                                                                                                                                        |
+| 0x3B       | 4    | Padding              | Zeros                                                                                                                                                                                                                                                     |
+| 0x3F       | 1    | Flags                | 0x00 or 0x01                                                                                                                                                                                                                                              |
+| 0x40       | 2    | Display priority     | uint16 LE (20 for IOM, 24 for SwissTopo)                                                                                                                                                                                                                  |
+| 0x42       | 8    | Parameters           | 8-byte parameter block. SwissTopo: `00 01 04 24 00 01 00 00`. GMT reports as "parameters 1 4 36 1". Byte 0x42 is a flag (0x00=SwissTopo, 0x10=IOM). Byte 0x44 is likely bits-per-coord (4=SwissTopo, 8=IOM). Byte 0x45=0x24 (36) is a tile size constant. |
+| 0x4A       | 14   | TRE4 descriptor      | pos(4) + size(4) + rec_size(2) + pad(4) — **GMP-relative**                                                                                                                                                                                                |
+| 0x58       | 14   | TRE5 descriptor      | pos(4) + size(4) + rec_size(2) + pad(4) — **GMP-relative**                                                                                                                                                                                                |
+| 0x66       | 14   | TRE6 descriptor      | pos(4) + size(4) + rec_size(2) + pad(4) — **GMP-relative**                                                                                                                                                                                                |
+| 0x74       | 4    | Map ID               | uint32 LE                                                                                                                                                                                                                                                 |
+| 0x78       | 4    | Padding              | Zeros                                                                                                                                                                                                                                                     |
+| 0x7C       | 14   | TRE7 (raster layers) | pos(4) + size(4) + rec_size(2) + pad(4) — **GMP-relative**                                                                                                                                                                                                |
+| 0x8A       | 14   | TRE8 (object types)  | pos(4) + size(4) + rec_size(2) + pad(6) — **GMP-relative**                                                                                                                                                                                                |
+| 0x9A       | 16   | Map ID hash          | 16-byte hash value                                                                                                                                                                                                                                        |
+| 0xAA       | 4    | Padding              | Zeros                                                                                                                                                                                                                                                     |
+| 0xAE       | 14   | TRE9 descriptor      | pos(4) + size(4) + rec_size(2) + pad(4) — **GMP-relative**                                                                                                                                                                                                |
+| 0xBC       | 14   | TRE10 descriptor     | pos(4) + size(4) + rec_size(2) + pad(4) — **GMP-relative**                                                                                                                                                                                                |
+| 0xCA       | 5    | Padding              | Zeros                                                                                                                                                                                                                                                     |
+| 0xCF       | 4    | Matching number      | uint32 LE                                                                                                                                                                                                                                                 |
+| 0xD3       | rest | Map name             | Null-terminated ASCII string                                                                                                                                                                                                                              |
 
 **Critical: GMP-Relative Offsets.** All `pos` values in the section descriptors above (TRE1 through TRE10) are offsets relative to the **start of the GMP data**, NOT relative to the TRE block start. This is different from what the 2005 Mechalas spec documents for vector maps, where positions are TRE-relative. For raster maps in GMP containers, positions are always GMP-relative.
 

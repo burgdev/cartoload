@@ -78,7 +78,7 @@ class IMGHeader:
 
     # File metadata
     checksum_or_id: int = (
-        0x0050  # 2 bytes at offset 0x0E, file-specific ID (0x0050 from SwissTopo_West)
+        0x0000  # 2 bytes at offset 0x0E, file-specific ID (0x0000 from SwissTopo_West)
     )
     unknown_size_field: int = 0x047A0000  # 4 bytes at offset 0x0A, purpose unclear
 

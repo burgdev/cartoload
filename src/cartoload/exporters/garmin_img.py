@@ -33,29 +33,34 @@ ExportProgressCallback = Callable[[str, int, int], None]
 
 logger = logging.getLogger(__name__)
 
-# Garmin zoom level mapping (Web Mercator zoom -> Garmin zoom codes)
-# These are the byte values stored in the TRE level record at byte offset 0.
-# GMT displays them as hex notation (e.g., 0x84 shows as "84").
-# Reference SwissTopo: levels [20,21,22,23,24], zoom [84,83,2,1,0]
-#   level 20 → byte 0x84 (132), level 21 → byte 0x83 (131),
-#   levels 22-24 → bytes 0x02, 0x01, 0x00
-_GARMIN_ZOOM_CODES = {
-    10: 0x94,
-    11: 0x93,
-    12: 0x92,
-    13: 0x91,
-    14: 0x90,
-    15: 0x8F,
-    16: 0x88,
-    17: 0x87,
-    18: 0x86,
-    19: 0x85,
-    20: 0x84,
-    21: 0x83,
-    22: 0x02,
-    23: 0x01,
-    24: 0x00,
-}
+# Garmin zoom code computation (position-based, not absolute)
+# The TRE1 level records store a zoom_code byte at offset 0.
+# Pattern (confirmed from IOM.img and SwissTopo_West.img reference files):
+#   For N levels: first level = 0x80 + (N-1), remaining count down from N-2 to 0.
+# Examples:
+#   SwissTopo 5 levels [20-24]: codes 0x84, 0x03, 0x02, 0x01, 0x00
+#   IOM 8 levels [17-24]:       codes 0x87, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0x00
+
+
+def _compute_zoom_codes(sorted_level_numbers: list[int]) -> list[tuple[int, int]]:
+    """Compute Garmin zoom codes for a set of zoom levels.
+
+    Args:
+        sorted_level_numbers: Zoom level numbers in ascending order.
+
+    Returns:
+        List of (level_number, zoom_code) tuples in the same order.
+    """
+    n = len(sorted_level_numbers)
+    codes = []
+    for i, level_num in enumerate(sorted_level_numbers):
+        if i == 0:
+            code = 0x80 + (n - 1)
+        else:
+            code = n - 1 - i
+        codes.append((level_num, code))
+    return codes
+
 
 MAP_NAME_MAX_LEN = 32
 
@@ -211,14 +216,15 @@ class GarminImgExporter(BaseExporter):
             layer_type="Raster Map",
         )
 
-        # Build zoom levels
+        # Build zoom levels with dynamically computed codes
+        sorted_zooms = sorted(layer_config.zoom_levels)
+        zoom_code_map = dict(_compute_zoom_codes(sorted_zooms))
         zoom_levels = []
-        for zl in sorted(layer_config.zoom_levels):
-            zoom_code = _GARMIN_ZOOM_CODES.get(zl, 0)
+        for zl in sorted_zooms:
             zoom_levels.append(
                 ZoomLevel(
                     level_number=zl,
-                    zoom_code=zoom_code,
+                    zoom_code=zoom_code_map[zl],
                     lat_north=bounds.get("north"),
                     lat_south=bounds.get("south"),
                     lon_west=bounds.get("west"),

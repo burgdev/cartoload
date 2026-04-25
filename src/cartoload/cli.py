@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import shutil
 import subprocess
 import sys
@@ -31,20 +32,86 @@ from .downloader.wmts import WMTSDownloader
 FOUR_GB = 4_294_967_296
 
 
-def _parse_bounds(value: str | None) -> dict[str, float] | None:
-    """Parse a 'west,south,east,north' bounds string into a dict."""
+def _parse_bbox(value: tuple[float, ...] | None) -> dict[str, float] | None:
+    """Parse a --bbox tuple of 4 floats into a bounds dict."""
     if value is None:
         return None
-    parts = value.split(",")
-    if len(parts) != 4:
+    if len(value) != 4:
         raise click.BadParameter(
-            f"Bounds must be 'west,south,east,north', got '{value}'"
+            f"Bbox requires exactly 4 values (W S E N), got {len(value)}"
         )
-    try:
-        west, south, east, north = (float(p) for p in parts)
-    except ValueError:
-        raise click.BadParameter(f"Bounds values must be numeric, got '{value}'")
+    west, south, east, north = value
     return {"west": west, "south": south, "east": east, "north": north}
+
+
+def _compute_bounds_from_center(
+    lng: float, lat: float, width_km: float, height_km: float
+) -> dict[str, float]:
+    """Convert center point + km dimensions to a bounds dict."""
+    lat_delta = height_km / 111.32 / 2
+    lng_delta = width_km / (111.32 * math.cos(math.radians(lat))) / 2
+    return {
+        "west": lng - lng_delta,
+        "east": lng + lng_delta,
+        "south": lat - lat_delta,
+        "north": lat + lat_delta,
+    }
+
+
+def _resolve_extent(
+    bbox: tuple[float, ...] | None,
+    lng: float | None,
+    lat: float | None,
+    width: float | None,
+    height: float | None,
+) -> dict[str, float] | None:
+    """Resolve extent from --bbox or --lng/--lat/--width/--height, validating mutual exclusivity."""
+    has_bbox = bbox is not None
+    has_center = (
+        lng is not None or lat is not None or width is not None or height is not None
+    )
+
+    if has_bbox and has_center:
+        raise click.BadParameter(
+            "Cannot use --bbox and --lng/--lat/--width/--height together. "
+            "Use one or the other."
+        )
+
+    if has_bbox:
+        return _parse_bbox(bbox)
+
+    if has_center:
+        if lng is None or lat is None:
+            raise click.BadParameter(
+                "--lng and --lat are required when using center+dimensions mode"
+            )
+        if width is None or height is None:
+            raise click.BadParameter(
+                "--width and --height are required when using center+dimensions mode"
+            )
+        return _compute_bounds_from_center(lng, lat, width, height)
+
+    return None
+
+
+def _validate_extent_within_layer(
+    extent: dict[str, float], layer_bounds: dict[str, float] | None
+) -> None:
+    """Validate that the requested extent fits within the layer's configured bounds."""
+    if layer_bounds is None:
+        return
+    if (
+        extent["west"] < layer_bounds["west"]
+        or extent["south"] < layer_bounds["south"]
+        or extent["east"] > layer_bounds["east"]
+        or extent["north"] > layer_bounds["north"]
+    ):
+        raise click.BadParameter(
+            f"Requested extent ({extent['west']:.4f}, {extent['south']:.4f}, "
+            f"{extent['east']:.4f}, {extent['north']:.4f}) exceeds layer bounds "
+            f"({layer_bounds['west']:.4f}, {layer_bounds['south']:.4f}, "
+            f"{layer_bounds['east']:.4f}, {layer_bounds['north']:.4f})"
+        )
 
 
 def _parse_zoom(value: str | None) -> list[int] | None:
@@ -86,26 +153,55 @@ def main() -> None:
 
 @main.command()
 @click.option(
+    "-S",
     "--sources",
     multiple=True,
     type=click.Path(exists=True),
     help="Source config file(s) (repeatable)",
 )
 @click.option(
+    "-L",
     "--layers",
     multiple=True,
     type=click.Path(exists=True),
     help="Layer config file(s) (repeatable)",
 )
-@click.option("--layer", help="Layer ID to build (required)")
-@click.option("--exporter", help="Override exporter: garmin-img")
-@click.option("--bounds", help='Override bounding box: "west,south,east,north"')
-@click.option("--zoom", help="Override zoom levels: 10,12,14")
-@click.option("--output-dir", default="./output", help="Default: ./output")
-@click.option("--cache-dir", default="./cache", help="Default: ./cache")
+@click.option("-l", "--layer", help="Layer ID to build (required)")
+@click.option("-e", "--exporter", help="Override exporter: garmin-img")
+@click.option(
+    "-b", "--bbox", nargs=4, type=float, help="Override bounding box: W S E N"
+)
+@click.option(
+    "-x",
+    "--lng",
+    type=float,
+    help="Center longitude for extent (use with --lat/--width/--height)",
+)
+@click.option(
+    "-y",
+    "--lat",
+    type=float,
+    help="Center latitude for extent (use with --lng/--width/--height)",
+)
+@click.option(
+    "-W",
+    "--width",
+    type=float,
+    help="Extent width in km (use with --lng/--lat/--height)",
+)
+@click.option(
+    "-H",
+    "--height",
+    type=float,
+    help="Extent height in km (use with --lng/--lat/--width)",
+)
+@click.option("-z", "--zoom", help="Override zoom levels: 10,12,14")
+@click.option("-o", "--output-dir", default="./output", help="Default: ./output")
+@click.option("-c", "--cache-dir", default="./cache", help="Default: ./cache")
 @click.option("--no-download", is_flag=True, help="Use existing cache only")
 @click.option("-f", "--force", is_flag=True, help="Overwrite existing output files")
 @click.option(
+    "-q",
     "--quality",
     default=85,
     type=click.IntRange(1, 100),
@@ -116,7 +212,11 @@ def build(
     layers: tuple[str, ...],
     layer: str | None,
     exporter: str | None,
-    bounds: str | None,
+    bbox: tuple[float, ...] | None,
+    lng: float | None,
+    lat: float | None,
+    width: float | None,
+    height: float | None,
     zoom: str | None,
     output_dir: str,
     cache_dir: str,
@@ -140,8 +240,11 @@ def build(
             )
         layer_config = config.layers[layer]
 
-        # Apply overrides
-        bounds_dict = _parse_bounds(bounds)
+        # Resolve extent override
+        extent = _resolve_extent(bbox, lng, lat, width, height)
+        if extent is not None:
+            _validate_extent_within_layer(extent, layer_config.bounds)
+
         zoom_list = _parse_zoom(zoom)
         if exporter:
             import dataclasses
@@ -195,7 +298,7 @@ def build(
                     out_dir,
                     no_download=no_download,
                     force=force,
-                    bounds_override=bounds_dict,
+                    bounds_override=extent,
                     zoom_override=zoom_list,
                     quality=quality,
                     progress_callback=on_progress,
@@ -218,26 +321,58 @@ def build(
 
 @main.command()
 @click.option(
+    "-S",
     "--sources",
     multiple=True,
     type=click.Path(exists=True),
     help="Source config file(s) (repeatable)",
 )
 @click.option(
+    "-L",
     "--layers",
     multiple=True,
     type=click.Path(exists=True),
     help="Layer config file(s) (repeatable)",
 )
-@click.option("--layer", help="Layer ID to download (required)")
-@click.option("--bounds", help='Override bounding box: "west,south,east,north"')
-@click.option("--zoom", help="Override zoom levels: 10,12,14")
-@click.option("--cache-dir", default="./cache", help="Default: ./cache")
+@click.option("-l", "--layer", help="Layer ID to download (required)")
+@click.option(
+    "-b", "--bbox", nargs=4, type=float, help="Override bounding box: W S E N"
+)
+@click.option(
+    "-x",
+    "--lng",
+    type=float,
+    help="Center longitude for extent (use with --lat/--width/--height)",
+)
+@click.option(
+    "-y",
+    "--lat",
+    type=float,
+    help="Center latitude for extent (use with --lng/--width/--height)",
+)
+@click.option(
+    "-W",
+    "--width",
+    type=float,
+    help="Extent width in km (use with --lng/--lat/--height)",
+)
+@click.option(
+    "-H",
+    "--height",
+    type=float,
+    help="Extent height in km (use with --lng/--lat/--width)",
+)
+@click.option("-z", "--zoom", help="Override zoom levels: 10,12,14")
+@click.option("-c", "--cache-dir", default="./cache", help="Default: ./cache")
 def download(
     sources: tuple[str, ...],
     layers: tuple[str, ...],
     layer: str | None,
-    bounds: str | None,
+    bbox: tuple[float, ...] | None,
+    lng: float | None,
+    lat: float | None,
+    width: float | None,
+    height: float | None,
     zoom: str | None,
     cache_dir: str,
 ) -> None:
@@ -258,13 +393,16 @@ def download(
         # Resolve source
         source = resolve_source(layer_config, config.sources)
 
-        # Apply overrides
-        bounds_dict = _parse_bounds(bounds)
+        # Resolve extent override
+        extent = _resolve_extent(bbox, lng, lat, width, height)
+        if extent is not None:
+            _validate_extent_within_layer(extent, layer_config.bounds)
+
         zoom_list = _parse_zoom(zoom)
         import dataclasses
 
-        if bounds_dict:
-            layer_config = dataclasses.replace(layer_config, bounds=bounds_dict)
+        if extent:
+            layer_config = dataclasses.replace(layer_config, bounds=extent)
         if zoom_list:
             layer_config = dataclasses.replace(layer_config, zoom_levels=zoom_list)
 
@@ -318,7 +456,7 @@ def download(
 @main.command()
 @click.argument("img_file", type=click.Path())
 @click.option(
-    "--output-dir", default=None, help="Output directory (default: same as input)"
+    "-o", "--output-dir", default=None, help="Output directory (default: same as input)"
 )
 def split(img_file: str, output_dir: str | None) -> None:
     """Split an oversized .img into region files."""
@@ -372,12 +510,14 @@ def split(img_file: str, output_dir: str | None) -> None:
 
 @main.command("list")
 @click.option(
+    "-S",
     "--sources",
     multiple=True,
     type=click.Path(exists=True),
     help="Source config file(s) (repeatable)",
 )
 @click.option(
+    "-L",
     "--layers",
     multiple=True,
     type=click.Path(exists=True),

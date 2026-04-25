@@ -146,9 +146,9 @@ class WMTSDownloader(BaseDownloader):
         tile_size = 40075016.68557849 / 2**zoom  # 2 * pi * 6378137 / 2^z
 
         left = origin + x * tile_size
-        top = origin + y * tile_size
+        top = -origin - y * tile_size  # Y starts from +20M (85° N), decreases south
         right = left + tile_size
-        bottom = top + tile_size
+        bottom = top - tile_size
 
         return (left, top, right, bottom)
 

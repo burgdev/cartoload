@@ -91,7 +91,6 @@ LBL_HEADER_LENGTH = 596  # LBL sub-header length
 NET_HEADER_LENGTH = 100  # NET sub-header length
 TILE_INDEX_ENTRY_SIZE = 4  # Tile index: one uint32 per tile
 RGN2_POLYLINE_PREAMBLE_SIZE = 18  # Type 0x06 polyline record before each E0 tile
-RGN2_RASTER_OUTLINE_SIZE = 20  # Type 0x0D polygon outline record before each zoom level
 MPS_SUBFILE_SIZE = 98
 
 
@@ -287,11 +286,9 @@ class LayoutComputer:
         # RGN data sections:
         # RGN1: minimal (empty or near-empty for raster maps)
         rgn1_data = 0
-        # RGN2: Raster outline + Polyline preamble + Type E0 record per tile
+        # RGN2: Polyline preamble + Type E0 record per tile (no outline records — SwissTopo reference)
         type_e0_record_size = 23 if total_tiles < 256 else 24
-        rgn2_data = n_zoom * RGN2_RASTER_OUTLINE_SIZE + total_tiles * (
-            RGN2_POLYLINE_PREAMBLE_SIZE + type_e0_record_size
-        )
+        rgn2_data = total_tiles * (RGN2_POLYLINE_PREAMBLE_SIZE + type_e0_record_size)
 
         # LBL labels (tile filenames)
         lbl_labels = sum(len(f"{i}.jpg\0".encode("ascii")) for i in range(total_tiles))
@@ -365,8 +362,8 @@ class IMGHeaderWriter:
         # Offset 0x18-0x19: Sectors per track
         struct.pack_into("<H", buf, 0x18, 0x0020)
 
-        # Offset 0x1A-0x1B: Heads per cylinder (XOR byte is at 0x00, this is disk geometry)
-        struct.pack_into("<H", buf, 0x1A, 0x0001)
+        # Offset 0x1A-0x1B: Heads per cylinder (must be 256 to match SwissTopo reference)
+        struct.pack_into("<H", buf, 0x1A, 0x0100)
 
         # Offset 0x39-0x3E: Creation date (6 bytes)
         date_bytes = header.encode_creation_date()
@@ -385,7 +382,7 @@ class IMGHeaderWriter:
         buf[0x49:0x5D] = map_desc
 
         # Offset 0x5D-0x5E: Heads (copy of 0x1A)
-        struct.pack_into("<H", buf, 0x5D, 0x0001)
+        struct.pack_into("<H", buf, 0x5D, 0x0100)
 
         # Offset 0x5F-0x60: Sectors (copy of 0x18)
         struct.pack_into("<H", buf, 0x5F, 0x0020)
@@ -690,14 +687,11 @@ class GMPWriter:
         rgn1_pos = pos  # GMP-relative
         rgn1_size = 0
 
-        # RGN2: Raster outline + polyline preamble + Type E0 records per zoom level
+        # RGN2: Polyline preamble + Type E0 records per tile (no outline records)
         rgn2_pos = pos  # GMP-relative
         type_e0_record_size = 23 if total_tiles < 256 else 24
-        # Each zoom level starts with a 0x0D polygon outline record,
-        # followed by N tiles each with a polyline preamble + E0 record
-        rgn2_size = n_zoom * RGN2_RASTER_OUTLINE_SIZE + total_tiles * (
-            RGN2_POLYLINE_PREAMBLE_SIZE + type_e0_record_size
-        )
+        # Each tile has a polyline preamble + E0 record (no per-zoom outline records)
+        rgn2_size = total_tiles * (RGN2_POLYLINE_PREAMBLE_SIZE + type_e0_record_size)
         pos += rgn2_size
 
         # --- LBL labels (tile filenames) ---
@@ -774,8 +768,6 @@ class GMPWriter:
             rgn_tile_offset += tile_count * (
                 RGN2_POLYLINE_PREAMBLE_SIZE + type_e0_record_size
             )
-            # Account for the raster outline record at the start of this zoom level
-            rgn_tile_offset += RGN2_RASTER_OUTLINE_SIZE
 
         # --- Phase 2: Write all sections ---
 
@@ -860,15 +852,14 @@ class GMPWriter:
 
         # 13. TRE7 data: raster layer offset table (4 bytes per entry)
         # Each entry: uint32 LE offset into RGN2 data section
-        # Points to the 0x0D raster outline record for each zoom level
-        # Matches IOM reference format: rec_size=4, no flag byte
+        # Points to the first polyline preamble for each zoom level
         rgn2_offset = 0
         for z_idx, zoom in enumerate(img_file.zoom_levels):
             tile_count = len(compressed_tiles.get(zoom.level_number, []))
-            # Write offset to the 0x0D raster outline record for this zoom level
+            # Write offset to the first preamble+E0 pair for this zoom level
             f.write(struct.pack("<I", rgn2_offset))
-            # Advance past the outline record and all polyline+E0 pairs
-            rgn2_offset += RGN2_RASTER_OUTLINE_SIZE + tile_count * (
+            # Advance past all preamble+E0 pairs (no outline records)
+            rgn2_offset += tile_count * (
                 RGN2_POLYLINE_PREAMBLE_SIZE + type_e0_record_size
             )
 
@@ -966,12 +957,11 @@ def _build_tre_subheader(
     struct.pack_into("<H", buf, 0x40, 24)
 
     # TRE+0x42: More flags / parameters (8 bytes)
-    # IOM reference: 10 01 08 24 00 01 00 00
-    # GMT reports "parameters 1 8 36 1" (IOM) or "parameters 1 4 36 1" (SwissTopo)
-    # Byte 0x42=0x10 is a flag byte (bit 4 set in IOM, bit 4 set indicates raster?)
-    buf[0x42] = 0x10  # flag byte (IOM reference: 0x10)
+    # SwissTopo reference: 00 01 04 24 00 01 00 00
+    # GMT reports "parameters 1 4 36 1" for SwissTopo
+    buf[0x42] = 0x00  # flag byte (SwissTopo reference: 0x00)
     buf[0x43] = 0x01  # parameter 1
-    buf[0x44] = 0x08  # parameter 2 (bits per coord: 8 for IOM, 4 for SwissTopo)
+    buf[0x44] = 0x04  # parameter 2 (bits per coord: 4 for SwissTopo)
     buf[0x45] = 0x24  # parameter 3 (36 = tile_size_constant)
     buf[0x46] = 0x00
     buf[0x47] = 0x01  # parameter 4
@@ -1286,28 +1276,6 @@ def _write_polyline_preamble(
     f.write(b"\x00" * 16)
 
 
-def _write_raster_outline_record(
-    f: io.BufferedWriter,
-    center_lat: float,
-    center_lon: float,
-) -> None:
-    """Write a 0x0D raster outline record (polygon) before each zoom level's tile data.
-
-    This record is referenced by TRE7 entries and tells GMT/Garmin that the
-    following data contains raster bitmap tiles. The record is a minimal polygon
-    (type 0x0D, subtype 0x01) with a degenerate outline at the subdivision center.
-
-    Format: type(1) + subtype(1) + lon_delta(int16) + lat_delta(int16) + bitstream(14) = 20 bytes.
-    """
-    # Type 0x0D (polygon), subtype 0x01 (raster outline marker)
-    f.write(bytes([0x0D, 0x01]))
-    # Zero deltas (at subdivision center)
-    f.write(struct.pack("<h", 0))  # lon_delta
-    f.write(struct.pack("<h", 0))  # lat_delta
-    # Minimal bitstream (14 bytes of zeros)
-    f.write(b"\x00" * 14)
-
-
 def _write_rgn_data_section(
     f: io.BufferedWriter,
     compressed_tiles: CompressedTiles,
@@ -1315,17 +1283,14 @@ def _write_rgn_data_section(
     img_file,
 ) -> None:
     """
-    Write RGN data section (raster outline + polyline preamble + Type E0 records).
+    Write RGN data section (polyline preamble + Type E0 records).
 
-    For each zoom level, writes:
-      1. Raster outline record (20 bytes): type 0x0D, subtype 0x01, + outline data
-    Then for each raster tile at that level:
-      2. Polyline preamble (18 bytes): type 0x06, subtype 0xB3, + 16 data bytes
-      3. Type E0 record (23-24 bytes): tile bounds, JPEG size, image index
+    For each raster tile, writes:
+      1. Polyline preamble (18 bytes): type 0x06, subtype 0xB3, + 16 data bytes
+      2. Type E0 record (23-24 bytes): tile bounds, JPEG size, image index
 
-    The raster outline record is referenced by TRE7 offset entries and is required
-    for GMT to detect bitmaps in the IMG file. The polyline preamble provides
-    additional line element metadata for the Garmin renderer.
+    The polyline preamble provides line element metadata for the Garmin renderer.
+    SwissTopo reference uses this structure without separate outline records.
 
     Uses per-tile geographic bounds when available (from tile extraction),
     falling back to full map bounds as a default.
@@ -1349,8 +1314,6 @@ def _write_rgn_data_section(
     for zoom in zoom_levels:
         tiles = compressed_tiles.get(zoom.level_number, [])
 
-        # Write raster outline record (0x0D) at the start of each zoom level
-        _write_raster_outline_record(f, center_lat, center_lon)
         for tile_entry in tiles:
             if isinstance(tile_entry, tuple):
                 jpeg_data, tile_bounds = tile_entry

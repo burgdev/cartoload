@@ -419,9 +419,9 @@ class TestTileEncoder:
 class TestPyramidGeneration:
     def test_pyramid_multiple_zoom_levels(self):
         zoom_levels = [
-            ZoomLevel(level_number=10, zoom_code=84),
-            ZoomLevel(level_number=11, zoom_code=83),
-            ZoomLevel(level_number=12, zoom_code=2),
+            ZoomLevel(level_number=10, zoom_code=0x82),
+            ZoomLevel(level_number=11, zoom_code=0x01),
+            ZoomLevel(level_number=12, zoom_code=0x00),
         ]
         compressed_tiles = {
             10: [b"\xff\xd8" + b"\x00" * 500] * 2,
@@ -440,7 +440,7 @@ class TestPyramidGeneration:
         assert gmp_layout.data_size >= total_tile_data
 
     def test_single_zoom_level(self):
-        zoom_levels = [ZoomLevel(level_number=14, zoom_code=0)]
+        zoom_levels = [ZoomLevel(level_number=14, zoom_code=0x80)]
         compressed_tiles = {14: [b"\xff\xd8" + b"\x00" * 100] * 3}
         img_file = _make_img_file(zoom_levels=zoom_levels)
         computer = LayoutComputer(img_file, compressed_tiles)
@@ -494,9 +494,12 @@ class TestAttributionEmbedding:
     def test_heads_and_sectors_fields(self):
         header = _make_header()
         data = IMGHeaderWriter.serialize(header)
-        # Heads at 0x5D (copy of 0x1A)
+        # Heads at 0x5D (copy of 0x1A) — must be 256 (0x0100) to match SwissTopo reference
         heads = struct.unpack_from("<H", data, 0x5D)[0]
-        assert heads == 0x0001
+        assert heads == 0x0100
+        # Also check at 0x1A directly
+        heads_1a = struct.unpack_from("<H", data, 0x1A)[0]
+        assert heads_1a == 0x0100
         # Sectors at 0x5F (copy of 0x18)
         sectors = struct.unpack_from("<H", data, 0x5F)[0]
         assert sectors == 0x0020
@@ -638,7 +641,7 @@ class TestFATBlockCalculation:
 class TestIMGFileWrite:
     def test_write_minimal_img(self, tmp_path):
         output = tmp_path / "test.img"
-        zoom_levels = [ZoomLevel(level_number=12, zoom_code=2)]
+        zoom_levels = [ZoomLevel(level_number=12, zoom_code=0x80)]
         compressed_tiles = {
             12: [b"\xff\xd8" + b"\x00" * 100] * 3,
         }
@@ -660,9 +663,9 @@ class TestIMGFileWrite:
     def test_write_multi_zoom_img(self, tmp_path):
         output = tmp_path / "multi.img"
         zoom_levels = [
-            ZoomLevel(level_number=10, zoom_code=84),
-            ZoomLevel(level_number=11, zoom_code=83),
-            ZoomLevel(level_number=12, zoom_code=2),
+            ZoomLevel(level_number=10, zoom_code=0x82),
+            ZoomLevel(level_number=11, zoom_code=0x01),
+            ZoomLevel(level_number=12, zoom_code=0x00),
         ]
         compressed_tiles = {
             10: [b"\xff\xd8" + b"\x00" * 200],
@@ -678,7 +681,7 @@ class TestIMGFileWrite:
 
     def test_fat_entries_written(self, tmp_path):
         output = tmp_path / "fat_test.img"
-        zoom_levels = [ZoomLevel(level_number=12, zoom_code=2)]
+        zoom_levels = [ZoomLevel(level_number=12, zoom_code=0x80)]
         compressed_tiles = {12: [b"\x00" * 100]}
         img_file = _make_img_file(zoom_levels=zoom_levels)
         writer = IMGWriter(output)
@@ -700,7 +703,7 @@ class TestIMGFileWrite:
         output = tmp_path / "size_test.img"
         # Use larger tile data to verify it's all included
         tile_data = b"\xff\xd8" + b"\xab" * 10000
-        zoom_levels = [ZoomLevel(level_number=12, zoom_code=2)]
+        zoom_levels = [ZoomLevel(level_number=12, zoom_code=0x80)]
         compressed_tiles = {12: [tile_data] * 5}
         img_file = _make_img_file(zoom_levels=zoom_levels)
         writer = IMGWriter(output)
@@ -723,8 +726,8 @@ class TestIMGFileWrite:
         """
         output = tmp_path / "tile_index_test.img"
         zoom_levels = [
-            ZoomLevel(level_number=10, zoom_code=94),
-            ZoomLevel(level_number=12, zoom_code=92),
+            ZoomLevel(level_number=10, zoom_code=0x81),
+            ZoomLevel(level_number=12, zoom_code=0x00),
         ]
         # Create distinguishable tile data for each zoom level
         tile_10a = b"\xff\xd8\xff\xe0" + b"\x0a" * 500
@@ -799,9 +802,9 @@ class TestIMGFileWrite:
         """
         output = tmp_path / "multi_zoom_index.img"
         zoom_levels = [
-            ZoomLevel(level_number=10, zoom_code=94),
-            ZoomLevel(level_number=11, zoom_code=93),
-            ZoomLevel(level_number=12, zoom_code=92),
+            ZoomLevel(level_number=10, zoom_code=0x82),
+            ZoomLevel(level_number=11, zoom_code=0x01),
+            ZoomLevel(level_number=12, zoom_code=0x00),
         ]
         compressed_tiles = {
             10: [b"\xff\xd8" + b"\x10" * 200] * 2,
@@ -871,8 +874,8 @@ class TestIntegrationWrite:
         """Write a small but complete .img file with 2 zoom levels."""
         output = tmp_path / "integration_test.img"
         zoom_levels = [
-            ZoomLevel(level_number=12, zoom_code=92),
-            ZoomLevel(level_number=13, zoom_code=91),
+            ZoomLevel(level_number=12, zoom_code=0x81),
+            ZoomLevel(level_number=13, zoom_code=0x00),
         ]
         # Small tiles (real JPEG data)
         tile_12 = np.full((256, 256, 3), 100, dtype=np.uint8)
@@ -912,7 +915,7 @@ class TestIntegrationWrite:
             pytest.skip("gmt not available on PATH")
 
         output = tmp_path / "gmt_validated.img"
-        zoom_levels = [ZoomLevel(level_number=12, zoom_code=92)]
+        zoom_levels = [ZoomLevel(level_number=12, zoom_code=0x80)]
         tile = np.full((256, 256, 3), 128, dtype=np.uint8)
         compressed_tiles = {12: [TileEncoder.encode_tile(tile)]}
 
@@ -966,7 +969,7 @@ class TestLBL28LBL29TypeE0:
     def test_lbl28_section_present_in_subheader(self, tmp_path):
         """Verify LBL sub-header contains LBL28 section descriptor."""
         output = tmp_path / "test_lbl28.img"
-        zoom_levels = [ZoomLevel(level_number=12, zoom_code=92)]
+        zoom_levels = [ZoomLevel(level_number=12, zoom_code=0x80)]
         tile = np.full((256, 256, 3), 128, dtype=np.uint8)
         compressed_tiles = {12: [TileEncoder.encode_tile(tile)]}
 
@@ -997,7 +1000,7 @@ class TestLBL28LBL29TypeE0:
     def test_lbl28_contains_uint32_offsets(self, tmp_path):
         """Verify LBL28 contains N × uint32 offsets where N = tile count."""
         output = tmp_path / "test_lbl28_offsets.img"
-        zoom_levels = [ZoomLevel(level_number=12, zoom_code=92)]
+        zoom_levels = [ZoomLevel(level_number=12, zoom_code=0x80)]
         # Create 3 tiles
         tiles = [np.full((256, 256, 3), val, dtype=np.uint8) for val in [100, 150, 200]]
         compressed_tiles = {12: [TileEncoder.encode_tile(t) for t in tiles]}
@@ -1036,7 +1039,7 @@ class TestLBL28LBL29TypeE0:
     def test_lbl29_section_present_in_subheader(self, tmp_path):
         """Verify LBL sub-header contains LBL29 section descriptor."""
         output = tmp_path / "test_lbl29.img"
-        zoom_levels = [ZoomLevel(level_number=12, zoom_code=92)]
+        zoom_levels = [ZoomLevel(level_number=12, zoom_code=0x80)]
         tile = np.full((256, 256, 3), 128, dtype=np.uint8)
         compressed_tiles = {12: [TileEncoder.encode_tile(tile)]}
 
@@ -1062,7 +1065,7 @@ class TestLBL28LBL29TypeE0:
     def test_lbl29_contains_jpeg_files(self, tmp_path):
         """Verify LBL29 contains concatenated JPEG files with FFD8FFE0 markers."""
         output = tmp_path / "test_lbl29_jpegs.img"
-        zoom_levels = [ZoomLevel(level_number=12, zoom_code=92)]
+        zoom_levels = [ZoomLevel(level_number=12, zoom_code=0x80)]
         # Create 2 tiles
         tiles = [np.full((256, 256, 3), val, dtype=np.uint8) for val in [100, 200]]
         compressed_tiles = {12: [TileEncoder.encode_tile(t) for t in tiles]}
@@ -1098,7 +1101,7 @@ class TestLBL28LBL29TypeE0:
     def test_rgn_data_contains_type_e0_records(self, tmp_path):
         """Verify RGN data section contains Type E0 records starting with 0xE0 marker."""
         output = tmp_path / "test_type_e0.img"
-        zoom_levels = [ZoomLevel(level_number=12, zoom_code=92)]
+        zoom_levels = [ZoomLevel(level_number=12, zoom_code=0x80)]
         tile = np.full((256, 256, 3), 128, dtype=np.uint8)
         compressed_tiles = {12: [TileEncoder.encode_tile(tile)]}
 
@@ -1116,7 +1119,7 @@ class TestLBL28LBL29TypeE0:
     def test_type_e0_record_count_matches_tile_count(self, tmp_path):
         """Verify Type E0 record count matches tile count."""
         output = tmp_path / "test_type_e0_count.img"
-        zoom_levels = [ZoomLevel(level_number=12, zoom_code=92)]
+        zoom_levels = [ZoomLevel(level_number=12, zoom_code=0x80)]
         # Create 5 tiles
         tiles = [
             np.full((256, 256, 3), val, dtype=np.uint8) for val in range(100, 150, 10)
@@ -1135,7 +1138,7 @@ class TestLBL28LBL29TypeE0:
     def test_type_e0_bits_field_under_256_tiles(self, tmp_path):
         """Verify Type E0 bits_field is 0x2B for <256 tiles."""
         output = tmp_path / "test_bits_field_2b.img"
-        zoom_levels = [ZoomLevel(level_number=12, zoom_code=92)]
+        zoom_levels = [ZoomLevel(level_number=12, zoom_code=0x80)]
         # Create 10 tiles (< 256)
         tiles = [np.full((256, 256, 3), 128, dtype=np.uint8) for _ in range(10)]
         compressed_tiles = {12: [TileEncoder.encode_tile(t) for t in tiles]}
@@ -1152,7 +1155,7 @@ class TestLBL28LBL29TypeE0:
     def test_tile_index_table_not_present(self, tmp_path):
         """Verify tile index table is NOT present (replaced by LBL28/LBL29)."""
         output = tmp_path / "test_no_tile_index.img"
-        zoom_levels = [ZoomLevel(level_number=12, zoom_code=92)]
+        zoom_levels = [ZoomLevel(level_number=12, zoom_code=0x80)]
         tile = np.full((256, 256, 3), 128, dtype=np.uint8)
         compressed_tiles = {12: [TileEncoder.encode_tile(tile)]}
 
@@ -1185,7 +1188,7 @@ class TestLBL28LBL29TypeE0:
             pytest.skip("gmt not available on PATH")
 
         output = tmp_path / "test_gmt_bitmaps.img"
-        zoom_levels = [ZoomLevel(level_number=12, zoom_code=92)]
+        zoom_levels = [ZoomLevel(level_number=12, zoom_code=0x80)]
         # Create 3 tiles
         tiles = [np.full((256, 256, 3), val, dtype=np.uint8) for val in [100, 150, 200]]
         compressed_tiles = {12: [TileEncoder.encode_tile(t) for t in tiles]}

@@ -77,26 +77,26 @@ These three hex values represent:
 
 The first 512 bytes (`0x000` - `0x1FF`) constitute the main IMG header. Analysis of the hex dumps reveals:
 
-| Offset            | Length | Field                  | Est Value              | West Value             | Notes                                                    |
-| ----------------- | ------ | ---------------------- | ---------------------- | ---------------------- | -------------------------------------------------------- |
-| `0x00` - `0x0F`   | 16     | Reserved / padding     | `00`                   | `00`                   | Typically zeroed                                         |
-| `0x10` - `0x15`   | 6      | Signature              | `DSKIMG`               | `DSKIMG`               | Magic bytes identifying this as an IMG disk image        |
-| `0x16`            | 1      | Unknown                | `00`                   | `00`                   | Often zero                                               |
-| `0x17`            | 1      | Format marker          | `02`                   | `02`                   | Constant `0x02` in both samples                          |
-| `0x18` - `0x19`   | 2      | Block size indicator   | `0x2000` (LE)          | `0x2000` (LE)          | 8192 decimal; may relate to FAT page size                |
-| `0x1A` - `0x1B`   | 2      | Unknown                | `0x0001`               | `0x0001`               |                                                          |
-| `0x1C` - `0x1F`   | 4      | Unknown / year-related | `0x00000153`           | `0x00000165`           | Differs between files                                    |
-| `0x37`            | 1      | XOR mask               | `0x00`                 | `0x00`                 | XOR byte used for obfuscation (0 = none)                 |
-| `0x38` - `0x3B`   | 4      | Date fields            | `E6 07 04 14`          | `E6 07 04 10`          | Creation date encoding                                   |
-| `0x3C` - `0x3D`   | 2      | Date fields cont.      | `11 0A`                | `0F 03`                | Time-related fields                                      |
-| `0x3E`            | 1      | Unknown                | `16`                   | `38`                   | Varies between files                                     |
-| `0x40` - `0x45`   | 6      | "GARMIN" marker        | `GARMIN`               | `GARMIN`               | Fixed string constant                                    |
-| `0x47` - `0x??`   | var    | Mapset name            | `Svizzera_E Raster Ma` | `Svizzera_W Raster Ma` | Null-terminated string                                   |
-| `0x1C0` - `0x1C3` | 4      | FAT descriptor         | `010000FF`             | `010000FF`             | Fixed pattern; flags for FAT configuration               |
-| `0x1C4` - `0x1C7` | 4      | Data blocks count?     | `0x00005260`           | `0x00006460`           | Differs; may represent total block count                 |
-| `0x1C8` - `0x1CB` | 4      | Unknown                | `0x00000000`           | `0x00000000`           |                                                          |
-| `0x1CC` - `0x1CF` | 4      | Data size related      | `0x00002A60`           | `0x00002CA0`           | Differs between files                                    |
-| `0x1FE` - `0x1FF` | 2      | Boot signature         | `0x55AA`               | `0x55AA`               | Classic MBR-style signature marking end of header sector |
+| Offset            | Length | Field              | Est Value              | West Value             | Notes                                                     |
+| ----------------- | ------ | ------------------ | ---------------------- | ---------------------- | --------------------------------------------------------- |
+| `0x00` - `0x0F`   | 16     | Reserved / padding | `00`                   | `00`                   | Typically zeroed                                          |
+| `0x10` - `0x15`   | 6      | Signature          | `DSKIMG`               | `DSKIMG`               | Magic bytes identifying this as an IMG disk image         |
+| `0x16`            | 1      | Unknown            | `00`                   | `00`                   | Often zero                                                |
+| `0x17`            | 1      | Format marker      | `02`                   | `02`                   | Constant `0x02` in both samples                           |
+| `0x18` - `0x19`   | 2      | Sectors per track  | `0x0020` (32)          | `0x0020` (32)          | CHS geometry: sectors per track (cosmetic, not validated) |
+| `0x1A` - `0x1B`   | 2      | Heads per cylinder | `0x0100` (256)         | `0x0100` (256)         | CHS geometry: heads (must be >= file size in sectors)     |
+| `0x1C` - `0x1F`   | 4      | Cylinders          | `0x00000153`           | `0x00000165`           | CHS geometry: cylinders (10-bit, top 2 bits in sector)    |
+| `0x37`            | 1      | XOR mask           | `0x00`                 | `0x00`                 | XOR byte used for obfuscation (0 = none)                  |
+| `0x38` - `0x3B`   | 4      | Date fields        | `E6 07 04 14`          | `E6 07 04 10`          | Creation date encoding                                    |
+| `0x3C` - `0x3D`   | 2      | Date fields cont.  | `11 0A`                | `0F 03`                | Time-related fields                                       |
+| `0x3E`            | 1      | Unknown            | `16`                   | `38`                   | Varies between files                                      |
+| `0x40` - `0x45`   | 6      | "GARMIN" marker    | `GARMIN`               | `GARMIN`               | Fixed string constant                                     |
+| `0x47` - `0x??`   | var    | Mapset name        | `Svizzera_E Raster Ma` | `Svizzera_W Raster Ma` | Null-terminated string                                    |
+| `0x1C0` - `0x1C3` | 4      | FAT descriptor     | `010000FF`             | `010000FF`             | Fixed pattern; flags for FAT configuration                |
+| `0x1C4` - `0x1C7` | 4      | Data blocks count? | `0x00005260`           | `0x00006460`           | Differs; may represent total block count                  |
+| `0x1C8` - `0x1CB` | 4      | Unknown            | `0x00000000`           | `0x00000000`           |                                                           |
+| `0x1CC` - `0x1CF` | 4      | Data size related  | `0x00002A60`           | `0x00002CA0`           | Differs between files                                     |
+| `0x1FE` - `0x1FF` | 2      | Boot signature     | `0x55AA`               | `0x55AA`               | Classic MBR-style signature marking end of header sector  |
 
 ### Subfile FAT Entry Format
 
@@ -550,17 +550,21 @@ Data MPS
 
 ## Appendix B: Confidence Levels
 
-| Finding                                                  | Confidence | Basis                                                   |
-| -------------------------------------------------------- | ---------- | ------------------------------------------------------- |
-| GMP and MPS are the only subfile types in raster IMGs    | **High**   | Directly observed in both samples                       |
-| FAT start is always at 0x1000                            | **Medium** | Consistent across both samples, but only 2 samples      |
-| Block size is 32,768 for raster maps                     | **Medium** | Observed in both samples; other block sizes may be used |
-| NT type means "NT format" (newer container)              | **High**   | Consistent with Garmin format documentation             |
-| GMP subfile naming is hex-encoded Map ID                 | **High**   | Confirmed by decimal-to-hex conversion matching         |
-| MPS subfile is always named MAPSOURC                     | **High**   | Standard Garmin convention                              |
-| MPS is always 98 bytes in raster maps                    | **Low**    | Only 2 samples; size may vary with name length          |
-| Header signature is always DSKIMG at 0x10                | **High**   | Consistent across both samples and known format docs    |
-| 0x55AA boot signature at 0x1FE                           | **High**   | Classic MBR-style signature, both samples               |
-| Draw order (priority) 24 is standard for raster basemaps | **Medium** | Both samples agree, but other values may work           |
-| Parameters `1 4 36 1` are encoding settings              | **Low**    | Inferred; exact meaning uncertain                       |
-| Zoom values [84,83,2,1,0] represent resolution levels    | **Medium** | Pattern is clear but exact mapping needs verification   |
+| Finding                                                  | Confidence | Basis                                                                                                                     |
+| -------------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------- |
+| GMP and MPS are the only subfile types in raster IMGs    | **High**   | Directly observed in both samples                                                                                         |
+| FAT start is always at 0x1000                            | **Medium** | Consistent across both samples, but only 2 samples                                                                        |
+| Block size is 32,768 for raster maps                     | **Medium** | Observed in both samples; other block sizes may be used                                                                   |
+| NT type means "NT format" (newer container)              | **High**   | Consistent with Garmin format documentation                                                                               |
+| GMP subfile naming is hex-encoded Map ID                 | **High**   | Confirmed by decimal-to-hex conversion matching                                                                           |
+| MPS subfile is always named MAPSOURC                     | **High**   | Standard Garmin convention                                                                                                |
+| MPS is always 98 bytes in raster maps                    | **Low**    | Only 2 samples; size may vary with name length                                                                            |
+| Header signature is always DSKIMG at 0x10                | **High**   | Consistent across both samples and known format docs                                                                      |
+| 0x55AA boot signature at 0x1FE                           | **High**   | Classic MBR-style signature, both samples                                                                                 |
+| Draw order (priority) 24 is standard for raster basemaps | **Medium** | Both samples agree, but other values may work                                                                             |
+| Parameters `1 4 36 1` are encoding settings              | **Medium** | Byte 0x44=bits-per-coord (4 vs 8), 0x45=tile size constant (36). Confirmed by SwissTopo binary match.                     |
+| Zoom values [84,83,2,1,0] represent resolution levels    | **Medium** | Pattern is clear but exact mapping needs verification                                                                     |
+| CHS geometry (heads/sectors/cylinders) is cosmetic       | **High**   | mkgmap source: "doesn't appear to have any effect on a garmin device". Picks smallest s×h×c > file_size.                  |
+| Checksum/ID at 0x0E is not validated                     | **High**   | mkgmap always sets 0x0000 ("Checksum is not checked"). GPXSee doesn't validate. SwissTopo uses non-zero but not required. |
+| TRE+0x42 flag byte (0x00 vs 0x10)                        | **Medium** | SwissTopo=0x00, IOM=0x10. Meaning unclear but both work. Our file matches SwissTopo.                                      |
+| TRE+0x44 bits-per-coord (4 vs 8)                         | **Medium** | SwissTopo=4, IOM=8. Likely coordinate encoding resolution.                                                                |

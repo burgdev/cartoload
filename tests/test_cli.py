@@ -9,7 +9,15 @@ import click.testing
 import pytest
 import yaml
 
-from cartoload.cli import _human_size, _parse_bounds, _parse_zoom, main
+from cartoload.cli import (
+    _compute_bounds_from_center,
+    _human_size,
+    _parse_bbox,
+    _parse_zoom,
+    _resolve_extent,
+    _validate_extent_within_layer,
+    main,
+)
 from cartoload.pipeline import DownloadError
 
 
@@ -64,21 +72,79 @@ def runner() -> click.testing.CliRunner:
 # ---------------------------------------------------------------------------
 
 
-class TestParseBounds:
+class TestParseBbox:
     def test_valid(self):
-        result = _parse_bounds("5.0,45.0,10.0,48.0")
+        result = _parse_bbox((5.0, 45.0, 10.0, 48.0))
         assert result == {"west": 5.0, "south": 45.0, "east": 10.0, "north": 48.0}
 
     def test_none(self):
-        assert _parse_bounds(None) is None
+        assert _parse_bbox(None) is None
 
-    def test_invalid_parts_count(self):
-        with pytest.raises(click.BadParameter, match="west,south,east,north"):
-            _parse_bounds("1,2,3")
+    def test_wrong_length(self):
+        with pytest.raises(click.BadParameter, match="4 values"):
+            _parse_bbox((1.0, 2.0))
 
-    def test_non_numeric(self):
-        with pytest.raises(click.BadParameter, match="numeric"):
-            _parse_bounds("a,b,c,d")
+
+class TestComputeBoundsFromCenter:
+    def test_known_coordinates(self):
+        """Center at (7.45, 46.9), 20 km wide, 10 km tall."""
+        result = _compute_bounds_from_center(7.45, 46.9, 20, 10)
+        # Latitude delta: 10 / 111.32 / 2 ≈ 0.0449
+        assert abs(result["south"] - (46.9 - 0.04492)) < 0.001
+        assert abs(result["north"] - (46.9 + 0.04492)) < 0.001
+        # Longitude delta: 20 / (111.32 * cos(46.9°)) / 2
+        # cos(46.9°) ≈ 0.6820 → delta ≈ 0.1319
+        assert abs(result["west"] - (7.45 - 0.1319)) < 0.001
+        assert abs(result["east"] - (7.45 + 0.1319)) < 0.001
+
+    def test_symmetric(self):
+        result = _compute_bounds_from_center(0.0, 0.0, 100, 100)
+        assert abs(result["west"] + result["east"]) < 0.001
+        assert abs(result["south"] + result["north"]) < 0.001
+
+
+class TestResolveExtent:
+    def test_no_args(self):
+        assert _resolve_extent(None, None, None, None, None) is None
+
+    def test_bbox_mode(self):
+        result = _resolve_extent((7.0, 46.0, 8.0, 47.0), None, None, None, None)
+        assert result == {"west": 7.0, "south": 46.0, "east": 8.0, "north": 47.0}
+
+    def test_center_mode(self):
+        result = _resolve_extent(None, 7.45, 46.9, 20.0, 10.0)
+        assert result is not None
+        assert result["west"] < 7.45 < result["east"]
+        assert result["south"] < 46.9 < result["north"]
+
+    def test_mutual_exclusivity(self):
+        with pytest.raises(click.BadParameter, match="Cannot use"):
+            _resolve_extent((7.0, 46.0, 8.0, 47.0), 7.45, 46.9, 20.0, 10.0)
+
+    def test_center_missing_lat(self):
+        with pytest.raises(click.BadParameter, match="--lng and --lat"):
+            _resolve_extent(None, 7.45, None, 20.0, 10.0)
+
+    def test_center_missing_width(self):
+        with pytest.raises(click.BadParameter, match="--width and --height"):
+            _resolve_extent(None, 7.45, 46.9, None, 10.0)
+
+
+class TestValidateExtentWithinLayer:
+    def test_contained(self):
+        extent = {"west": 7.0, "south": 46.0, "east": 8.0, "north": 47.0}
+        layer_bounds = {"west": 5.0, "south": 45.0, "east": 10.0, "north": 48.0}
+        _validate_extent_within_layer(extent, layer_bounds)  # no error
+
+    def test_exceeds(self):
+        extent = {"west": 4.0, "south": 44.0, "east": 11.0, "north": 49.0}
+        layer_bounds = {"west": 5.0, "south": 45.0, "east": 10.0, "north": 48.0}
+        with pytest.raises(click.BadParameter, match="exceeds layer bounds"):
+            _validate_extent_within_layer(extent, layer_bounds)
+
+    def test_no_layer_bounds(self):
+        extent = {"west": 7.0, "south": 46.0, "east": 8.0, "north": 47.0}
+        _validate_extent_within_layer(extent, None)  # no error
 
 
 class TestParseZoom:
@@ -416,3 +482,146 @@ class TestErrorMessages:
         assert result.exit_code == 0
         assert "test_layer" in result.output
         assert "Test Layer" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Extent override CLI integration
+# ---------------------------------------------------------------------------
+
+
+class TestBuildExtentOverride:
+    @patch("cartoload.cli.asyncio.run")
+    def test_bbox_override(self, mock_asyncio_run, runner, tmp_path):
+        src, lyr = _make_config_files(tmp_path)
+        output_path = tmp_path / "output" / "test_layer.img"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"\x00" * 1024)
+        mock_asyncio_run.return_value = [output_path]
+
+        result = runner.invoke(
+            main,
+            [
+                "build",
+                "--sources",
+                str(src),
+                "--layers",
+                str(lyr),
+                "--layer",
+                "test_layer",
+                "--bbox",
+                "7.0",
+                "46.0",
+                "8.0",
+                "47.0",
+                "--output-dir",
+                str(tmp_path / "output"),
+            ],
+        )
+        assert result.exit_code == 0
+
+    @patch("cartoload.cli.asyncio.run")
+    def test_center_override(self, mock_asyncio_run, runner, tmp_path):
+        src, lyr = _make_config_files(tmp_path)
+        output_path = tmp_path / "output" / "test_layer.img"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"\x00" * 1024)
+        mock_asyncio_run.return_value = [output_path]
+
+        result = runner.invoke(
+            main,
+            [
+                "build",
+                "--sources",
+                str(src),
+                "--layers",
+                str(lyr),
+                "--layer",
+                "test_layer",
+                "--lng",
+                "7.45",
+                "--lat",
+                "46.9",
+                "--width",
+                "20",
+                "--height",
+                "10",
+                "--output-dir",
+                str(tmp_path / "output"),
+            ],
+        )
+        assert result.exit_code == 0
+
+    def test_bbox_exceeds_layer_bounds(self, runner, tmp_path):
+        src, lyr = _make_config_files(tmp_path)
+        result = runner.invoke(
+            main,
+            [
+                "build",
+                "--sources",
+                str(src),
+                "--layers",
+                str(lyr),
+                "--layer",
+                "test_layer",
+                "--bbox",
+                "4.0",
+                "44.0",
+                "11.0",
+                "49.0",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "exceeds layer bounds" in result.output
+
+    def test_bbox_and_center_mutual_exclusion(self, runner, tmp_path):
+        src, lyr = _make_config_files(tmp_path)
+        result = runner.invoke(
+            main,
+            [
+                "build",
+                "--sources",
+                str(src),
+                "--layers",
+                str(lyr),
+                "--layer",
+                "test_layer",
+                "--bbox",
+                "7.0",
+                "46.0",
+                "8.0",
+                "47.0",
+                "--lng",
+                "7.45",
+                "--lat",
+                "46.9",
+                "--width",
+                "20",
+                "--height",
+                "10",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "Cannot use" in result.output
+
+    def test_center_missing_height(self, runner, tmp_path):
+        src, lyr = _make_config_files(tmp_path)
+        result = runner.invoke(
+            main,
+            [
+                "build",
+                "--sources",
+                str(src),
+                "--layers",
+                str(lyr),
+                "--layer",
+                "test_layer",
+                "--lng",
+                "7.45",
+                "--lat",
+                "46.9",
+                "--width",
+                "20",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "--width and --height" in result.output
