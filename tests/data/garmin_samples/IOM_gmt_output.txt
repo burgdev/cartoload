@@ -1,0 +1,619 @@
+gmt v0.8.220.853b  CC BY-SA (C) 2011-2015 AP www.gmaptool.eu
+
+Input file: IOM.img.
+
+
+File:		IOM.img, length 33445888
+Header:   	21.07.2010 10:29:48, DSKIMG, XOR 00, V 2.00, Ms 0, 006-D2768-00
+Mapset:   	Isle of Man Recreational Map
+fat:		1000h - 1200h - D000h, block 2048
+maps:		51, sub-files 51
+
+Sub-file         fat     length
+ 00355927 GMP   1200h    627658
+	map 7e6dec (8285676)
+	date 21.07.2010 09:53:06
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.100027, S: 54.057069, W: -4.750042, E: -4.699960
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 55, size 617058 (4)
+ 00355928 GMP   1600h     76463
+	map 7e6deb (8285675)
+	date 21.07.2010 09:52:31
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.100027, S: 54.085221, W: -4.600010, E: -4.549971
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 18, size 71564 (4)
+ 00355929 GMP   1800h    123720
+	map 7e6dea (8285674)
+	date 21.07.2010 09:52:30
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.122772, S: 54.099984, W: -4.789138, E: -4.749999
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 14, size 119065 (4)
+ 00355930 GMP   1A00h    775343
+	map 7e6de9 (8285673)
+	date 21.07.2010 09:52:05
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.150023, S: 54.099984, W: -4.750042, E: -4.699960
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 71, size 761792 (4)
+ 00355931 GMP   1E00h    947849
+	map 7e6de8 (8285672)
+	date 21.07.2010 09:52:03
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.150023, S: 54.099984, W: -4.700003, E: -4.649963
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 79, size 933646 (4)
+ 00355932 GMP   2200h    967261
+	map 7e6e17 (8285719)
+	date 21.07.2010 09:57:35
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.150023, S: 54.099984, W: -4.650006, E: -4.599967
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 90, size 951749 (4)
+ 00355933 GMP   2600h    994523
+	map 7e6e18 (8285720)
+	date 21.07.2010 09:57:15
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.150023, S: 54.099984, W: -4.600010, E: -4.549971
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 79, size 980324 (4)
+ 00355934 GMP   2C00h    281125
+	map 7e6e16 (8285718)
+	date 21.07.2010 09:57:30
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.150023, S: 54.122729, W: -4.500017, E: -4.460363
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 24, size 274711 (4)
+ 00355935 GMP   2E00h    702630
+	map 7e6e0d (8285709)
+	date 21.07.2010 09:56:47
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.200020, S: 54.149981, W: -4.748068, E: -4.699960
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 59, size 691267 (4)
+ 00355936 GMP   3200h    929219
+	map 7e6e14 (8285716)
+	date 21.07.2010 09:57:32
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.200020, S: 54.149981, W: -4.700003, E: -4.649963
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 85, size 914338 (4)
+ 00355937 GMP   3600h   1072301
+	map 7e6e19 (8285721)
+	date 21.07.2010 09:57:19
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.200020, S: 54.149981, W: -4.650006, E: -4.599967
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 97, size 1056007 (4)
+ 00355938 GMP   3C00h   1006762
+	map 7e6e13 (8285715)
+	date 21.07.2010 09:56:51
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.200020, S: 54.149981, W: -4.600010, E: -4.549971
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 85, size 991902 (4)
+ 00355939 GMP   4200h   1132000
+	map 7e6e12 (8285714)
+	date 21.07.2010 09:56:51
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.200020, S: 54.149981, W: -4.550014, E: -4.499974
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 86, size 1116212 (4)
+ 00355940 GMP   4800h   1216653
+	map 7e6e11 (8285713)
+	date 21.07.2010 09:56:48
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.200020, S: 54.149981, W: -4.500017, E: -4.449978
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 79, size 1202161 (4)
+ 00355941 GMP   4E00h    640459
+	map 7e6e10 (8285712)
+	date 21.07.2010 09:56:37
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.200020, S: 54.160237, W: -4.450021, E: -4.399981
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 51, size 630550 (4)
+ 00355942 GMP   5200h     66280
+	map 7e6e15 (8285717)
+	date 21.07.2010 09:57:03
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.200020, S: 54.178991, W: -4.400024, E: -4.386420
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 9, size 62825 (4)
+ 00355943 GMP   5400h    198694
+	map 7e6e0f (8285711)
+	date 21.07.2010 09:56:22
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.230618, S: 54.199977, W: -4.723392, E: -4.699960
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 18, size 193756 (4)
+ 00355944 GMP   5600h    772660
+	map 7e6e0c (8285708)
+	date 21.07.2010 09:56:45
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.249372, S: 54.199977, W: -4.700003, E: -4.649963
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 60, size 761590 (4)
+ 00355945 GMP   5A00h   1064536
+	map 7e6def (8285679)
+	date 21.07.2010 09:53:08
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.250016, S: 54.199977, W: -4.650006, E: -4.599967
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 96, size 1048724 (4)
+ 00355946 GMP   6000h    825958
+	map 7e6e0e (8285710)
+	date 21.07.2010 09:56:54
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.250016, S: 54.199977, W: -4.600010, E: -4.549971
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 85, size 811392 (4)
+ 00355947 GMP   6400h    881415
+	map 7e6e0a (8285706)
+	date 21.07.2010 09:56:17
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.250016, S: 54.199977, W: -4.550014, E: -4.499974
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 86, size 865867 (4)
+ 00355948 GMP   6800h    825404
+	map 7e6e0b (8285707)
+	date 21.07.2010 09:56:14
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.250016, S: 54.199977, W: -4.500017, E: -4.449978
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 85, size 810194 (4)
+ 00355949 GMP   6C00h   1138542
+	map 7e6e09 (8285705)
+	date 21.07.2010 09:56:06
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.250016, S: 54.199977, W: -4.450021, E: -4.399981
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 85, size 1123837 (4)
+ 00355950 GMP   7200h    468211
+	map 7e6e08 (8285704)
+	date 21.07.2010 09:55:57
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.250016, S: 54.199977, W: -4.400024, E: -4.349985
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 45, size 459125 (4)
+ 00355951 GMP   7400h      3648
+	map 7e6e07 (8285703)
+	date 21.07.2010 09:55:58
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.250016, S: 54.249330, W: -4.350028, E: -4.345350
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 2, size 1480 (4)
+ 00355952 GMP   7600h    792313
+	map 7e6e06 (8285702)
+	date 21.07.2010 09:55:39
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.300013, S: 54.249973, W: -4.550014, E: -4.499974
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 81, size 777215 (4)
+ 00355953 GMP   7A00h    804409
+	map 7e6e05 (8285701)
+	date 21.07.2010 09:55:58
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.300013, S: 54.249973, W: -4.500017, E: -4.449978
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 79, size 789864 (4)
+ 00355954 GMP   7E00h    807820
+	map 7e6e02 (8285698)
+	date 21.07.2010 09:55:16
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.300013, S: 54.249973, W: -4.450021, E: -4.399981
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 79, size 793763 (4)
+ 00355955 GMP   8200h    946059
+	map 7e6e04 (8285700)
+	date 21.07.2010 09:55:30
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.300013, S: 54.249973, W: -4.400024, E: -4.349985
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 79, size 931980 (4)
+ 00355956 GMP   8600h    432406
+	map 7e6e03 (8285699)
+	date 21.07.2010 09:55:25
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.300013, S: 54.249973, W: -4.350028, E: -4.304237
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 41, size 423662 (4)
+ 00355957 GMP   8800h    495346
+	map 7e6e01 (8285697)
+	date 21.07.2010 09:55:06
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.350009, S: 54.299970, W: -4.591899, E: -4.549971
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 53, size 485239 (4)
+ 00355958 GMP   8C00h    923609
+	map 7e6dff (8285695)
+	date 21.07.2010 09:54:57
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.350009, S: 54.299970, W: -4.550014, E: -4.499974
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 86, size 908045 (4)
+ 00355959 GMP   9000h   1004264
+	map 7e6e00 (8285696)
+	date 21.07.2010 09:55:05
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.350009, S: 54.299970, W: -4.500017, E: -4.449978
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 85, size 989047 (4)
+ 00355960 GMP   9600h    971651
+	map 7e6dfe (8285694)
+	date 21.07.2010 09:54:52
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.350009, S: 54.299970, W: -4.450021, E: -4.399981
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 85, size 956921 (4)
+ 00355961 GMP   9A00h    778641
+	map 7e6dfd (8285693)
+	date 21.07.2010 09:54:48
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.350009, S: 54.299970, W: -4.400024, E: -4.349985
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 58, size 767736 (4)
+ 00355962 GMP   9E00h    124833
+	map 7e6dfb (8285691)
+	date 21.07.2010 09:54:52
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.315033, S: 54.299970, W: -4.350028, E: -4.304237
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 19, size 119658 (4)
+ 00355963 GMP   A000h     22389
+	map 7e6dfc (8285692)
+	date 21.07.2010 09:54:26
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.371295, S: 54.349966, W: -4.559026, E: -4.549971
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 8, size 19136 (4)
+ 00355964 GMP   A200h    499381
+	map 7e6dfa (8285690)
+	date 21.07.2010 09:54:17
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.390049, S: 54.349966, W: -4.550014, E: -4.499974
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 53, size 488633 (4)
+ 00355965 GMP   A600h    867137
+	map 7e6df9 (8285689)
+	date 21.07.2010 09:54:39
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.400005, S: 54.349966, W: -4.450021, E: -4.399981
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 86, size 852259 (4)
+ 00355966 GMP   AA00h    617508
+	map 7e6df8 (8285688)
+	date 21.07.2010 09:54:13
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.400005, S: 54.349966, W: -4.400024, E: -4.353547
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 62, size 605974 (4)
+ 00355967 GMP   AE00h    124014
+	map 7e6df6 (8285686)
+	date 21.07.2010 09:53:52
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.418159, S: 54.399962, W: -4.450021, E: -4.399981
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 19, size 118930 (4)
+ 00355968 GMP   B000h    211050
+	map 7e6df7 (8285687)
+	date 21.07.2010 09:54:02
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.422879, S: 54.399962, W: -4.400024, E: -4.353547
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 28, size 204745 (4)
+ 00355969 GMP   B200h    810026
+	map 7e6df5 (8285685)
+	date 21.07.2010 09:53:50
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.408803, S: 54.349966, W: -4.500017, E: -4.449978
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 80, size 795429 (4)
+ 00355970 GMP   B600h    696207
+	map 7e6df3 (8285683)
+	date 21.07.2010 09:54:07
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.150023, S: 54.094577, W: -4.550014, E: -4.499974
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 63, size 683547 (4)
+ 00355971 GMP   BA00h    187913
+	map 7e6ded (8285677)
+	date 21.07.2010 09:52:55
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.071188, S: 54.042993, W: -4.838448, E: -4.799995
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 22, size 182269 (4)
+ 00355972 GMP   BC00h    742409
+	map 7e6df4 (8285684)
+	date 21.07.2010 09:53:41
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.100027, S: 54.047713, W: -4.800038, E: -4.749999
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 63, size 730699 (4)
+ 00355973 GMP   C000h    768404
+	map 7e6df2 (8285682)
+	date 21.07.2010 09:53:36
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.100027, S: 54.052391, W: -4.650006, E: -4.599967
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 68, size 756167 (4)
+ 00355974 GMP   C400h    667553
+	map 7e6df1 (8285681)
+	date 21.07.2010 09:53:20
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.100027, S: 54.057069, W: -4.700003, E: -4.649405
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 60, size 656531 (4)
+ 00355975 GMP   C800h    335470
+	map 7e6df0 (8285680)
+	date 21.07.2010 09:53:21
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.286880, S: 54.249973, W: -4.649448, E: -4.599967
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 35, size 328002 (4)
+ 00355976 GMP   CA00h    972111
+	map 7e6dee (8285678)
+	date 21.07.2010 09:53:03
+	priority 20, parameters 1 8 36 1
+	levels [17,18,19,20,21,22,23,24], zoom [87,6,5,4,3,2,1,0]
+	N: 54.300013, S: 54.249973, W: -4.600139, E: -4.549971
+	Isle of Man
+	Copyright 1995-2010 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 78, size 958350 (4)
+ D2768000 MPS   CE00h      3936
+
+Map              length s-f  CP    prio  PID   FID  name
+ 00355927 NT     627658  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355928 NT      76463  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355929 NT     123720  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355930 NT     775343  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355931 NT     947849  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355932 NT     967261  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355933 NT     994523  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355934 NT     281125  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355935 NT     702630  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355936 NT     929219  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355937 NT    1072301  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355938 NT    1006762  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355939 NT    1132000  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355940 NT    1216653  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355941 NT     640459  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355942 NT      66280  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355943 NT     198694  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355944 NT     772660  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355945 NT    1064536  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355946 NT     825958  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355947 NT     881415  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355948 NT     825404  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355949 NT    1138542  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355950 NT     468211  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355951 NT       3648  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355952 NT     792313  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355953 NT     804409  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355954 NT     807820  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355955 NT     946059  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355956 NT     432406  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355957 NT     495346  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355958 NT     923609  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355959 NT    1004264  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355960 NT     971651  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355961 NT     778641  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355962 NT     124833  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355963 NT      22389  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355964 NT     499381  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355965 NT     867137  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355966 NT     617508  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355967 NT     124014  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355968 NT     211050  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355969 NT     810026  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355970 NT     696207  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355971 NT     187913  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355972 NT     742409  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355973 NT     768404  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355974 NT     667553  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355975 NT     335470  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ 00355976 NT     972111  1  1252  20       1  2150  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ D2768000 MPS      3936  1
+
+Data MPS
+ F: PID 1, FID 2150, Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6DEC, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6DEB, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6DEA, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6DE9, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6DE8, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6E17, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6E18, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6E16, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6E0D, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6E14, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6E19, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6E13, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6E12, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6E11, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6E10, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6E15, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6E0F, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6E0C, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6DEF, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6E0E, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6E0A, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6E0B, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6E09, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6E08, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6E07, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6E06, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6E05, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6E02, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6E04, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6E03, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6E01, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6DFF, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6E00, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6DFE, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6DFD, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6DFB, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6DFC, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6DFA, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6DF9, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6DF8, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6DF6, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6DF7, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6DF5, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6DF3, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6DED, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6DF4, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6DF2, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6DF1, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6DF0, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map
+ L: PID 1, FID 2150, map 7E6DEE, (0 0),  Isle of Man Recreational Map  >-  >Isle of Man Recreational Map

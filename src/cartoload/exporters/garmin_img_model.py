@@ -59,8 +59,7 @@ class IMGHeader:
     magic: str = "DSKIMG"  # 6 bytes, must be "DSKIMG"
     format_version: int = 2  # 2 bytes, typically 0x0002
 
-    # Date and encryption (offset 0x18-0x1B)
-    update_month_year: int = 0x0020  # 2 bytes, format unclear
+    # Encryption (offset 0x1A)
     xor_byte: int = 0x00  # 1 byte, XOR encryption key (0x00 = no encryption)
 
     # Creation timestamp (offset 0x39-0x3E, 6 bytes total)
@@ -78,7 +77,9 @@ class IMGHeader:
     block_size: int = 32768  # Allocation unit size (typically 32KB)
 
     # File metadata
-    checksum_or_id: int = 0  # 2 bytes at offset 0x0E, purpose unclear
+    checksum_or_id: int = (
+        0x0050  # 2 bytes at offset 0x0E, file-specific ID (0x0050 from SwissTopo_West)
+    )
     unknown_size_field: int = 0x047A0000  # 4 bytes at offset 0x0A, purpose unclear
 
     # Boot sector signature (offset 0x1FE-0x1FF)

@@ -233,18 +233,49 @@ This document provides a curated list of resources, tools, libraries, and docume
   - LBL header lengths documented: 170, 196, 208, 236 bytes (raster maps use 596 bytes)
   - Label encoding (6/8/10-bit) is vector-only; raster maps use plain ASCII for tile filenames
 
+#### Willink/Pinns "Exploring Garmin's IMG Format" (Local)
+
+- **File:** `docs/exporters/expl_img2015.pdf` (included in repository)
+- **Author:** N. Willink
+- **Date:** Latest revision 02/03/2015 (original 21/08/2011)
+- **Source:** <https://www.pinns.co.uk/osm/docs/expl_img2015.pdf>
+- **Coverage:** Practical guide to parsing Garmin vector IMG format internals, complementing the Mechalas specification
+- **Content:**
+  - RGN sub-file: detailed subdivision pointer structure, POI/polyline/polygon data layout
+  - Map levels and subdivision grouping — how zoom levels map to groups of subdivisions
+  - TRE subdivision format: 14-byte (lowest level) and 16-byte records, object type codes
+  - LBL label encoding: 6-bit character encoding with MSB-first bit packing, symbol codes
+  - NET sub-file: highway definitions, multi-label entries (up to 4 labels per highway)
+  - NOD sub-file: routing node format, direction coordinates, Tables A/B structure
+  - DEM sub-file: digital elevation model data
+  - Extended types (0x100+): POIs in RGN4, polylines in RGN3, polygons in RGN2
+  - Coordinate bitstream encoding: variable bits-per-coordinate, left-shifting
+  - Locked TOPO map handling and XOR decryption
+- **Important notes:**
+  - Vector format only — no raster IMG coverage
+  - Corrects several errors in the Mechalas spec (e.g., POI subtype bit location)
+  - Includes practical parsing examples with hex dumps
+  - Covers TRE7, TRE8, TRE9 sections (undocumented in Mechalas)
+
 ### Community Documentation
 
 #### 1. QMapShack Wiki - Raster IMG Format
 
 - **URL:** <https://github.com/Maproom/qmapshack/wiki/RasterImg_AWhiter>
+- **Author:** Alex Whiter
 - **Content:**
   - **Raster-specific IMG format documentation** - the most comprehensive community resource
+  - Complete TRE header layout for raster maps (273-byte format) with verified byte offsets
   - RGN Type E0 record format for raster tile metadata
   - LBL28 (Image Index) and LBL29 (Image Storage) section structure
+  - RGN2 compound record format (0D/06/BC/DE/E0 markers)
+  - TRE7 raster layer section with offset table format
+  - TRE8 object type parameter entries
   - Binary format details with byte offsets and field descriptions
-  - Critical for understanding raster IMG implementation (used as reference for this project)
+  - **Critical discovery:** Section positions in TRE header are GMP-relative, not TRE-relative
+  - Analysis based on IOM subfile 00355951 (Isle of Man, OS Map)
 - **Importance:** This is the authoritative community documentation for raster IMG files. Official Garmin documentation does not exist for this format.
+- **Verification:** All findings cross-validated against IOM.img and SwissTopo_West.img using `scripts/img_analysis.py`
 
 #### 2. OpenStreetMap Wiki
 
@@ -274,6 +305,53 @@ This document provides a curated list of resources, tools, libraries, and docume
 
 - **Note:** Limited official information
 - **Community Knowledge:** Scattered across forums, mailing lists
+
+### Reference Files
+
+#### IOM.img (Isle of Man, Multi-Map Raster)
+
+- **File:** `tests/data/garmin_samples/IOM.img` (33,462,272 bytes / 31.9 MB)
+- **Source:** OS Map - Isle of Man, Garmin format
+- **Format:** Multi-map raster IMG with 51 GMP subfiles + 1 MPS
+- **Block size:** 2,048 bytes
+- **Analysis subfile:** 00355951 — fully parsed and validated against QMapShack wiki
+- **Key characteristics:**
+  - 8 zoom levels per subfile (level 0x87 to 0x00, zoom 17-24)
+  - TRE7 with rec_size=4 (simple uint32 offsets)
+  - TRE8 with 2 entries (raster tiles + DATA_BOUNDS)
+  - RGN5 present (112 bytes)
+  - No NET section
+  - bits_field=0x2B (1-byte image index, <256 tiles per subfile)
+
+#### SwissTopo_West.img (Single-Map Raster)
+
+- **File:** Available as reference, ~1.4 GB
+- **Source:** SwissTopo professional topographic map
+- **Format:** Single-map raster IMG with 1 GMP subfile + 1 MPS
+- **Block size:** 32,768 bytes
+- **Key characteristics:**
+  - 5 zoom levels (level 0x84 to 0x00, zoom 20-24)
+  - 32,443 tiles covering western Switzerland
+  - TRE7 with rec_size=5 (uint32 offset + 1 byte flag)
+  - TRE8 with 1 entry (raster tiles only)
+  - RGN5 absent (size=0)
+  - NET section present
+  - bits_field=0x2D (2-byte image index, SwissTopo variant)
+
+### Analysis Tools
+
+#### Custom Analysis Script
+
+- **File:** `scripts/img_analysis.py`
+- **Capabilities:**
+  - Parse GMP container headers and compute section offsets
+  - FAT chain traversal for multi-part subfiles
+  - GMP-relative offset parsing (correct interpretation of TRE/RGN/LBL section positions)
+  - TRE1/TRE2/TRE7/TRE8 data extraction and formatting
+  - RGN2 compound record parsing (0D/06/BC/DE/E0 markers)
+  - LBL label extraction
+  - Hex dump output for any section
+- **Usage:** `python scripts/img_analysis.py <img_file> [--subfile <name>] [--hex <section>]`
 
 ## Raster vs Vector IMG Files: Key Differences
 
@@ -592,6 +670,6 @@ Garmin's professional maps (like SwissTopo Pro) combine both raster and vector d
 
 ---
 
-**Last Updated:** 2026-04-22
+**Last Updated:** 2026-04-23
 
 **Key Takeaway:** This project implements the first known open-source Garmin raster IMG writer, filling a significant gap in the GIS ecosystem. The GMP container format has been fully reverse-engineered, with GMapTool validation passing for generated files.

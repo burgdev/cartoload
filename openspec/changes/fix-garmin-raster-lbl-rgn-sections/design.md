@@ -1,6 +1,6 @@
 ## Context
 
-The Garmin IMG raster format implementation in `garmin_img_writer.py` was developed based on analysis of SwissTopo reference files using GMapTool (GMT) hex dumps and the John Mechalas IMG format specification (2005). The implementation successfully creates the GMP container structure with TRE/RGN/LBL/NET sub-headers and passes GMT's basic structural validation (exit code 0).
+The Garmin IMG raster format implementation in `garmin_img_writer.py` was developed based on analysis of SwissTopo reference files using GMapTool (GMT) hex dumps, the John Mechalas IMG format specification (2005) (`imgformat-1.0.pdf`), and the Willink/Pinns "Exploring Garmin's IMG Format" (2015) (`expl_img2015.pdf`). The implementation successfully creates the GMP container structure with TRE/RGN/LBL/NET sub-headers and passes GMT's basic structural validation (exit code 0).
 
 However, the QMapShack wiki documents critical raster-specific sections that were not captured in earlier reverse engineering:
 

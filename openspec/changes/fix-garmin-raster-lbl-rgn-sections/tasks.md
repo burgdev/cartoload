@@ -61,10 +61,10 @@
 
 ## 8. Tile Bounds Computation
 
-- [ ] 8.1 Modify `TileExtractor.extract_tiles()` to return tile bounds along with tile arrays
-- [ ] 8.2 Update tile extraction to store bounds per tile: (lat_min, lon_min, lat_max, lon_max) in decimal degrees
-- [ ] 8.3 Update `compressed_tiles` structure to include bounds: `dict[int, list[tuple[bytes, tuple[float, float, float, float]]]]` (JPEG data + bounds)
-- [ ] 8.4 Update all call sites that use `compressed_tiles` to handle new structure (LayoutComputer, GMPWriter, etc.)
+- [x] 8.1 Modify `TileExtractor.extract_tiles()` to return tile bounds along with tile arrays
+- [x] 8.2 Update tile extraction to store bounds per tile: (lat_min, lon_min, lat_max, lon_max) in decimal degrees
+- [x] 8.3 Update `compressed_tiles` structure to include bounds: `dict[int, list[tuple[bytes, tuple[float, float, float, float]]]]` (JPEG data + bounds)
+- [x] 8.4 Update all call sites that use `compressed_tiles` to handle new structure (LayoutComputer, GMPWriter, etc.)
 
 ## 9. Documentation Updates
 
@@ -102,8 +102,8 @@
 
 ## 12. Cleanup and Code Review
 
-- [ ] 12.1 Remove dead code related to tile index table (grep for references, delete unused functions)
-- [ ] 12.2 Update function docstrings in `garmin_img_writer.py` to reflect new LBL28/LBL29/Type E0 structure
-- [ ] 12.3 Add code comments explaining Type E0 record format and bits_field encoding
-- [ ] 12.4 Run linter/formatter on modified files
-- [ ] 12.5 Review all changes for correctness: verify offsets are relative to correct base positions (LBL28 offsets relative to LBL29, Type E0 coords in map units, etc.)
+- [x] 12.1 Remove dead code related to tile index table (grep for references, delete unused functions)
+- [x] 12.2 Update function docstrings in `garmin_img_writer.py` to reflect new LBL28/LBL29/Type E0 structure
+- [x] 12.3 Add code comments explaining Type E0 record format and bits_field encoding
+- [x] 12.4 Run linter/formatter on modified files
+- [x] 12.5 Review all changes for correctness: verify offsets are relative to correct base positions (LBL28 offsets relative to LBL29, Type E0 coords in map units, etc.)

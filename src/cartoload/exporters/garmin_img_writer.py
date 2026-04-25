@@ -36,7 +36,7 @@ import subprocess
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Union
 
 import numpy as np
 from PIL import Image
@@ -52,6 +52,11 @@ if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
+
+# Type alias for compressed tiles with optional per-tile bounds.
+# Each entry is (jpeg_bytes, (lat_min, lon_min, lat_max, lon_max)) or just jpeg_bytes.
+TileData = Union[bytes, tuple[bytes, tuple[float, float, float, float]]]
+CompressedTiles = dict[int, list[TileData]]
 
 # Garmin IMG constants
 BLOCK_SIZE = 32768  # 32 KB data blocks
@@ -85,6 +90,8 @@ RGN_HEADER_LENGTH = 125  # RGN sub-header length
 LBL_HEADER_LENGTH = 596  # LBL sub-header length
 NET_HEADER_LENGTH = 100  # NET sub-header length
 TILE_INDEX_ENTRY_SIZE = 4  # Tile index: one uint32 per tile
+RGN2_POLYLINE_PREAMBLE_SIZE = 18  # Type 0x06 polyline record before each E0 tile
+RGN2_RASTER_OUTLINE_SIZE = 20  # Type 0x0D polygon outline record before each zoom level
 MPS_SUBFILE_SIZE = 98
 
 
@@ -176,7 +183,7 @@ class LayoutComputer:
       5. Subfile data (GMP, MPS) starting after FAT region
     """
 
-    def __init__(self, img_file: IMGFile, compressed_tiles: dict[int, list[bytes]]):
+    def __init__(self, img_file: IMGFile, compressed_tiles: CompressedTiles):
         self.img_file = img_file
         self.compressed_tiles = compressed_tiles
         self.layouts: list[SubfileLayout] = []
@@ -264,20 +271,27 @@ class LayoutComputer:
         # TRE data sections
         n_zoom_levels = len(self.img_file.zoom_levels)
         map_levels_size = n_zoom_levels * 4  # 4 bytes per zoom level
-        # Subdivisions: for raster, one subdivision per zoom level (8 bytes each)
+        # Subdivisions: for raster, one 16-byte group record per zoom level
         # Must match the subdiv_data allocation in GMPWriter.write()
         n_zoom = len(self.img_file.zoom_levels)
-        subdiv_size = n_zoom * 8
+        subdiv_size = n_zoom * 16
         tre_data = 6 + subdiv_size + map_levels_size  # copyright + subdiv + map_levels
 
-        # RGN data section (Type E0 records for raster tiles)
-        # Each Type E0 record: marker(1) + bits_field(1) + 4×coords(16) + block_size(4) + image_index(1 or 2)
-        # bits_field determines index size: 0x2B for <256 tiles (23 bytes), 0x25 for ≥256 tiles (24 bytes)
-        type_e0_record_size = 23 if total_tiles < 256 else 24
-        rgn_data = total_tiles * type_e0_record_size
+        # TRE extended sections (needed for GMT bitmap detection)
+        # TRE5 is empty (size=0) — matches IOM reference for bitmap detection
+        tre7_rec_size = 4  # uint32 offset per entry (matches IOM reference)
+        tre7_size = n_zoom * tre7_rec_size  # one entry per zoom level
+        tre8_size = 6  # TRE8: 2 entries x 3 bytes (polyline + raster type)
+        tre_ext_data = tre7_size + tre8_size
 
-        # RGN ext_type_areas (minimal for raster)
-        rgn_ext_areas = 0  # can be 0 for simplified raster
+        # RGN data sections:
+        # RGN1: minimal (empty or near-empty for raster maps)
+        rgn1_data = 0
+        # RGN2: Raster outline + Polyline preamble + Type E0 record per tile
+        type_e0_record_size = 23 if total_tiles < 256 else 24
+        rgn2_data = n_zoom * RGN2_RASTER_OUTLINE_SIZE + total_tiles * (
+            RGN2_POLYLINE_PREAMBLE_SIZE + type_e0_record_size
+        )
 
         # LBL labels (tile filenames)
         lbl_labels = sum(len(f"{i}.jpg\0".encode("ascii")) for i in range(total_tiles))
@@ -288,8 +302,13 @@ class LayoutComputer:
         # LBL29 section (image storage - JPEG tile data)
         lbl29_size = 0
         for tiles in self.compressed_tiles.values():
-            for tile_data_bytes in tiles:
-                lbl29_size += len(tile_data_bytes)
+            for tile_entry in tiles:
+                jpeg_size = (
+                    len(tile_entry[0])
+                    if isinstance(tile_entry, tuple)
+                    else len(tile_entry)
+                )
+                lbl29_size += jpeg_size
 
         size = (
             GMP_CONTAINER_HEADER_SIZE
@@ -300,8 +319,9 @@ class LayoutComputer:
             + lbl_section
             + net_section
             + tre_data
-            + rgn_data
-            + rgn_ext_areas
+            + tre_ext_data  # TRE5 + TRE7 + TRE8
+            + rgn1_data
+            + rgn2_data
             + lbl_labels
             + lbl28_size
             + lbl29_size
@@ -325,15 +345,14 @@ class IMGHeaderWriter:
         # Offset 0x00: XOR byte
         buf[0x00] = header.xor_byte
 
-        # Offset 0x08-0x09: Map version major/minor (zeros)
-        # Offset 0x0A-0x0B: Update month/year
-        struct.pack_into("<H", buf, 0x0A, header.update_month_year)
+        # Offset 0x0A-0x0B: Unknown field (constant 0x7A04 in SwissTopo reference files)
+        struct.pack_into("<H", buf, 0x0A, 0x7A04)
 
-        # Offset 0x0E: MapSource flag (0 = Garmin map)
-        buf[0x0E] = 0x00
+        # Offset 0x0C-0x0D: Unknown (zeros in reference files)
+        # Already zero
 
-        # Offset 0x0F: Checksum (sum of bytes 0-0x0E mod 256, such that sum is 0)
-        # We'll compute this at the end
+        # Offset 0x0E-0x0F: Checksum/ID field (file-specific, LE uint16)
+        struct.pack_into("<H", buf, 0x0E, header.checksum_or_id)
 
         # Offset 0x10-0x16: Magic "DSKIMG\0"
         magic = header.magic.encode("ascii")
@@ -387,34 +406,29 @@ class IMGHeaderWriter:
         else:
             struct.pack_into("<H", buf, 0x63, 0xFFFF)
 
-        # Offset 0x1C0-0x1CD: Partition table entry
-        # This is a standard MBR partition table entry at offset 0x1BE
-        buf[0x1BE] = 0x00  # Not bootable
-        buf[0x1BF] = 0x01  # Start head
-        buf[0x1C0] = 0x00  # Start sector
-        buf[0x1C1] = 0x00  # Start cylinder
-        buf[0x1C2] = 0xFF  # System type (auto-detect)
+        # Offset 0x1C0-0x1CD: Partition table entry (MBR format at 0x1BE)
+        # Reference SwissTopo files: boot=0x01, start_head=0x00, sys_type=0x60
+        buf[0x1BE] = 0x01  # Bootable partition
+        buf[0x1BF] = 0x00  # Start head
+        buf[0x1C0] = 0x00  # Start sector/cylinder
+        buf[0x1C1] = 0xFF  # Start cylinder low
+        buf[0x1C2] = 0x60  # System type (from SwissTopo reference)
         if layouts:
             total_size = max(lay.end_offset for lay in layouts)
-            # End head/sector/cylinder based on file size
             total_sectors = total_size // 512
             end_head = min(0xFE, (total_sectors // 63) // 255)
             buf[0x1C3] = end_head  # End head
-            buf[0x1C4] = 0xFE  # End sector (with cylinder high bits)
-            buf[0x1C5] = 0x00  # End cylinder low bits
+            buf[0x1C4] = 0x00  # End sector/cylinder
+            buf[0x1C5] = 0x00  # End cylinder low
             struct.pack_into("<I", buf, 0x1C6, 0)  # Relative sectors (LBA start)
             struct.pack_into("<I", buf, 0x1CA, total_sectors)  # Number of sectors
         else:
-            buf[0x1C3] = 0x60  # End head (default)
-            buf[0x1C4] = 0x64  # End sector
+            buf[0x1C3] = 0x64  # End head (default from reference)
+            buf[0x1C4] = 0x00  # End sector
             buf[0x1C5] = 0x00  # End cylinder
 
         # Offset 0x1FE-0x1FF: Boot signature
         struct.pack_into("<H", buf, 0x1FE, BOOT_SIGNATURE)
-
-        # Compute checksum at offset 0x0F: sum of bytes 0x00-0x0E mod 256 should make total 0
-        byte_sum = sum(buf[0x00:0x0F])
-        buf[0x0F] = (256 - byte_sum) % 256
 
         f.write(buf)
 
@@ -581,17 +595,17 @@ class GMPWriter:
       [LBL Sub-Header: 596 bytes]
       [NET Sub-Header: 100 bytes]
       [TRE Data Sections: copyright, subdivisions, map_levels]
-      [RGN Data Sections: data_section]
+      [RGN Data Sections: Type E0 records with per-tile bounds]
       [LBL Labels: tile filenames as null-terminated strings]
-      [Tile Index Table: N × uint32 offsets]
-      [JPEG Tile Data: concatenated JFIF JPEGs]
+      [LBL28 Section: image index (uint32 offsets to LBL29)]
+      [LBL29 Section: image storage (concatenated JPEG files)]
     """
 
     @staticmethod
     def write(
         f: io.BufferedWriter,
         img_file: IMGFile,
-        compressed_tiles: dict[int, list[bytes]],
+        compressed_tiles: CompressedTiles,
         gmp_layout: SubfileLayout,
     ) -> None:
         """Write complete GMP subfile with container format."""
@@ -632,63 +646,136 @@ class GMPWriter:
         net_pos = pos
         pos += NET_HEADER_LENGTH
 
-        # --- TRE data sections (offsets relative to TRE start) ---
+        # --- TRE data sections (offsets are GMP-relative, stored in TRE header) ---
 
         # TRE copyright section (6 bytes)
-        tre_copyright_pos = pos - tre_pos  # relative to TRE
+        tre_copyright_pos = pos  # GMP-relative
         pos += 6
 
-        # TRE subdivisions
-        tre_subdiv_pos = pos - tre_pos  # relative to TRE
-        # For raster: one subdivision per zoom level
+        # TRE subdivisions (16-byte group records per zoom level)
+        tre_subdiv_pos = pos  # GMP-relative
         n_zoom = len(img_file.zoom_levels)
-        # Each subdivision is 8 bytes (simple raster format)
-        subdiv_data = bytearray(n_zoom * 8)
+        subdiv_data = bytearray(n_zoom * 16)
         subdiv_size = len(subdiv_data)
         pos += subdiv_size
 
         # TRE map levels
-        tre_maplevels_pos = pos - tre_pos  # relative to TRE
+        tre_maplevels_pos = pos  # GMP-relative
         map_levels_data = bytearray(n_zoom * 4)
         map_levels_size = len(map_levels_data)
         pos += map_levels_size
 
-        # --- RGN data section (Type E0 records, offsets relative to RGN start) ---
-        rgn_data_pos = pos - rgn_pos  # relative to RGN
-        # Calculate RGN data size (Type E0 records)
+        # --- TRE extended sections (TRE8, TRE7) ---
+        # Layout matches IOM reference: TRE8 data first, then TRE7 right after.
+        # TRE4/5/6 are empty (size=0) and share position with TRE8.
+        # TRE5 must be empty for GMT to detect bitmaps (IOM has size=0).
+
+        # TRE8 data (6 bytes): 2 object type entries
+        tre8_pos = pos  # GMP-relative
+        tre8_size = 6
+        pos += tre8_size
+
+        # TRE5: empty (shares position with TRE8, size=0)
+        tre5_pos = tre8_pos
+        tre5_size = 0
+
+        # TRE7 data: one uint32 entry per zoom level
+        tre7_pos = pos  # GMP-relative
+        tre7_rec_size = 4
+        tre7_size = n_zoom * tre7_rec_size
+        pos += tre7_size
+
+        # --- RGN data sections ---
+        # RGN1: empty for raster maps (all tile data goes to RGN2)
+        rgn1_pos = pos  # GMP-relative
+        rgn1_size = 0
+
+        # RGN2: Raster outline + polyline preamble + Type E0 records per zoom level
+        rgn2_pos = pos  # GMP-relative
         type_e0_record_size = 23 if total_tiles < 256 else 24
-        rgn_data_size = total_tiles * type_e0_record_size
-        pos += rgn_data_size
+        # Each zoom level starts with a 0x0D polygon outline record,
+        # followed by N tiles each with a polyline preamble + E0 record
+        rgn2_size = n_zoom * RGN2_RASTER_OUTLINE_SIZE + total_tiles * (
+            RGN2_POLYLINE_PREAMBLE_SIZE + type_e0_record_size
+        )
+        pos += rgn2_size
 
         # --- LBL labels (tile filenames) ---
-        lbl_labels_pos = pos - lbl_pos  # relative to LBL
+        lbl_labels_pos = pos  # GMP-relative
         label_strings = bytearray()
         for i in range(total_tiles):
             label_strings += f"{i}.jpg\0".encode("ascii")
         pos += len(label_strings)
 
         # --- LBL28 section (image index) ---
-        lbl28_pos = pos - lbl_pos  # relative to LBL
+        lbl28_pos = pos  # GMP-relative
         lbl28_size = total_tiles * 4  # uint32 offset per tile
         pos += lbl28_size
 
         # --- LBL29 section (image storage) ---
-        lbl29_pos = pos - lbl_pos  # relative to LBL
+        lbl29_pos = pos  # GMP-relative
         # Calculate LBL29 size (sum of all JPEG sizes)
         lbl29_size = 0
         for zoom in img_file.zoom_levels:
             tiles = compressed_tiles.get(zoom.level_number, [])
-            for tile_data in tiles:
-                lbl29_size += len(tile_data)
+            for tile_entry in tiles:
+                lbl29_size += (
+                    len(tile_entry[0])
+                    if isinstance(tile_entry, tuple)
+                    else len(tile_entry)
+                )
         pos += lbl29_size
 
-        # Fill map levels data
+        # Fill map levels data (4 bytes per level: zoom_code(1) + level_number(1) + subdiv_count(2 LE))
+        for z_idx, zoom in enumerate(img_file.zoom_levels):
+            map_levels_data[z_idx * 4] = zoom.zoom_code
+            map_levels_data[z_idx * 4 + 1] = zoom.level_number
+            # subdiv_count = number of subdivision groups at this zoom level (1 per level)
+            struct.pack_into("<H", map_levels_data, z_idx * 4 + 2, 1)
+
+        # Fill subdivision group records (16 bytes each, one per zoom level)
+        # Format: rgn_offset(3) + obj_types(1) + lon(3) + lat(3) + flags(2) + subdiv_count(2) + next_level(2)
+        map_center_lon = int(
+            (img_file.bounds_west + img_file.bounds_east) / 2 * (2**24) / 360
+        )
+        map_center_lat = int(
+            (img_file.bounds_north + img_file.bounds_south) / 2 * (2**24) / 360
+        )
+        rgn_tile_offset = 0
+        type_e0_record_size = 23 if total_tiles < 256 else 24
         for z_idx, zoom in enumerate(img_file.zoom_levels):
             tile_count = len(compressed_tiles.get(zoom.level_number, []))
-            # zoom level (1 byte) + bits (1 byte) + n_subdivisions (2 bytes LE)
-            map_levels_data[z_idx * 4] = zoom.level_number
-            map_levels_data[z_idx * 4 + 1] = zoom.zoom_code
-            struct.pack_into("<H", map_levels_data, z_idx * 4 + 2, tile_count)
+            off = z_idx * 16
+            # RGN offset (3 bytes LE): byte offset into RGN2 data section for this level's tiles
+            rgn_off_bytes = rgn_tile_offset.to_bytes(3, "little")
+            subdiv_data[off] = rgn_off_bytes[0]
+            subdiv_data[off + 1] = rgn_off_bytes[1]
+            subdiv_data[off + 2] = rgn_off_bytes[2]
+            # Object types: 0x00 (no vector objects in raster maps)
+            subdiv_data[off + 3] = 0x00
+            # Center longitude (3-byte signed map units)
+            lon_bytes = _put3s(map_center_lon)
+            subdiv_data[off + 4 : off + 7] = lon_bytes
+            # Center latitude (3-byte signed map units)
+            lat_bytes = _put3s(map_center_lat)
+            subdiv_data[off + 7 : off + 10] = lat_bytes
+            # Flags (uint16 LE): bit 15 (0x8000) = has child subdivisions
+            # Lower bits indicate zoom level bitmap (bit 0 for first level)
+            subdiv_flags = 0x8000 | (1 << z_idx)
+            struct.pack_into("<H", subdiv_data, off + 10, subdiv_flags)
+            # Subdivision count (uint16 LE): for raster maps, 1 group per zoom level
+            # (each group contains all tiles at this zoom)
+            struct.pack_into("<H", subdiv_data, off + 12, 1)
+            # Next level index (uint16 LE) = index of first subdivision at next zoom
+            if z_idx + 1 < n_zoom:
+                struct.pack_into("<H", subdiv_data, off + 14, z_idx + 1)
+            else:
+                struct.pack_into("<H", subdiv_data, off + 14, 0)
+            rgn_tile_offset += tile_count * (
+                RGN2_POLYLINE_PREAMBLE_SIZE + type_e0_record_size
+            )
+            # Account for the raster outline record at the start of this zoom level
+            rgn_tile_offset += RGN2_RASTER_OUTLINE_SIZE
 
         # --- Phase 2: Write all sections ---
 
@@ -724,6 +811,13 @@ class GMPWriter:
             subdiv_size,
             tre_maplevels_pos,
             map_levels_size,
+            tre5_pos,
+            tre5_size,
+            tre7_pos,
+            tre7_size,
+            tre7_rec_size,
+            tre8_pos,
+            tre8_size,
         )
         f.write(tre_header)
 
@@ -731,7 +825,7 @@ class GMPWriter:
         f.write(map_info)
 
         # 5. RGN Sub-Header
-        rgn_header = _build_rgn_subheader(now, rgn_data_pos, rgn_data_size)
+        rgn_header = _build_rgn_subheader(now, rgn1_pos, rgn1_size, rgn2_pos, rgn2_size)
         f.write(rgn_header)
 
         # 6. LBL Sub-Header
@@ -759,16 +853,35 @@ class GMPWriter:
         # 10. TRE map levels
         f.write(map_levels_data)
 
-        # 11. RGN data section (Type E0 records)
+        # 11. TRE8 data (6 bytes): 2 object type entries
+        # Entry 1: raster tiles type 0x13 (required for GMT bitmap detection)
+        # Entry 2: DATA_BOUNDS type 0x0D (from IOM reference)
+        f.write(bytes([0x06, 0x06, 0x13, 0x0D, 0x06, 0x01]))
+
+        # 13. TRE7 data: raster layer offset table (4 bytes per entry)
+        # Each entry: uint32 LE offset into RGN2 data section
+        # Points to the 0x0D raster outline record for each zoom level
+        # Matches IOM reference format: rec_size=4, no flag byte
+        rgn2_offset = 0
+        for z_idx, zoom in enumerate(img_file.zoom_levels):
+            tile_count = len(compressed_tiles.get(zoom.level_number, []))
+            # Write offset to the 0x0D raster outline record for this zoom level
+            f.write(struct.pack("<I", rgn2_offset))
+            # Advance past the outline record and all polyline+E0 pairs
+            rgn2_offset += RGN2_RASTER_OUTLINE_SIZE + tile_count * (
+                RGN2_POLYLINE_PREAMBLE_SIZE + type_e0_record_size
+            )
+
+        # 14. RGN2 data section (Type E0 records)
         _write_rgn_data_section(f, compressed_tiles, img_file.zoom_levels, img_file)
 
-        # 12. LBL labels (tile filenames)
+        # 15. LBL labels (tile filenames)
         f.write(label_strings)
 
-        # 13. LBL28 section (image index)
+        # 16. LBL28 section (image index)
         _write_lbl28_section(f, compressed_tiles, img_file.zoom_levels)
 
-        # 14. LBL29 section (image storage - JPEG tiles)
+        # 17. LBL29 section (image storage - JPEG tiles)
         _write_lbl29_section(f, compressed_tiles, img_file.zoom_levels)
 
         # Pad to aligned size
@@ -802,6 +915,13 @@ def _build_tre_subheader(
     subdiv_size: int,
     maplevels_pos: int,
     maplevels_size: int,
+    tre5_pos: int,
+    tre5_size: int,
+    tre7_pos: int,
+    tre7_size: int,
+    tre7_rec_size: int,
+    tre8_pos: int,
+    tre8_size: int,
 ) -> bytes:
     """Build the TRE sub-header (TRE_HEADER_LENGTH bytes).
 
@@ -812,6 +932,7 @@ def _build_tre_subheader(
       copyright_section: position(4) + size(4) + item_size(2)
       unknown(4) + poi_flags(1) + display_priority(3)
       flags + sections for polyline/polygon/points (zeros for raster)
+      TRE4-TRE8 extended section descriptors (for raster bitmap detection)
     """
     buf = bytearray(TRE_HEADER_LENGTH)
 
@@ -819,67 +940,106 @@ def _build_tre_subheader(
     common = _build_common_header("TRE", TRE_HEADER_LENGTH, now)
     buf[:21] = common
 
-    # Bounds as 3-byte signed map units (N, E, S, W)
-    off = 21
-    buf[off : off + 3] = _put3s(_deg_to_map_units(img_file.bounds_north))
-    off += 3
-    buf[off : off + 3] = _put3s(_deg_to_map_units(img_file.bounds_east))
-    off += 3
-    buf[off : off + 3] = _put3s(_deg_to_map_units(img_file.bounds_south))
-    off += 3
-    buf[off : off + 3] = _put3s(_deg_to_map_units(img_file.bounds_west))
-    off += 3
+    # TRE+0x15: Bounds as 3-byte signed map units (N, E, S, W)
+    buf[0x15 : 0x15 + 3] = _put3s(_deg_to_map_units(img_file.bounds_north))
+    buf[0x18 : 0x18 + 3] = _put3s(_deg_to_map_units(img_file.bounds_east))
+    buf[0x1B : 0x1B + 3] = _put3s(_deg_to_map_units(img_file.bounds_south))
+    buf[0x1E : 0x1E + 3] = _put3s(_deg_to_map_units(img_file.bounds_west))
 
-    # Map levels section info: position(4) + size(4)
-    struct.pack_into("<I", buf, off, maplevels_pos)
-    off += 4
-    struct.pack_into("<I", buf, off, maplevels_size)
-    off += 4
+    # TRE+0x21: Map levels (TRE1) position(4) + size(4)
+    struct.pack_into("<I", buf, 0x21, maplevels_pos)
+    struct.pack_into("<I", buf, 0x25, maplevels_size)
 
-    # Subdivisions section info: position(4) + size(4)
-    struct.pack_into("<I", buf, off, subdiv_pos)
-    off += 4
-    struct.pack_into("<I", buf, off, subdiv_size)
-    off += 4
+    # TRE+0x29: Subdivisions (TRE2) position(4) + size(4)
+    struct.pack_into("<I", buf, 0x29, subdiv_pos)
+    struct.pack_into("<I", buf, 0x2D, subdiv_size)
 
-    # Copyright section info: position(4) + size(4) + item_size(2)
-    struct.pack_into("<I", buf, off, copyright_pos)
-    off += 4
-    struct.pack_into("<I", buf, off, copyright_size)
-    off += 4
-    struct.pack_into("<H", buf, off, 3)
-    off += 2  # item_size = 3
+    # TRE+0x31: Copyright (TRE3) position(4) + size(4) + item_size(2)
+    struct.pack_into("<I", buf, 0x31, copyright_pos)
+    struct.pack_into("<I", buf, 0x35, copyright_size)
+    struct.pack_into("<H", buf, 0x39, 3)
 
-    # Unknown (4 bytes)
-    off += 4
+    # TRE+0x3F: Flags (1 byte) = 1
+    buf[0x3F] = 1
 
-    # POI flags (1 byte)
-    buf[off] = 1
-    off += 1
+    # TRE+0x40: Display priority (uint16 LE) = 24 for raster
+    struct.pack_into("<H", buf, 0x40, 24)
 
-    # Display priority (3 bytes) - 24 for raster
-    buf[off] = 24
-    off += 3
+    # TRE+0x42: More flags / parameters (8 bytes)
+    # IOM reference: 10 01 08 24 00 01 00 00
+    # GMT reports "parameters 1 8 36 1" (IOM) or "parameters 1 4 36 1" (SwissTopo)
+    # Byte 0x42=0x10 is a flag byte (bit 4 set in IOM, bit 4 set indicates raster?)
+    buf[0x42] = 0x10  # flag byte (IOM reference: 0x10)
+    buf[0x43] = 0x01  # parameter 1
+    buf[0x44] = 0x08  # parameter 2 (bits per coord: 8 for IOM, 4 for SwissTopo)
+    buf[0x45] = 0x24  # parameter 3 (36 = tile_size_constant)
+    buf[0x46] = 0x00
+    buf[0x47] = 0x01  # parameter 4
+    buf[0x48] = 0x00
+    buf[0x49] = 0x00
 
-    # Map ID at fixed TRE header offsets (required for GMT recognition)
-    # Offset 116: internal map ID (uint32 LE)
-    # Offset 207: map ID copy (uint32 LE)
-    struct.pack_into("<I", buf, 116, img_file.map_id)
-    struct.pack_into("<I", buf, 207, img_file.map_id)
+    # TRE+0x4A: TRE4 descriptor: pos(4) + size(4) + rec_size(2) + pad(4)
+    # TRE4 is not used for raster maps (size=0, shares position with TRE8)
+    struct.pack_into("<I", buf, 0x4A, tre8_pos)
+    struct.pack_into("<I", buf, 0x4E, 0)  # size=0
+    struct.pack_into("<H", buf, 0x52, 2)  # rec_size=2
+
+    # TRE+0x58: TRE5 descriptor: pos(4) + size(4) + rec_size(2) + pad(4)
+    # TRE5 must be EMPTY (size=0) for GMT to detect bitmaps (confirmed from IOM reference)
+    struct.pack_into("<I", buf, 0x58, tre8_pos)
+    struct.pack_into("<I", buf, 0x5C, 0)  # size=0 (empty, like IOM)
+    struct.pack_into("<H", buf, 0x60, 2)  # rec_size=2
+
+    # TRE+0x66: TRE6 descriptor: pos(4) + size(4) + rec_size(2) + pad(4)
+    # TRE6 shares position with TRE8 (size=0 for raster)
+    struct.pack_into("<I", buf, 0x66, tre8_pos)
+    struct.pack_into("<I", buf, 0x6A, 0)  # size=0
+    struct.pack_into("<H", buf, 0x6E, 3)  # rec_size=3
+
+    # TRE+0x74: Map ID (uint32 LE)
+    struct.pack_into("<I", buf, 0x74, img_file.map_id)
+
+    # TRE+0x78: padding (4 bytes, zeros)
+    # Already zero
+
+    # TRE+0x7C: TRE7 descriptor (raster layer): pos(4) + size(4) + rec_size(2) + pad(4)
+    struct.pack_into("<I", buf, 0x7C, tre7_pos)
+    struct.pack_into("<I", buf, 0x80, tre7_size)
+    struct.pack_into("<H", buf, 0x84, tre7_rec_size)
+    buf[0x86] = 0x01  # flag from IOM reference (01000000)
+    buf[0x87] = 0x00
+
+    # TRE+0x8A: TRE8 descriptor (object types): pos(4) + size(4) + rec_size(2) + pad(4)
+    struct.pack_into("<I", buf, 0x8A, tre8_pos)
+    struct.pack_into("<I", buf, 0x8E, tre8_size)
+    struct.pack_into("<H", buf, 0x92, 3)  # rec_size=3 (3-byte entries: type + 2 params)
+    buf[0x94] = 0x00  # padding flag (IOM reference: 00 00 02 00 at 0x94)
+
+    # TRE+0xCF: Map ID copy / matching number (uint32 LE)
+    struct.pack_into("<I", buf, 0xCF, img_file.map_id)
+
+    # TRE+0xD3: Map name (null-terminated ASCII, rest of 273-byte header)
+    name_str = img_file.header.map_name or "Raster Map"
+    name_bytes = name_str.encode("ascii")[: TRE_HEADER_LENGTH - 0xD3 - 1]
+    buf[0xD3 : 0xD3 + len(name_bytes)] = name_bytes
+    buf[0xD3 + len(name_bytes)] = 0x00  # null terminator
 
     return bytes(buf)
 
 
 def _build_rgn_subheader(
     now: datetime,
-    data_pos: int,
-    data_size: int,
+    rgn1_pos: int,
+    rgn1_size: int,
+    rgn2_pos: int,
+    rgn2_size: int,
 ) -> bytes:
     """Build the RGN sub-header (RGN_HEADER_LENGTH bytes).
 
     After common header (21 bytes):
-      data_section: position(4) + size(4)
-      ext_type sections: zeros (no extended types for simplified raster)
+      RGN1: position(4) + size(4) at offset 0x15
+      RGN2: position(4) + size(4) at offset 0x1D
+      Remaining: zeros
     """
     buf = bytearray(RGN_HEADER_LENGTH)
 
@@ -887,11 +1047,13 @@ def _build_rgn_subheader(
     common = _build_common_header("RGN", RGN_HEADER_LENGTH, now)
     buf[:21] = common
 
-    # Data section: position(4) + size(4)
-    struct.pack_into("<I", buf, 21, data_pos)
-    struct.pack_into("<I", buf, 25, data_size)
+    # RGN1 section: position(4) + size(4) at offset 0x15
+    struct.pack_into("<I", buf, 0x15, rgn1_pos)
+    struct.pack_into("<I", buf, 0x19, rgn1_size)
 
-    # Ext type sections remain zero
+    # RGN2 section (extended types / raster data): position(4) + size(4) at offset 0x1D
+    struct.pack_into("<I", buf, 0x1D, rgn2_pos)
+    struct.pack_into("<I", buf, 0x21, rgn2_size)
 
     return bytes(buf)
 
@@ -928,16 +1090,27 @@ def _build_lbl_subheader(
     # Offset multiplier (1 byte) = 1
     buf[29] = 1
 
-    # Encoding (1 byte) = 6 (CP1252)
-    buf[30] = 6
+    # Encoding (1 byte) = 9 (8-bit encoding, matches SwissTopo reference)
+    buf[30] = 9
 
-    # LBL28 section descriptor: position(4) + size(4) at bytes 37-44
-    struct.pack_into("<I", buf, 37, lbl28_pos)
-    struct.pack_into("<I", buf, 41, lbl28_size)
+    # Codepage (uint16 LE) at offset 0xAA = 1252 (Windows Western European)
+    # GMT reads this field for its "CP" display
+    struct.pack_into("<H", buf, 0xAA, 1252)
 
-    # LBL29 section descriptor: position(4) + size(4) at bytes 45-52
-    struct.pack_into("<I", buf, 45, lbl29_pos)
-    struct.pack_into("<I", buf, 49, lbl29_size)
+    # Raster table descriptor (LBL28 equivalent) at offset 0x184
+    # GPXSee/GMT reads: offset(4) + size(4) + recordSize(2) + flags(4)
+    # Layout verified from IOM reference LBL header at 0x184-0x191
+    struct.pack_into("<I", buf, 0x184, lbl28_pos)
+    struct.pack_into("<I", buf, 0x188, lbl28_size)
+    struct.pack_into("<H", buf, 0x18C, 4)  # record size: uint32 offsets
+
+    # Flags (4 bytes at 0x18E) — 0 for raster maps (matches IOM reference)
+    # Already zero
+
+    # Raster image data descriptor (LBL29 equivalent) at offset 0x192
+    # offset(4) + size(4)
+    struct.pack_into("<I", buf, 0x192, lbl29_pos)
+    struct.pack_into("<I", buf, 0x196, lbl29_size)
 
     # Remaining bytes stay zero (places section, codepage, sort ids, etc.)
 
@@ -1007,6 +1180,12 @@ def _write_type_e0_record(
     # bits_field
     f.write(bytes([bits_field]))
 
+    # Image index IMMEDIATELY after bits_field (per doc Section 4.5.2)
+    if bits_field == 0x2B:
+        f.write(struct.pack("<B", image_index))  # uint8
+    else:
+        f.write(struct.pack("<H", image_index))  # uint16
+
     # Coordinates in Garmin map units (32-bit signed)
     lat_min_units = _deg_to_garmin(lat_min)
     lon_min_units = _deg_to_garmin(lon_min)
@@ -1021,15 +1200,9 @@ def _write_type_e0_record(
     # Block size (JPEG size)
     f.write(struct.pack("<I", jpeg_size))  # unsigned int32
 
-    # Image index (variable size based on bits_field)
-    if bits_field == 0x2B:
-        f.write(struct.pack("<B", image_index))  # uint8
-    else:
-        f.write(struct.pack("<H", image_index))  # uint16
-
 
 def _write_lbl28_section(
-    f: io.BufferedWriter, compressed_tiles: dict[int, list[bytes]], zoom_levels: list
+    f: io.BufferedWriter, compressed_tiles: CompressedTiles, zoom_levels: list
 ) -> None:
     """
     Write LBL28 section (image index table).
@@ -1039,20 +1212,21 @@ def _write_lbl28_section(
 
     Args:
         f: File handle to write to
-        compressed_tiles: Dict mapping zoom level to list of JPEG tile data
+        compressed_tiles: Dict mapping zoom level to list of (jpeg_bytes, bounds) tuples or plain bytes
         zoom_levels: List of ZoomLevel objects defining zoom order
     """
     offset = 0
     for zoom in zoom_levels:
         tiles = compressed_tiles.get(zoom.level_number, [])
-        for tile_data in tiles:
+        for tile_entry in tiles:
             # Write offset to this JPEG (relative to LBL29 start)
             f.write(struct.pack("<I", offset))
-            offset += len(tile_data)
+            jpeg_data = tile_entry[0] if isinstance(tile_entry, tuple) else tile_entry
+            offset += len(jpeg_data)
 
 
 def _write_lbl29_section(
-    f: io.BufferedWriter, compressed_tiles: dict[int, list[bytes]], zoom_levels: list
+    f: io.BufferedWriter, compressed_tiles: CompressedTiles, zoom_levels: list
 ) -> None:
     """
     Write LBL29 section (image storage).
@@ -1062,12 +1236,13 @@ def _write_lbl29_section(
 
     Args:
         f: File handle to write to
-        compressed_tiles: Dict mapping zoom level to list of JPEG tile data
+        compressed_tiles: Dict mapping zoom level to list of (jpeg_bytes, bounds) tuples or plain bytes
         zoom_levels: List of ZoomLevel objects defining zoom order
     """
     for zoom in zoom_levels:
         tiles = compressed_tiles.get(zoom.level_number, [])
-        for tile_data in tiles:
+        for tile_entry in tiles:
+            tile_data = tile_entry[0] if isinstance(tile_entry, tuple) else tile_entry
             # Verify JPEG marker
             if len(tile_data) >= 4 and tile_data[0:2] == b"\xff\xd8":
                 f.write(tile_data)
@@ -1078,41 +1253,126 @@ def _write_lbl29_section(
                 f.write(tile_data)
 
 
+def _write_polyline_preamble(
+    f: io.BufferedWriter,
+    center_lat: float,
+    center_lon: float,
+) -> None:
+    """Write an 18-byte polyline preamble record before each E0 tile record.
+
+    This record is required for GMT and Garmin devices to properly detect
+    and display raster bitmap tiles. The preamble is a type 0x06 polyline
+    record (subtype 0xB3) containing a minimal 2-point line in Garmin
+    bitstream format.
+
+    Format: type(1) + subtype(1) + bitstream(16) = 18 bytes total.
+
+    Args:
+        f: File handle to write to
+        center_lat: Subdivision center latitude (degrees)
+        center_lon: Subdivision center longitude (degrees)
+    """
+    # Type 0x06 (polyline), subtype 0xB3 (line type 51, preamble marker)
+    f.write(bytes([0x06, 0xB3]))
+
+    # Garmin polyline bitstream for a 2-point line at the subdivision center.
+    # The bitstream uses the standard Garmin RGN polyline encoding:
+    # - Byte 0: direction(1) + two_addresses(1) + extra_bytes_count(6 bits)
+    # - Extra bytes: define coordinate delta bit width
+    # - Coordinate deltas: signed integers at specified bit width
+    #
+    # Using zero deltas (both points at subdivision center) for simplicity.
+    # This matches the IOM reference file's approach of using minimal offsets.
+    f.write(b"\x00" * 16)
+
+
+def _write_raster_outline_record(
+    f: io.BufferedWriter,
+    center_lat: float,
+    center_lon: float,
+) -> None:
+    """Write a 0x0D raster outline record (polygon) before each zoom level's tile data.
+
+    This record is referenced by TRE7 entries and tells GMT/Garmin that the
+    following data contains raster bitmap tiles. The record is a minimal polygon
+    (type 0x0D, subtype 0x01) with a degenerate outline at the subdivision center.
+
+    Format: type(1) + subtype(1) + lon_delta(int16) + lat_delta(int16) + bitstream(14) = 20 bytes.
+    """
+    # Type 0x0D (polygon), subtype 0x01 (raster outline marker)
+    f.write(bytes([0x0D, 0x01]))
+    # Zero deltas (at subdivision center)
+    f.write(struct.pack("<h", 0))  # lon_delta
+    f.write(struct.pack("<h", 0))  # lat_delta
+    # Minimal bitstream (14 bytes of zeros)
+    f.write(b"\x00" * 14)
+
+
 def _write_rgn_data_section(
     f: io.BufferedWriter,
-    compressed_tiles: dict[int, list[bytes]],
+    compressed_tiles: CompressedTiles,
     zoom_levels: list,
     img_file,
 ) -> None:
     """
-    Write RGN data section (Type E0 records).
+    Write RGN data section (raster outline + polyline preamble + Type E0 records).
 
-    Writes one Type E0 record per tile, containing bounds, size, and image index.
+    For each zoom level, writes:
+      1. Raster outline record (20 bytes): type 0x0D, subtype 0x01, + outline data
+    Then for each raster tile at that level:
+      2. Polyline preamble (18 bytes): type 0x06, subtype 0xB3, + 16 data bytes
+      3. Type E0 record (23-24 bytes): tile bounds, JPEG size, image index
+
+    The raster outline record is referenced by TRE7 offset entries and is required
+    for GMT to detect bitmaps in the IMG file. The polyline preamble provides
+    additional line element metadata for the Garmin renderer.
+
+    Uses per-tile geographic bounds when available (from tile extraction),
+    falling back to full map bounds as a default.
 
     Args:
         f: File handle to write to
-        compressed_tiles: Dict mapping zoom level to list of JPEG tile data
+        compressed_tiles: Dict mapping zoom level to list of (jpeg_bytes, bounds) tuples or plain bytes
         zoom_levels: List of ZoomLevel objects defining zoom order
-        img_file: IMGFile with map bounds
+        img_file: IMGFile with map bounds (used as fallback)
     """
     total_tiles = sum(
         len(compressed_tiles.get(z.level_number, [])) for z in zoom_levels
     )
     bits_field = _compute_bits_field(total_tiles)
 
+    # Precompute the subdivision center for preamble records.
+    center_lat = (img_file.bounds_north + img_file.bounds_south) / 2
+    center_lon = (img_file.bounds_east + img_file.bounds_west) / 2
+
     image_index = 0
     for zoom in zoom_levels:
         tiles = compressed_tiles.get(zoom.level_number, [])
-        for tile_data in tiles:
-            # TODO: Use actual tile bounds from tile extraction (task 8)
-            # For now, use map bounds as a placeholder
+
+        # Write raster outline record (0x0D) at the start of each zoom level
+        _write_raster_outline_record(f, center_lat, center_lon)
+        for tile_entry in tiles:
+            if isinstance(tile_entry, tuple):
+                jpeg_data, tile_bounds = tile_entry
+                lat_min, lon_min, lat_max, lon_max = tile_bounds
+            else:
+                jpeg_data = tile_entry
+                lat_min = img_file.bounds_south
+                lon_min = img_file.bounds_west
+                lat_max = img_file.bounds_north
+                lon_max = img_file.bounds_east
+
+            # Write polyline preamble (18 bytes)
+            _write_polyline_preamble(f, center_lat, center_lon)
+
+            # Write Type E0 record
             _write_type_e0_record(
                 f,
-                lat_min=img_file.bounds_south,
-                lon_min=img_file.bounds_west,
-                lat_max=img_file.bounds_north,
-                lon_max=img_file.bounds_east,
-                jpeg_size=len(tile_data),
+                lat_min=lat_min,
+                lon_min=lon_min,
+                lat_max=lat_max,
+                lon_max=lon_max,
+                jpeg_size=len(jpeg_data),
                 image_index=image_index,
                 bits_field=bits_field,
             )
@@ -1322,7 +1582,7 @@ class TileExtractor:
         tile_size: int = 256,
         *,
         progress_callback: Callable[[str, int, int], None] | None = None,
-    ) -> dict[int, list[np.ndarray]]:
+    ) -> dict[int, list[tuple[np.ndarray, tuple[float, float, float, float]]]]:
         """
         Extract tiles from raster at each zoom level.
 
@@ -1333,7 +1593,7 @@ class TileExtractor:
             progress_callback: Called with (stage, current, total) to report progress
 
         Returns:
-            Dictionary mapping zoom level to list of tile arrays
+            Dictionary mapping zoom level to list of (tile_array, (lat_min, lon_min, lat_max, lon_max)) tuples
         """
         logger.info(f"Extracting tiles from {self.raster_path}")
         logger.info(f"  Zoom levels: {zoom_levels}")
@@ -1350,14 +1610,16 @@ class TileExtractor:
         if progress_callback:
             progress_callback("extracting", 0, total_cells)
 
-        tiles_by_zoom: dict[int, list[np.ndarray]] = {}
+        tiles_by_zoom: dict[
+            int, list[tuple[np.ndarray, tuple[float, float, float, float]]]
+        ] = {}
         extracted_count = 0
 
         for zoom in zoom_levels:
             cells = all_cells[zoom]
             logger.info(f"  Zoom {zoom}: {len(cells)} tiles to extract")
 
-            tiles: list[np.ndarray] = []
+            tiles: list[tuple[np.ndarray, tuple[float, float, float, float]]] = []
             for x, y, lon_min, lat_max, lon_max, lat_min in cells:
                 tile = self._extract_tile_region(
                     lon_min,
@@ -1367,7 +1629,8 @@ class TileExtractor:
                     tile_size,
                 )
                 if tile is not None:
-                    tiles.append(tile)
+                    # Store tile with its geographic bounds: (lat_min, lon_min, lat_max, lon_max)
+                    tiles.append((tile, (lat_min, lon_min, lat_max, lon_max)))
                 extracted_count += 1
                 if progress_callback:
                     progress_callback("extracting", extracted_count, total_cells)
@@ -1473,58 +1736,6 @@ class TileEncoder:
         return num_cols, num_rows
 
 
-class TileCompressor:
-    """Compresses tiles to JPEG format for Garmin IMG."""
-
-    @staticmethod
-    def compress_tile(
-        tile_array: np.ndarray,
-        quality: int = 85,
-    ) -> bytes:
-        """
-        Compress tile to JPEG.
-
-        Args:
-            tile_array: RGB tile data as numpy array (H, W, 3)
-            quality: JPEG quality 1-100 (default 85)
-
-        Returns:
-            JPEG-compressed tile data as bytes
-
-        Raises:
-            ValueError: If tile exceeds 3.5 MB after compression
-        """
-        img = Image.fromarray(tile_array)
-
-        buffer = io.BytesIO()
-        img.save(buffer, format="JPEG", quality=quality, optimize=True)
-        jpeg_data = buffer.getvalue()
-
-        if len(jpeg_data) > MAX_TILE_SIZE:
-            logger.warning(
-                f"Tile exceeds 3.5 MB limit: {len(jpeg_data):,} bytes "
-                f"(quality={quality})"
-            )
-
-        return jpeg_data
-
-    @staticmethod
-    def compress_tiles(
-        tiles: list[np.ndarray],
-        quality: int = 85,
-    ) -> list[bytes]:
-        """Compress multiple tiles."""
-        compressed = []
-        for i, tile in enumerate(tiles):
-            try:
-                jpeg_data = TileCompressor.compress_tile(tile, quality)
-                compressed.append(jpeg_data)
-            except Exception as e:
-                logger.error(f"Failed to compress tile {i}: {e}")
-                raise
-        return compressed
-
-
 class IMGWriter:
     """
     Binary writer for Garmin IMG files.
@@ -1538,15 +1749,13 @@ class IMGWriter:
         self.output_path = output_path
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def write(
-        self, img_file: IMGFile, compressed_tiles: dict[int, list[bytes]]
-    ) -> None:
+    def write(self, img_file: IMGFile, compressed_tiles: CompressedTiles) -> None:
         """
         Write complete IMG file using two-pass layout.
 
         Args:
             img_file: IMGFile data structure to serialize
-            compressed_tiles: Dict mapping zoom level to list of JPEG tile bytes
+            compressed_tiles: Dict mapping zoom level to list of (jpeg_bytes, bounds) tuples or plain bytes
         """
         logger.info(f"Writing IMG file: {self.output_path}")
 

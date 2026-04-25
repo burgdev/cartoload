@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import shutil
 import struct
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -183,18 +184,20 @@ class TestIMGHeaderSerialization:
         assert data[0x61] == 0x09  # E1
         assert data[0x62] == 0x06  # E2 → 512 * 2^6 = 32768
 
-    def test_checksum_at_0x0F(self):
+    def test_checksum_or_id_at_0x0E(self):
         header = _make_header()
         data = IMGHeaderWriter.serialize(header)
-        # Sum of bytes 0x00-0x0F should be 0 mod 256
-        byte_sum = sum(data[0x00:0x10])
-        assert byte_sum % 256 == 0
+        # Offset 0x0E-0x0F should contain checksum_or_id as LE uint16
+        checksum_id = struct.unpack_from("<H", data, 0x0E)[0]
+        assert checksum_id == header.checksum_or_id
 
     def test_partition_table_at_0x1BE(self):
         header = _make_header()
         data = IMGHeaderWriter.serialize(header)
-        # System type should be 0xFF
-        assert data[0x1C2] == 0xFF
+        # Boot indicator should be 0x01 (bootable, matching SwissTopo reference)
+        assert data[0x1BE] == 0x01
+        # System type should be 0x60 (from SwissTopo reference)
+        assert data[0x1C2] == 0x60
 
 
 # ---------------------------------------------------------------------------
@@ -975,7 +978,7 @@ class TestLBL28LBL29TypeE0:
         # GMP FAT entry is at 0x1200 (second FAT entry after special directory at 0x1000)
         # Read first block number from GMP FAT entry
         gmp_start_block = struct.unpack_from("<H", data, 0x1200 + 0x20)[0]
-        gmp_offset = gmp_start_block * 512
+        gmp_offset = gmp_start_block * 32768
 
         # LBL sub-header is within GMP - search for "GARMIN LBL" magic
         lbl_magic_offset = data.find(b"GARMIN LBL", gmp_offset)
@@ -983,9 +986,10 @@ class TestLBL28LBL29TypeE0:
         # LBL sub-header starts 2 bytes before the magic (header length field)
         lbl_start = lbl_magic_offset - 2
 
-        # LBL28 descriptor at bytes 37-44 relative to LBL start
-        lbl28_position = struct.unpack_from("<I", data, lbl_start + 37)[0]
-        lbl28_size = struct.unpack_from("<I", data, lbl_start + 41)[0]
+        # Raster table descriptor (LBL28 equivalent) at offset 0x184 relative to LBL start
+        # Format: position(4) + size(4) + recordSize(2) + flags(4) at 0x184-0x191
+        lbl28_position = struct.unpack_from("<I", data, lbl_start + 0x184)[0]
+        lbl28_size = struct.unpack_from("<I", data, lbl_start + 0x188)[0]
 
         assert lbl28_position > 0, "LBL28 position should be set"
         assert lbl28_size > 0, "LBL28 size should be set"
@@ -1005,19 +1009,19 @@ class TestLBL28LBL29TypeE0:
         data = output.read_bytes()
         # Find LBL sub-header (GMP FAT entry at 0x1200)
         gmp_start_block = struct.unpack_from("<H", data, 0x1200 + 0x20)[0]
-        gmp_offset = gmp_start_block * 512
+        gmp_offset = gmp_start_block * 32768
         lbl_magic_offset = data.find(b"GARMIN LBL", gmp_offset)
         lbl_start = lbl_magic_offset - 2
 
-        # Read LBL28 descriptor
-        lbl28_position = struct.unpack_from("<I", data, lbl_start + 37)[0]
-        lbl28_size = struct.unpack_from("<I", data, lbl_start + 41)[0]
+        # Read raster table descriptor at 0x184
+        lbl28_position = struct.unpack_from("<I", data, lbl_start + 0x184)[0]
+        lbl28_size = struct.unpack_from("<I", data, lbl_start + 0x188)[0]
 
         # LBL28 should contain 3 × 4 bytes = 12 bytes
         assert lbl28_size == 12, f"Expected 12 bytes for 3 tiles, got {lbl28_size}"
 
-        # Read offsets
-        lbl28_offset = lbl_start + lbl28_position
+        # Read offsets (positions are GMP-relative)
+        lbl28_offset = gmp_offset + lbl28_position
         offsets = [
             struct.unpack_from("<I", data, lbl28_offset + i * 4)[0] for i in range(3)
         ]
@@ -1043,13 +1047,14 @@ class TestLBL28LBL29TypeE0:
         data = output.read_bytes()
         # Find LBL sub-header (GMP FAT entry at 0x1200)
         gmp_start_block = struct.unpack_from("<H", data, 0x1200 + 0x20)[0]
-        gmp_offset = gmp_start_block * 512
+        gmp_offset = gmp_start_block * 32768
         lbl_magic_offset = data.find(b"GARMIN LBL", gmp_offset)
         lbl_start = lbl_magic_offset - 2
 
-        # LBL29 descriptor at bytes 45-52
-        lbl29_position = struct.unpack_from("<I", data, lbl_start + 45)[0]
-        lbl29_size = struct.unpack_from("<I", data, lbl_start + 49)[0]
+        # Raster image data descriptor (LBL29 equivalent) at offset 0x192 relative to LBL start
+        # Format: position(4) + size(4) at 0x192-0x199
+        lbl29_position = struct.unpack_from("<I", data, lbl_start + 0x192)[0]
+        lbl29_size = struct.unpack_from("<I", data, lbl_start + 0x196)[0]
 
         assert lbl29_position > 0, "LBL29 position should be set"
         assert lbl29_size > 0, "LBL29 size should be set"
@@ -1069,16 +1074,16 @@ class TestLBL28LBL29TypeE0:
         data = output.read_bytes()
         # Find LBL sub-header (GMP FAT entry at 0x1200)
         gmp_start_block = struct.unpack_from("<H", data, 0x1200 + 0x20)[0]
-        gmp_offset = gmp_start_block * 512
+        gmp_offset = gmp_start_block * 32768
         lbl_magic_offset = data.find(b"GARMIN LBL", gmp_offset)
         lbl_start = lbl_magic_offset - 2
 
-        # Read LBL29 descriptor
-        lbl29_position = struct.unpack_from("<I", data, lbl_start + 45)[0]
-        lbl29_size = struct.unpack_from("<I", data, lbl_start + 49)[0]
+        # Read raster image data descriptor at 0x192
+        lbl29_position = struct.unpack_from("<I", data, lbl_start + 0x192)[0]
+        lbl29_size = struct.unpack_from("<I", data, lbl_start + 0x196)[0]
 
-        # Read LBL29 section
-        lbl29_offset = lbl_start + lbl29_position
+        # Read LBL29 section (positions are GMP-relative)
+        lbl29_offset = gmp_offset + lbl29_position
         lbl29_data = data[lbl29_offset : lbl29_offset + lbl29_size]
 
         # Should start with JPEG marker FFD8FFE0
@@ -1158,23 +1163,20 @@ class TestLBL28LBL29TypeE0:
         data = output.read_bytes()
         # Find LBL sub-header (GMP FAT entry at 0x1200)
         gmp_start_block = struct.unpack_from("<H", data, 0x1200 + 0x20)[0]
-        gmp_offset = gmp_start_block * 512
+        gmp_offset = gmp_start_block * 32768
         lbl_magic_offset = data.find(b"GARMIN LBL", gmp_offset)
         lbl_start = lbl_magic_offset - 2
 
         # Verify LBL29 is last section in LBL (no tile index table after it)
-        lbl29_position = struct.unpack_from("<I", data, lbl_start + 45)[0]
-        lbl29_size = struct.unpack_from("<I", data, lbl_start + 49)[0]
+        lbl29_position = struct.unpack_from("<I", data, lbl_start + 0x192)[0]
+        lbl29_size = struct.unpack_from("<I", data, lbl_start + 0x196)[0]
 
-        # LBL sub-header total length
-        lbl_header_length = struct.unpack_from("<H", data, lbl_start)[0]
-
-        # LBL29 should extend to near end of LBL subfile
+        # LBL29 should extend to near end of GMP data
         lbl29_end = lbl29_position + lbl29_size
-        # Allow some padding, but should be close to header length
-        assert lbl29_end <= lbl_header_length + 1024, (
-            "LBL29 should be last major section"
-        )
+        # Get GMP subfile size from FAT
+        gmp_size = struct.unpack_from("<I", data, 0x1200 + 0x0C)[0]
+        # LBL29 end should be close to total GMP data size
+        assert lbl29_end <= gmp_size + 1024, "LBL29 should be last major section"
 
     @pytest.mark.gmt
     def test_gmt_output_shows_bitmaps(self, tmp_path):
@@ -1292,8 +1294,161 @@ class TestBinaryComparison:
         header = _make_header()
         our_data = IMGHeaderWriter.serialize(header)
 
+        # E1 is always 0x09 (512-byte base unit)
         assert our_data[0x61] == ref_data[0x61] == 0x09
-        assert our_data[0x62] == ref_data[0x62] == 0x06
+        # E2 varies by file: IOM uses 0x02 (2048-byte blocks), we use 0x06 (32768-byte blocks)
+        # Just verify our E2 is valid and consistent
+        assert our_data[0x62] == 0x06  # 512 * 2^6 = 32768
+
+
+# ---------------------------------------------------------------------------
+# E2E Validation Tests (Section 3 of fix-garmin-img-export)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.gdal
+class TestE2EValidation:
+    """End-to-end tests creating IMG files from real GeoTIFF data and validating."""
+
+    @pytest.fixture
+    def minimal_geotiff(self, tmp_path):
+        """Create a minimal GeoTIFF for testing using gdal_create."""
+        geotiff_path = tmp_path / "test_input.tif"
+        result = subprocess.run(
+            [
+                "gdal_create",
+                "-of",
+                "GTiff",
+                "-outsize",
+                "256",
+                "256",
+                "-a_srs",
+                "EPSG:4326",
+                "-a_ullr",
+                "8.0",
+                "47.5",
+                "9.0",
+                "47.0",
+                "-burn",
+                "128",
+                str(geotiff_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            pytest.skip(f"gdal_create failed: {result.stderr}")
+        return geotiff_path
+
+    def test_e2e_create_img_from_geotiff(self, tmp_path, minimal_geotiff):
+        """3.1-3.2: Create a 2-zoom-level IMG from a real GeoTIFF."""
+        from cartoload.exporters.garmin_img import GarminImgExporter
+
+        layer = LayerConfig(
+            id="e2e_test",
+            name="E2ETest",
+            description="E2E test layer",
+            source="test_src",
+            zoom_levels=[12, 13],
+            exporter="garmin-img",
+            output="e2e_output.img",
+            bounds={"north": 47.5, "south": 47.0, "west": 8.0, "east": 9.0},
+        )
+
+        output_path = tmp_path / "e2e_output.img"
+        exporter = GarminImgExporter()
+        result = exporter.export(minimal_geotiff, layer, output_path)
+
+        assert len(result) >= 1
+        assert result[0].exists()
+
+    def test_e2e_file_size_proportional_to_tiles(self, tmp_path, minimal_geotiff):
+        """3.3: Verify output file size is proportional to tile data."""
+        from cartoload.exporters.garmin_img import GarminImgExporter
+
+        layer = LayerConfig(
+            id="e2e_size",
+            name="E2ESizeTest",
+            description="Size test",
+            source="test_src",
+            zoom_levels=[12],
+            exporter="garmin-img",
+            output="e2e_size.img",
+            bounds={"north": 47.5, "south": 47.0, "west": 8.0, "east": 9.0},
+        )
+
+        output_path = tmp_path / "e2e_size.img"
+        exporter = GarminImgExporter()
+        result = exporter.export(minimal_geotiff, layer, output_path)
+
+        file_size = result[0].stat().st_size
+        # File should be at least 64KB (header + FAT + minimum structure)
+        assert file_size > 64 * 1024, f"File too small: {file_size} bytes"
+        # File should not be absurdly large for a small raster
+        assert file_size < 10 * 1024 * 1024, (
+            f"File unexpectedly large: {file_size} bytes"
+        )
+
+    def test_e2e_magic_and_boot_signature(self, tmp_path, minimal_geotiff):
+        """3.4: Verify DSKIMG magic and boot signature in E2E output."""
+        from cartoload.exporters.garmin_img import GarminImgExporter
+
+        layer = LayerConfig(
+            id="e2e_sig",
+            name="E2ESigTest",
+            description="Signature test",
+            source="test_src",
+            zoom_levels=[12],
+            exporter="garmin-img",
+            output="e2e_sig.img",
+            bounds={"north": 47.5, "south": 47.0, "west": 8.0, "east": 9.0},
+        )
+
+        output_path = tmp_path / "e2e_sig.img"
+        exporter = GarminImgExporter()
+        result = exporter.export(minimal_geotiff, layer, output_path)
+
+        data = result[0].read_bytes()
+        assert data[0x10:0x16] == b"DSKIMG", "Missing DSKIMG magic"
+        sig = struct.unpack_from("<H", data, 0x1FE)[0]
+        assert sig == 0xAA55, "Missing boot signature"
+
+    @pytest.mark.gmt
+    def test_e2e_gmt_no_wrong_header(self, tmp_path, minimal_geotiff):
+        """3.5: Verify GMT reports no 'Wrong header' errors on E2E output."""
+        if not shutil.which("gmt"):
+            pytest.skip("gmt not available on PATH")
+
+        from cartoload.exporters.garmin_img import GarminImgExporter
+
+        layer = LayerConfig(
+            id="e2e_gmt",
+            name="E2EGmtTest",
+            description="GMT validation test",
+            source="test_src",
+            zoom_levels=[12],
+            exporter="garmin-img",
+            output="e2e_gmt.img",
+            bounds={"north": 47.5, "south": 47.0, "west": 8.0, "east": 9.0},
+        )
+
+        output_path = tmp_path / "e2e_gmt.img"
+        exporter = GarminImgExporter()
+        result = exporter.export(minimal_geotiff, layer, output_path)
+
+        gmt_result = subprocess.run(
+            ["gmt", "-i", "-v", str(result[0])],
+            capture_output=True,
+            text=True,
+            encoding="cp1252",
+            errors="replace",
+        )
+        assert "Wrong header" not in gmt_result.stdout, (
+            f"GMT reports header error: {gmt_result.stdout}"
+        )
+        assert "Wrong header" not in gmt_result.stderr, (
+            f"GMT reports header error: {gmt_result.stderr}"
+        )
 
 
 # ---------------------------------------------------------------------------

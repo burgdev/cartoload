@@ -100,12 +100,14 @@ The existing codebase provides stubs: `exporters/base.py` defines a `BaseExporte
 
 3. **MPS subfile format** — Corrected to match reference SwissTopo files: "LE" signature (not "MP"), map_id at offset 7, hex ID string, repeated map name. Previously had wrong format causing "Wrong MPS records size" from GMT.
 
-4. **PDF specification analysis** — Analyzed John Mechalas' `imgformat-1.0.pdf` (2005). Key findings:
+4. **PDF specification analysis** — Analyzed John Mechalas' `imgformat-1.0.pdf` (2005) and Willink/Pinns `expl_img2015.pdf` (2015). Key findings:
    - Vector vs raster use different subdivision formats (obj_types=0x0F for raster vs 0x10/0x20/0x40/0x80 for vector)
    - Map level definition: zoom level in bits 0-3, inherited flag in bit 7
    - LBL supports 6/8/10-bit label encoding (vector only)
    - TRE header variants: 116, 120, 154, 188 (vector) vs 273 (raster)
    - Checksum formula confirmed: `(-sum) & 0xFF` at offset 0x0F
+   - Willink/Pinns corrects Mechalas on POI subtype flag location (bit 7 of byte 4, not byte 1)
+   - Full vector format documented in `docs/exporters/garmin-img.md` Appendix A
 
 ### Known Limitations
 

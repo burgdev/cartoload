@@ -20,6 +20,7 @@ from .garmin_img_writer import (
     IMGWriter,
     LayoutComputer,
     MAX_FILE_SIZE,
+    CompressedTiles,
     TileEncoder,
     TileExtractor,
 )
@@ -33,23 +34,27 @@ ExportProgressCallback = Callable[[str, int, int], None]
 logger = logging.getLogger(__name__)
 
 # Garmin zoom level mapping (Web Mercator zoom -> Garmin zoom codes)
-# Based on format research: levels [20,21,22,23,24] -> zoom [84,83,2,1,0]
+# These are the byte values stored in the TRE level record at byte offset 0.
+# GMT displays them as hex notation (e.g., 0x84 shows as "84").
+# Reference SwissTopo: levels [20,21,22,23,24], zoom [84,83,2,1,0]
+#   level 20 → byte 0x84 (132), level 21 → byte 0x83 (131),
+#   levels 22-24 → bytes 0x02, 0x01, 0x00
 _GARMIN_ZOOM_CODES = {
-    10: 94,
-    11: 93,
-    12: 92,
-    13: 91,
-    14: 90,
-    15: 89,
-    16: 88,
-    17: 87,
-    18: 86,
-    19: 85,
-    20: 84,
-    21: 83,
-    22: 2,
-    23: 1,
-    24: 0,
+    10: 0x94,
+    11: 0x93,
+    12: 0x92,
+    13: 0x91,
+    14: 0x90,
+    15: 0x8F,
+    16: 0x88,
+    17: 0x87,
+    18: 0x86,
+    19: 0x85,
+    20: 0x84,
+    21: 0x83,
+    22: 0x02,
+    23: 0x01,
+    24: 0x00,
 }
 
 MAP_NAME_MAX_LEN = 32
@@ -242,8 +247,12 @@ class GarminImgExporter(BaseExporter):
         layer_config: LayerConfig,
         *,
         progress_callback: ExportProgressCallback | None = None,
-    ) -> dict[int, list[bytes]]:
-        """Extract and compress tiles from the raster at each zoom level."""
+    ) -> dict[int, list[tuple[bytes, tuple[float, float, float, float]]]]:
+        """Extract and compress tiles from the raster at each zoom level.
+
+        Returns:
+            Dictionary mapping zoom level to list of (jpeg_bytes, (lat_min, lon_min, lat_max, lon_max)) tuples.
+        """
         bounds = layer_config.bounds or {}
 
         if raster_path and raster_path.exists():
@@ -263,13 +272,16 @@ class GarminImgExporter(BaseExporter):
         if progress_callback:
             progress_callback("encoding", 0, total_tiles)
 
-        compressed = {}
+        compressed: dict[
+            int, list[tuple[bytes, tuple[float, float, float, float]]]
+        ] = {}
         encoded_count = 0
         for zoom, tiles in raw_tiles.items():
             if tiles:
                 compressed[zoom] = []
-                for tile_data in tiles:
-                    compressed[zoom].append(TileEncoder.encode_tile(tile_data))
+                for tile_array, tile_bounds in tiles:
+                    jpeg_data = TileEncoder.encode_tile(tile_array)
+                    compressed[zoom].append((jpeg_data, tile_bounds))
                     encoded_count += 1
                     if progress_callback:
                         progress_callback("encoding", encoded_count, total_tiles)
@@ -284,7 +296,7 @@ class GarminImgExporter(BaseExporter):
     def _write_with_splitting(
         self,
         img_file: IMGFile,
-        compressed_tiles: dict[int, list[bytes]],
+        compressed_tiles: CompressedTiles,
         output_path: Path,
     ) -> list[Path]:
         """
@@ -313,7 +325,7 @@ class GarminImgExporter(BaseExporter):
     def _split_write(
         self,
         img_file: IMGFile,
-        compressed_tiles: dict[int, list[bytes]],
+        compressed_tiles: CompressedTiles,
         output_path: Path,
     ) -> list[Path]:
         """
@@ -367,16 +379,16 @@ class GarminImgExporter(BaseExporter):
     def _compute_zoom_splits(
         self,
         img_file: IMGFile,
-        compressed_tiles: dict[int, list[bytes]],
-    ) -> list[tuple[list[int], dict[int, list[bytes]]]]:
+        compressed_tiles: CompressedTiles,
+    ) -> list[tuple[list[int], CompressedTiles]]:
         """
         Compute how to split zoom levels across files.
 
         Returns list of (zoom_levels, tiles_dict) tuples, one per output file.
         """
-        groups: list[tuple[list[int], dict[int, list[bytes]]]] = []
+        groups: list[tuple[list[int], CompressedTiles]] = []
         current_zooms: list[int] = []
-        current_tiles: dict[int, list[bytes]] = {}
+        current_tiles: CompressedTiles = {}
 
         for zoom in sorted(compressed_tiles.keys()):
             # Estimate size if we add this zoom level

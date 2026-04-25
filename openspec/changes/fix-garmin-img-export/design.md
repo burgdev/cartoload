@@ -10,17 +10,20 @@ Analysis of the current `garmin_img_writer.py` against the SwissTopo hex dumps r
 **Current state:**
 
 - `IMGHeaderWriter` writes fields at correct conceptual offsets (0x10 DSKIMG, 0x1FE boot sig) but misses several fields
-- FAT region (0x1000-0x1200) is written as all zeros with no block chain entries
-- Subfile directory entries have the name/type/offset layout but may not match GMT expectations
-- GMP tile index offsets count from 0 within tile data but don't include the GMP header+zoom table+draw order+tile index sections that come before tile data
-- No test validates output with `gmt` (the `@pytest.mark.gmt` test exists but only calls `validate()` without asserting success)
+- FAT region is now correctly implemented via `FATWriter` (completed in `fix-garmin-raster-lbl-rgn-sections` change)
+- Subfile directory entries are correctly written via `FATWriter` (completed in `fix-garmin-raster-lbl-rgn-sections` change)
+- GMP tile data is now stored via LBL28 (image index) + LBL29 (image storage) instead of a tile index table (completed in `fix-garmin-raster-lbl-rgn-sections` change)
+- Per-tile geographic bounds are now computed and stored in RGN Type E0 records (completed in `fix-garmin-raster-lbl-rgn-sections` change)
+- Remaining issues: header field mismatches at offsets 0x40, 0x0A-0x0D, 0x0E-0x0F, 0x69-0x6A
 
 **Reference data:**
 
 - SwissTopo_West.img and SwissTopo_Est.img in `tests/data/garmin_samples/`
+- IOM.img in `tests/data/garmin_samples/` (multi-map raster with 51 GMP subfiles)
 - Hex dumps of first 512 bytes in `SwissTopo_West_header_hex.txt` / `SwissTopo_Est_header_hex.txt`
 - GMT verbose output in `SwissTopo_*_gmt_output.txt`
-- Format specification in `docs/exporters/garmin-img.md`
+- Format specification in `docs/exporters/garmin-img.md` (includes TRE1-TRE10, RGN2 full structure, LBL28/LBL29, multi-map organization, and vector format reference appendix from Willink/Pinns `expl_img2015.pdf` and Mechalas `imgformat-1.0.pdf`)
+- Analysis script: `scripts/img_analysis.py` (FAT chain traversal, GMP-relative offset parsing)
 
 ## Goals / Non-Goals
 
@@ -45,7 +48,7 @@ Analysis of the current `garmin_img_writer.py` against the SwissTopo hex dumps r
 
 ### Decision 1: Reverse-engineer header from hex dumps rather than OSM Wiki
 
-The OSM Wiki IMG format sub-pages (Header, FAT, Subfile_Header) are all empty. The mkgmap SVN WebSVN is currently blocked due to bot scraping. We will rely on the SwissTopo hex dump analysis already documented in `docs/exporters/garmin-img.md` and the reference files in `tests/data/garmin_samples/`.
+The OSM Wiki IMG format sub-pages (Header, FAT, Subfile_Header) are all empty. The mkgmap SVN WebSVN is currently blocked due to bot scraping. We will rely on the SwissTopo hex dump analysis already documented in `docs/exporters/garmin-img.md` (now enriched with IOM.img binary analysis, Willink/Pinns `expl_img2015.pdf` vector format reference, and QMapShack wiki raster format details from the `img-raster-write-research` change) and the reference files in `tests/data/garmin_samples/`.
 
 **Rationale:** The project already has extensive hex-level analysis of two known-good Garmin raster IMG files. The GMT output provides field-level validation. This is sufficient to fix the header issues.
 
@@ -61,19 +64,15 @@ For raster IMG files with only 2 subfiles (GMP and MPS), the FAT chain can be si
 
 ### Decision 3: Two-pass layout with FAT chain construction
 
-The current two-pass approach (compute sizes, then write) will be extended to a three-phase approach:
+~~The current two-pass approach (compute sizes, then write) will be extended to a three-phase approach~~
 
-1. **Phase 1 - Layout computation:** Calculate subfile sizes and assign block ranges (existing)
-2. **Phase 2 - FAT chain construction:** Build the FAT entries from the computed block ranges (new)
-3. **Phase 3 - Binary writing:** Write header, FAT, directory, and subfile data (existing, with fixes)
-
-**Rationale:** The FAT must be written before the subfile data, but the FAT depends on knowing the block layout. The two-pass approach naturally provides this information.
+**Completed:** The two-pass layout with FAT chain construction is now implemented in `FATWriter` (completed in `fix-garmin-raster-lbl-rgn-sections` change). FAT entries are generated from computed block ranges with sequential block chains.
 
 ### Decision 4: Fix GMP tile data offsets to be absolute within GMP section
 
-The GMP tile index currently stores offsets relative to the start of the tile data section within the GMP subfile. This should be changed to offsets relative to the start of the GMP subfile (including header, zoom table, draw order, and tile index sections that precede tile data).
+~~The GMP tile index currently stores offsets relative to the start of the tile data section within the GMP subfile. This should be changed to offsets relative to the start of the GMP subfile.~~
 
-**Rationale:** This is consistent with how Garmin tools interpret the tile index. Each tile offset must point to the correct absolute position within the GMP subfile data.
+**Completed:** The tile index table has been entirely replaced by LBL28 (image index with uint32 offsets to LBL29) + LBL29 (concatenated JPEG storage). This was completed in the `fix-garmin-raster-lbl-rgn-sections` change.
 
 ### Decision 5: Header field-by-field alignment with reference hex dumps
 
