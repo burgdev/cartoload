@@ -34,7 +34,17 @@ Guidelines for AI coding agents working on cartoload.
 
 - **Branches:** `develop` is the working branch, `main` is for releases.
 - **Garmin IMG format:** This is a proprietary binary format with significant complexity. Before modifying any exporter code, read the existing specs and designs in `openspec/specs/` and any open changes in `openspec/changes/` to understand the format.
-- **Inspecting IMG files:** Use `cartoload analyze img info <file>` to inspect Garmin IMG binary files. Use `--summary`/`-m` for a concise overview (bounds, bitmap stats, encoding, map name), `--rgn2`/`-r` for annotated RGN2 analysis, `--segments`/`-g` for TRE7-based zoom level segmentation, and `--hex <section>`/`-x` for raw hex dumps. Use `cartoload analyze img compare <file1> <file2>` for side-by-side comparison of two IMG files.
+- **Inspecting IMG files:** Use `cartoload analyze img info <file>` to inspect Garmin IMG binary files. Key flags:
+  - `--summary`/`-m` — concise overview (bounds, bitmap stats, encoding, map name)
+  - `--section`/`-n` — show a single section (e.g. `--section TRE7`, `--section RGN2`)
+  - `--limit` — max entries per section (default: 20, `0` = unlimited)
+  - `--rgn2`/`-r` — annotated RGN2 analysis
+  - `--segments`/`-g` — TRE7-based zoom level segmentation
+  - `--hex <section>`/`-x` — raw hex dumps
+  - `--list`/`-l` — list subfiles only
+  - `--no-descriptions`/`-q` — hide section descriptions
+  - `--no-color` — disable colored output (auto-disabled when piped)
+  - Use `cartoload analyze img compare <file1> <file2>` for side-by-side comparison of two IMG files.
 
 ## Reference Source Code
 

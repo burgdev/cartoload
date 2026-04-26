@@ -275,7 +275,7 @@ This document provides a curated list of resources, tools, libraries, and docume
   - **Critical discovery:** Section positions in TRE header are GMP-relative, not TRE-relative
   - Analysis based on IOM subfile 00355951 (Isle of Man, OS Map)
 - **Importance:** This is the authoritative community documentation for raster IMG files. Official Garmin documentation does not exist for this format.
-- **Verification:** All findings cross-validated against IOM.img and SwissTopo_West.img using `scripts/img_analysis.py`
+- **Verification:** All findings cross-validated against IOM.img and SwissTopo_West.img using `cartoload analyze img info`
 
 #### 2. OpenStreetMap Wiki
 
@@ -340,18 +340,47 @@ This document provides a curated list of resources, tools, libraries, and docume
 
 ### Analysis Tools
 
-#### Custom Analysis Script
+#### cartoload analyze (Built-in)
 
-- **File:** `scripts/img_analysis.py`
-- **Capabilities:**
-  - Parse GMP container headers and compute section offsets
-  - FAT chain traversal for multi-part subfiles
-  - GMP-relative offset parsing (correct interpretation of TRE/RGN/LBL section positions)
-  - TRE1/TRE2/TRE7/TRE8 data extraction and formatting
-  - RGN2 compound record parsing (0D/06/BC/DE/E0 markers)
-  - LBL label extraction
-  - Hex dump output for any section
-- **Usage:** `python scripts/img_analysis.py <img_file> [--subfile <name>] [--hex <section>]`
+The project includes a built-in CLI for inspecting and comparing Garmin IMG binary files. See [CLI Reference](../cli.md) for full documentation.
+
+```bash
+# Concise summary (bounds, bitmaps, encoding, map name)
+cartoload analyze img info <img_file> -m
+
+# Full analysis (TRE, RGN, LBL, NET sections)
+cartoload analyze img info <img_file>
+
+# Show a specific section (e.g. TRE7, RGN2)
+cartoload analyze img info <img_file> --section TRE7
+
+# Show all entries (no truncation)
+cartoload analyze img info <img_file> --section TRE2 --limit 0
+
+# Annotated RGN2 analysis (raster tile records per zoom level)
+cartoload analyze img info <img_file> -r
+
+# TRE7-based zoom level segmentation
+cartoload analyze img info <img_file> -g
+
+# Hex dump of a section
+cartoload analyze img info <img_file> -x rgn2
+
+# Side-by-side comparison of two IMG files
+cartoload analyze img compare <file1> <file2>
+```
+
+**Capabilities:**
+- Parse GMP container headers and compute section offsets
+- FAT chain traversal for multi-part subfiles
+- GMP-relative offset parsing (correct interpretation of TRE/RGN/LBL section positions)
+- TRE1/TRE2/TRE7/TRE8 data extraction and formatting
+- RGN2 compound record parsing (0D/06/BC/DE/E0 markers)
+- LBL label extraction
+- Bitmap tile statistics from RGN2 E0 records
+- Hex dump output for any section
+- Colored output with Rich (auto-disabled when piped)
+- Spinner for large files (>200 MB)
 
 ## Raster vs Vector IMG Files: Key Differences
 
@@ -670,6 +699,6 @@ Garmin's professional maps (like SwissTopo Pro) combine both raster and vector d
 
 ---
 
-**Last Updated:** 2026-04-23
+**Last Updated:** 2026-04-26
 
 **Key Takeaway:** This project implements the first known open-source Garmin raster IMG writer, filling a significant gap in the GIS ecosystem. The GMP container format has been fully reverse-engineered, with GMapTool validation passing for generated files.

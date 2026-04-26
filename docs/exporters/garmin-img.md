@@ -1169,7 +1169,7 @@ Official Garmin maps (like SwissTopo Pro) combine raster and vector data in a si
 - QMapShack wiki — Alex Whiter's raster IMG analysis (IOM subfile 00355951)
 - mkgmap source code (`uk.me.parabola.imgfmt` package)
 - Hexadecimal dumps of headers and GMP container sections
-- `scripts/img_analysis.py` — custom analysis tool with FAT chain traversal and GMP-relative offset parsing
+- `cartoload analyze img info` — built-in CLI for inspecting IMG files with FAT chain traversal and GMP-relative offset parsing
 - Willink/Pinns "Exploring Garmin's IMG Format" (2015) — see `expl_img2015.pdf` in this directory
 - **Device tested:** Garmin Fenix 6 (confirmed working with reference files)
 

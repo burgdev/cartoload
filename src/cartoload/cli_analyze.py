@@ -461,7 +461,13 @@ def _print_subsection(
         t2 = tre["tre2"]
         total = len(tre["groups_16byte"]) if "groups_16byte" in tre else 0
         show_count = total if limit == 0 else min(total, limit)
-        console.print(Rule(_styled_path("IMG", "GMP", "TRE", "TRE2"), align="left"))
+        console.print(
+            Rule(
+                _styled_path("IMG", "GMP", "TRE", "TRE2"),
+                style="bold cyan",
+                align="left",
+            )
+        )
         if descriptions and desc:
             console.print(f"[dim italic]{desc}[/]")
         console.print(f"  pos={t2['position']}, size={t2['size']}")
@@ -482,7 +488,13 @@ def _print_subsection(
         t7 = tre["tre7"]
         total = len(tre["tre7_offsets"]) if "tre7_offsets" in tre else 0
         show_count = total if limit == 0 else min(total, limit)
-        console.print(Rule(_styled_path("IMG", "GMP", "TRE", "TRE7"), align="left"))
+        console.print(
+            Rule(
+                _styled_path("IMG", "GMP", "TRE", "TRE7"),
+                style="bold cyan",
+                align="left",
+            )
+        )
         if descriptions and desc:
             console.print(f"[dim italic]{desc}[/]")
         console.print(
@@ -498,7 +510,13 @@ def _print_subsection(
 
     if name == "TRE8" and "tre8" in tre:
         t8 = tre["tre8"]
-        console.print(Rule(_styled_path("IMG", "GMP", "TRE", "TRE8"), align="left"))
+        console.print(
+            Rule(
+                _styled_path("IMG", "GMP", "TRE", "TRE8"),
+                style="bold cyan",
+                align="left",
+            )
+        )
         if descriptions and desc:
             console.print(f"[dim italic]{desc}[/]")
         console.print(
@@ -517,7 +535,11 @@ def _print_subsection(
         if name == sec_name and key in tre:
             sec = tre[key]
             console.print(
-                Rule(_styled_path("IMG", "GMP", "TRE", sec_name), align="left")
+                Rule(
+                    _styled_path("IMG", "GMP", "TRE", sec_name),
+                    style="bold cyan",
+                    align="left",
+                )
             )
             if descriptions and desc:
                 console.print(f"[dim italic]{desc}[/]")
@@ -530,7 +552,13 @@ def _print_subsection(
     if name == "RGN2":
         sec = rgn_parsed.get("rgn2")
         if sec:
-            console.print(Rule(_styled_path("IMG", "GMP", "RGN", "RGN2"), align="left"))
+            console.print(
+                Rule(
+                    _styled_path("IMG", "GMP", "RGN", "RGN2"),
+                    style="bold cyan",
+                    align="left",
+                )
+            )
             if descriptions and desc:
                 console.print(f"[dim italic]{desc}[/]")
             console.print(f"  pos={sec['position']}, size={sec['size']}")
@@ -560,7 +588,11 @@ def _print_subsection(
         if name == sec_name and key in rgn_parsed:
             sec = rgn_parsed[key]
             console.print(
-                Rule(_styled_path("IMG", "GMP", "RGN", sec_name), align="left")
+                Rule(
+                    _styled_path("IMG", "GMP", "RGN", sec_name),
+                    style="bold cyan",
+                    align="left",
+                )
             )
             if descriptions and desc:
                 console.print(f"[dim italic]{desc}[/]")
@@ -574,7 +606,11 @@ def _print_subsection(
             if name == sec_name and key in lbl:
                 sec = lbl[key]
                 console.print(
-                    Rule(_styled_path("IMG", "GMP", "LBL", sec_name), align="left")
+                    Rule(
+                        _styled_path("IMG", "GMP", "LBL", sec_name),
+                        style="bold cyan",
+                        align="left",
+                    )
                 )
                 if descriptions and desc:
                     console.print(f"[dim italic]{desc}[/]")
@@ -681,7 +717,9 @@ def info(
 
         # --list: just list subfiles
         if list_subfiles:
-            console.print(Rule(_styled_path("IMG File"), align="left"))
+            console.print(
+                Rule(_styled_path("IMG File"), style="bold cyan", align="left")
+            )
             console.print(f"  File: {img_file} ({parser.filesize:,} bytes)")
             console.print(
                 f"  Header: {parser.header['date']}, {parser.header['magic']}, block_size={parser.header['block_size']}"
@@ -734,7 +772,9 @@ def info(
 
         # --summary: concise overview
         if show_summary:
-            console.print(Rule(_styled_path("IMG", "Summary"), align="left"))
+            console.print(
+                Rule(_styled_path("IMG", "Summary"), style="bold cyan", align="left")
+            )
             console.print(f"  File: {img_file} ({_human_size(parser.filesize)})")
             console.print(f"  Mapset: {parser.header['description']}")
             console.print(f"  Subfile: {gmp_key}")
@@ -768,7 +808,11 @@ def info(
         if hex_section:
             hex_str = parser.dump_section_hex(gmp, hex_section)
             console.print(
-                Rule(_styled_path("IMG", "GMP", f"Hex: {hex_section}"), align="left")
+                Rule(
+                    _styled_path("IMG", "GMP", f"Hex: {hex_section}"),
+                    style="bold cyan",
+                    align="left",
+                )
             )
             console.print(hex_str)
             return
@@ -779,6 +823,7 @@ def info(
                 console.print(
                     Rule(
                         _styled_path("IMG", "GMP", f"Hex dump: {dump_section}"),
+                        style="bold cyan",
                         align="left",
                     )
                 )
@@ -827,7 +872,9 @@ def info(
             return
 
         # Default: full analysis
-        console.print(Rule(_styled_path(f"IMG: {img_file}"), align="left"))
+        console.print(
+            Rule(_styled_path(f"IMG: {img_file}"), style="bold cyan", align="left")
+        )
         console.print(
             f"  Size: {parser.filesize:,} bytes ({_human_size(parser.filesize)})"
         )
@@ -837,7 +884,9 @@ def info(
         console.print(f"  Mapset: {parser.header['description']}")
         console.print("  Projection: WGS 84 (geographic, lat/lon)")
 
-        console.print(Rule(_styled_path("IMG", "GMP Container"), align="left"))
+        console.print(
+            Rule(_styled_path("IMG", "GMP Container"), style="bold cyan", align="left")
+        )
         console.print(f"  Subfile: {gmp_key}")
         console.print(
             f"  Signature: {gmp['signature']}, version={gmp['version']}, date={gmp['date']}"
@@ -856,7 +905,13 @@ def info(
                 _print_generic_gmp_section(console, name, gmp, descriptions=show_desc)
 
         if dump_all:
-            console.print(Rule(_styled_path("IMG", "GMP", "Hex Dump"), align="left"))
+            console.print(
+                Rule(
+                    _styled_path("IMG", "GMP", "Hex Dump"),
+                    style="bold cyan",
+                    align="left",
+                )
+            )
             all_data = gmp["data"]
             dump_limit = len(all_data) if limit == 0 else min(len(all_data), 2048)
             console.print(format_hex_dump(all_data[:dump_limit]))
@@ -866,7 +921,11 @@ def info(
         if raw_offset is not None:
             raw = parser.read_at(raw_offset, raw_size)
             console.print(
-                Rule(_styled_path("IMG", f"Raw @ 0x{raw_offset:X}"), align="left")
+                Rule(
+                    _styled_path("IMG", f"Raw @ 0x{raw_offset:X}"),
+                    style="bold cyan",
+                    align="left",
+                )
             )
             console.print(format_hex_dump(raw))
 

@@ -44,6 +44,8 @@ Commands:
 ```
 cartoload analyze img info <img_file> [OPTIONS]
   -s, --subfile TEXT     Subfile name (e.g. '00355951')
+  -n, --section TEXT     Show only one section (TRE, TRE7, RGN, RGN2, LBL, NET, etc.)
+      --limit INT        Max entries per section (default: 20, 0 = unlimited)
   -x, --hex TEXT         Dump hex of a section (gmp-header, tre-header, tre-levels, tre-subdivs, tre7, tre8, rgn-header, rgn-data, rgn2, rgn5, lbl-header, lbl-data)
   -d, --dump TEXT        Full hex dump of section with ASCII
   -l, --list             List subfiles only (no parsing)
@@ -53,7 +55,13 @@ cartoload analyze img info <img_file> [OPTIONS]
   -r, --rgn2             Show annotated RGN2 analysis (raster tile records and polyline/polygon preambles per zoom level)
   -g, --segments         Segment RGN2 by zoom level using TRE7 offsets
   -m, --summary          Show concise summary (bounds, bitmaps, encoding, map name)
+  -q, --no-descriptions  Hide section descriptions
+      --no-color         Disable colored output (auto-disabled when piped)
 ```
+
+The output uses Rich for colored, formatted section headers with hierarchical paths
+(e.g. `── IMG > GMP > TRE > TRE7`). For large files (>200 MB), a spinner is shown
+while parsing. Colors are automatically disabled when output is piped.
 
 Examples:
 
@@ -66,6 +74,15 @@ cartoload analyze img info tests/data/garmin_samples/IOM.img -l
 
 # Full analysis (TRE, RGN, LBL sections with bitmap stats)
 cartoload analyze img info tests/data/garmin_samples/IOM.img
+
+# Show only the TRE7 section
+cartoload analyze img info tests/data/garmin_samples/IOM.img --section TRE7
+
+# Show all TRE2 entries (no limit)
+cartoload analyze img info tests/data/garmin_samples/IOM.img --section TRE2 --limit 0
+
+# Hide section descriptions
+cartoload analyze img info tests/data/garmin_samples/IOM.img -q
 
 # Annotated RGN2 analysis
 cartoload analyze img info tests/data/garmin_samples/IOM.img -r
