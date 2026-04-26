@@ -91,6 +91,21 @@ def _human_size(size: int) -> str:
     return f"{size:.1f} TB"
 
 
+def _styled_path(*parts: str) -> str:
+    """Build a styled path title: ancestors dim, last segment bold cyan.
+
+    _part1_ > _part2_ > **last**
+    """
+    if not parts:
+        return ""
+    styled = []
+    for part in parts[:-1]:
+        styled.append(f"[dim]{part}[/]")
+    styled.append(f"[bold cyan]{parts[-1]}[/]")
+    sep = " [dim]>[/] "
+    return "[bold cyan]──[/] " + sep.join(styled)
+
+
 def _print_bitmap_stats(rgn_parsed: dict, console: Console) -> None:
     """Print bitmap tile statistics from RGN2 E0 records."""
     recs = rgn_parsed.get("rgn2_records", [])
@@ -105,13 +120,12 @@ def _print_bitmap_stats(rgn_parsed: dict, console: Console) -> None:
 
 def _section_header(
     console: Console,
-    path: str,
+    *path_parts: str,
     description: str | None = None,
-    *,
     descriptions: bool = True,
 ) -> None:
-    """Print a left-aligned section header using Rich Rule."""
-    console.print(Rule(path, style="bold blue", align="left"))
+    """Print a left-aligned section header with styled path."""
+    console.print(Rule(_styled_path(*path_parts), style="bold cyan", align="left"))
     if descriptions and description:
         console.print(f"[dim italic]{description}[/]")
 
@@ -134,7 +148,7 @@ def _truncated(console: Console, remaining: int, section_hint: str) -> None:
     """Print a truncation hint with the command to see all entries."""
     console.print(
         f"    [dim]... {remaining:,} more, "
-        f"use [cyan]--section {section_hint} --limit 0[/] to see all[/]"
+        f"use [bold]--section {section_hint} --limit 0[/] to see all[/]"
     )
 
 
@@ -178,8 +192,10 @@ def _print_tre(
     """Print TRE section details."""
     _section_header(
         console,
-        "IMG > GMP > TRE",
-        SECTION_DESCRIPTIONS.get("TRE"),
+        "IMG",
+        "GMP",
+        "TRE",
+        description=SECTION_DESCRIPTIONS.get("TRE"),
         descriptions=descriptions,
     )
     console.print(
@@ -292,8 +308,10 @@ def _print_rgn(
     """Print RGN section details."""
     _section_header(
         console,
-        "IMG > GMP > RGN",
-        SECTION_DESCRIPTIONS.get("RGN"),
+        "IMG",
+        "GMP",
+        "RGN",
+        description=SECTION_DESCRIPTIONS.get("RGN"),
         descriptions=descriptions,
     )
     console.print(f"  Header: {rgn_parsed['sub_header']['header_length']} bytes")
@@ -342,8 +360,10 @@ def _print_lbl(
     """Print LBL section details."""
     _section_header(
         console,
-        "IMG > GMP > LBL",
-        SECTION_DESCRIPTIONS.get("LBL"),
+        "IMG",
+        "GMP",
+        "LBL",
+        description=SECTION_DESCRIPTIONS.get("LBL"),
         descriptions=descriptions,
     )
     if not lbl:
@@ -393,7 +413,14 @@ def _print_generic_gmp_section(
 ) -> None:
     """Print a GMP section we don't have a dedicated parser for."""
     desc = SECTION_DESCRIPTIONS.get(name, "Unknown section")
-    _section_header(console, f"IMG > GMP > {name}", desc, descriptions=descriptions)
+    _section_header(
+        console,
+        "IMG",
+        "GMP",
+        name,
+        description=desc,
+        descriptions=descriptions,
+    )
     _print_generic_section(console, name, gmp)
 
 
@@ -413,7 +440,13 @@ def _print_subsection(
 
     # TRE sub-sections
     if name == "TRE1" and "levels" in tre:
-        console.print(Rule("IMG > GMP > TRE > TRE1", style="bold blue", align="left"))
+        console.print(
+            Rule(
+                _styled_path("IMG", "GMP", "TRE", "TRE1"),
+                style="bold cyan",
+                align="left",
+            )
+        )
         if descriptions and desc:
             console.print(f"[dim italic]{desc}[/]")
         console.print(f"  Count: [cyan]{len(tre['levels'])}[/]")
@@ -428,7 +461,7 @@ def _print_subsection(
         t2 = tre["tre2"]
         total = len(tre["groups_16byte"]) if "groups_16byte" in tre else 0
         show_count = total if limit == 0 else min(total, limit)
-        console.print(Rule("IMG > GMP > TRE > TRE2", style="bold blue", align="left"))
+        console.print(Rule(_styled_path("IMG", "GMP", "TRE", "TRE2"), align="left"))
         if descriptions and desc:
             console.print(f"[dim italic]{desc}[/]")
         console.print(f"  pos={t2['position']}, size={t2['size']}")
@@ -449,7 +482,7 @@ def _print_subsection(
         t7 = tre["tre7"]
         total = len(tre["tre7_offsets"]) if "tre7_offsets" in tre else 0
         show_count = total if limit == 0 else min(total, limit)
-        console.print(Rule("IMG > GMP > TRE > TRE7", style="bold blue", align="left"))
+        console.print(Rule(_styled_path("IMG", "GMP", "TRE", "TRE7"), align="left"))
         if descriptions and desc:
             console.print(f"[dim italic]{desc}[/]")
         console.print(
@@ -465,7 +498,7 @@ def _print_subsection(
 
     if name == "TRE8" and "tre8" in tre:
         t8 = tre["tre8"]
-        console.print(Rule("IMG > GMP > TRE > TRE8", style="bold blue", align="left"))
+        console.print(Rule(_styled_path("IMG", "GMP", "TRE", "TRE8"), align="left"))
         if descriptions and desc:
             console.print(f"[dim italic]{desc}[/]")
         console.print(
@@ -484,7 +517,7 @@ def _print_subsection(
         if name == sec_name and key in tre:
             sec = tre[key]
             console.print(
-                Rule(f"IMG > GMP > TRE > {sec_name}", style="bold blue", align="left")
+                Rule(_styled_path("IMG", "GMP", "TRE", sec_name), align="left")
             )
             if descriptions and desc:
                 console.print(f"[dim italic]{desc}[/]")
@@ -497,9 +530,7 @@ def _print_subsection(
     if name == "RGN2":
         sec = rgn_parsed.get("rgn2")
         if sec:
-            console.print(
-                Rule("IMG > GMP > RGN > RGN2", style="bold blue", align="left")
-            )
+            console.print(Rule(_styled_path("IMG", "GMP", "RGN", "RGN2"), align="left"))
             if descriptions and desc:
                 console.print(f"[dim italic]{desc}[/]")
             console.print(f"  pos={sec['position']}, size={sec['size']}")
@@ -529,7 +560,7 @@ def _print_subsection(
         if name == sec_name and key in rgn_parsed:
             sec = rgn_parsed[key]
             console.print(
-                Rule(f"IMG > GMP > RGN > {sec_name}", style="bold blue", align="left")
+                Rule(_styled_path("IMG", "GMP", "RGN", sec_name), align="left")
             )
             if descriptions and desc:
                 console.print(f"[dim italic]{desc}[/]")
@@ -543,9 +574,7 @@ def _print_subsection(
             if name == sec_name and key in lbl:
                 sec = lbl[key]
                 console.print(
-                    Rule(
-                        f"IMG > GMP > LBL > {sec_name}", style="bold blue", align="left"
-                    )
+                    Rule(_styled_path("IMG", "GMP", "LBL", sec_name), align="left")
                 )
                 if descriptions and desc:
                     console.print(f"[dim italic]{desc}[/]")
@@ -652,7 +681,7 @@ def info(
 
         # --list: just list subfiles
         if list_subfiles:
-            console.print(Rule("IMG File", style="bold blue", align="left"))
+            console.print(Rule(_styled_path("IMG File"), align="left"))
             console.print(f"  File: {img_file} ({parser.filesize:,} bytes)")
             console.print(
                 f"  Header: {parser.header['date']}, {parser.header['magic']}, block_size={parser.header['block_size']}"
@@ -705,7 +734,7 @@ def info(
 
         # --summary: concise overview
         if show_summary:
-            console.print(Rule("IMG > Summary", style="bold blue", align="left"))
+            console.print(Rule(_styled_path("IMG", "Summary"), align="left"))
             console.print(f"  File: {img_file} ({_human_size(parser.filesize)})")
             console.print(f"  Mapset: {parser.header['description']}")
             console.print(f"  Subfile: {gmp_key}")
@@ -739,7 +768,7 @@ def info(
         if hex_section:
             hex_str = parser.dump_section_hex(gmp, hex_section)
             console.print(
-                Rule(f"IMG > GMP > Hex: {hex_section}", style="bold blue", align="left")
+                Rule(_styled_path("IMG", "GMP", f"Hex: {hex_section}"), align="left")
             )
             console.print(hex_str)
             return
@@ -749,8 +778,7 @@ def info(
             if hex_str and not hex_str.startswith("("):
                 console.print(
                     Rule(
-                        f"IMG > GMP > Hex dump: {dump_section}",
-                        style="bold blue",
+                        _styled_path("IMG", "GMP", f"Hex dump: {dump_section}"),
                         align="left",
                     )
                 )
@@ -799,7 +827,7 @@ def info(
             return
 
         # Default: full analysis
-        console.print(Rule(f"IMG: {img_file}", style="bold blue", align="left"))
+        console.print(Rule(_styled_path(f"IMG: {img_file}"), align="left"))
         console.print(
             f"  Size: {parser.filesize:,} bytes ({_human_size(parser.filesize)})"
         )
@@ -809,7 +837,7 @@ def info(
         console.print(f"  Mapset: {parser.header['description']}")
         console.print("  Projection: WGS 84 (geographic, lat/lon)")
 
-        console.print(Rule("IMG > GMP Container", style="bold blue", align="left"))
+        console.print(Rule(_styled_path("IMG", "GMP Container"), align="left"))
         console.print(f"  Subfile: {gmp_key}")
         console.print(
             f"  Signature: {gmp['signature']}, version={gmp['version']}, date={gmp['date']}"
@@ -828,7 +856,7 @@ def info(
                 _print_generic_gmp_section(console, name, gmp, descriptions=show_desc)
 
         if dump_all:
-            console.print(Rule("IMG > GMP > Hex Dump", style="bold blue", align="left"))
+            console.print(Rule(_styled_path("IMG", "GMP", "Hex Dump"), align="left"))
             all_data = gmp["data"]
             dump_limit = len(all_data) if limit == 0 else min(len(all_data), 2048)
             console.print(format_hex_dump(all_data[:dump_limit]))
@@ -838,7 +866,7 @@ def info(
         if raw_offset is not None:
             raw = parser.read_at(raw_offset, raw_size)
             console.print(
-                Rule(f"IMG > Raw @ 0x{raw_offset:X}", style="bold blue", align="left")
+                Rule(_styled_path("IMG", f"Raw @ 0x{raw_offset:X}"), align="left")
             )
             console.print(format_hex_dump(raw))
 
