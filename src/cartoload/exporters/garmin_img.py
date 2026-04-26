@@ -366,6 +366,55 @@ class GarminImgExporter(BaseExporter):
         logger.info(f"IMG export complete: {len(output_files)} file(s)")
         return output_files
 
+    def export_from_tiles(
+        self,
+        compressed_tiles: CompressedTiles,
+        layer_config: "LayerConfig",
+        output_path: Path,
+        *,
+        progress_callback: ExportProgressCallback | None = None,
+    ) -> list[Path]:
+        """Export pre-encoded tiles directly to Garmin .img format.
+
+        Skips the TileExtractor + TileEncoder pipeline entirely, accepting
+        tiles that have already been read, reprojected, and encoded to JPEG
+        (e.g. from BatchTileProcessor).
+
+        Args:
+            compressed_tiles: Dict mapping zoom level to list of
+                (jpeg_bytes, (lat_min, lon_min, lat_max, lon_max)) tuples
+                or plain jpeg_bytes.
+            layer_config: Layer configuration
+            output_path: Path to output .img file
+            progress_callback: Called with (stage, current, total) for progress
+
+        Returns:
+            List of created .img files (may be multiple if >4GB)
+        """
+        logger.info("Exporting pre-encoded tiles to Garmin IMG: %s", output_path)
+
+        # 1. Resolve attribution and build IMG structure
+        attribution = self._resolve_attribution(layer_config)
+        img_file = self._build_img_structure(layer_config, attribution)
+
+        # 2. Report tile counts
+        total_tiles = sum(len(t) for t in compressed_tiles.values())
+        if progress_callback:
+            progress_callback("writing", 0, total_tiles)
+        logger.info(
+            "Writing %d pre-encoded tiles across %d zoom levels",
+            total_tiles,
+            len(compressed_tiles),
+        )
+
+        # 3. Write IMG file(s)
+        output_files = self._write_with_splitting(
+            img_file, compressed_tiles, output_path
+        )
+
+        logger.info("IMG export complete: %d file(s)", len(output_files))
+        return output_files
+
     def validate(self, output_path: Path) -> bool:
         """
         Validate IMG file using gmt (GMapTool).

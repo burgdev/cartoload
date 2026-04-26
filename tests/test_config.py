@@ -16,6 +16,7 @@ from cartoload.config import (
     merge_sources,
     resolve_references,
 )
+from cartoload.downloader.base import BaseDownloader
 
 
 def test_source_config_wmts():
@@ -462,3 +463,202 @@ def test_load_config_no_files():
     assert len(config.sources) == 0
     assert len(config.layers) == 0
     assert config.bounds is None
+
+
+# --- CRS field tests ---
+
+
+def test_source_config_crs_default():
+    source = SourceConfig(id="test", type="wmts")
+    assert source.crs is None
+
+
+def test_source_config_crs_explicit():
+    source = SourceConfig(id="test", type="wmts", crs="EPSG:4326")
+    assert source.crs == "EPSG:4326"
+
+
+def test_load_sources_file_crs_field():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(
+            {
+                "sources": {
+                    "test_wmts": {
+                        "type": "wmts",
+                        "url_template": "https://example.com/{z}/{x}/{y}.png",
+                        "crs": "EPSG:3857",
+                    }
+                }
+            },
+            f,
+        )
+        f.flush()
+
+        sources = load_sources_file(f.name)
+        Path(f.name).unlink()
+
+        assert sources["test_wmts"].crs == "EPSG:3857"
+
+
+def test_load_sources_file_crs_default_none():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(
+            {
+                "sources": {
+                    "test_wmts": {
+                        "type": "wmts",
+                        "url_template": "https://example.com/{z}/{x}/{y}.png",
+                    }
+                }
+            },
+            f,
+        )
+        f.flush()
+
+        sources = load_sources_file(f.name)
+        Path(f.name).unlink()
+
+        assert sources["test_wmts"].crs is None
+
+
+def test_load_sources_file_crs_invalid_type():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(
+            {
+                "sources": {
+                    "test_wmts": {
+                        "type": "wmts",
+                        "url_template": "https://example.com/{z}/{x}/{y}.png",
+                        "crs": 3857,
+                    }
+                }
+            },
+            f,
+        )
+        f.flush()
+
+        with pytest.raises(ValueError, match="field 'crs' must be a string"):
+            load_sources_file(f.name)
+        Path(f.name).unlink()
+
+
+def test_load_sources_file_urls_list():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(
+            {
+                "sources": {
+                    "test_wmts": {
+                        "type": "wmts",
+                        "urls": [
+                            "https://s1.example.com/{z}/{x}/{y}.png",
+                            "https://s2.example.com/{z}/{x}/{y}.png",
+                        ],
+                    }
+                }
+            },
+            f,
+        )
+        f.flush()
+
+        sources = load_sources_file(f.name)
+        Path(f.name).unlink()
+
+        assert len(sources["test_wmts"].urls) == 2
+        assert sources["test_wmts"].url_template is None
+
+
+def test_load_sources_file_urls_string():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(
+            {
+                "sources": {
+                    "test_wmts": {
+                        "type": "wmts",
+                        "urls": "https://example.com/{z}/{x}/{y}.png",
+                    }
+                }
+            },
+            f,
+        )
+        f.flush()
+
+        sources = load_sources_file(f.name)
+        Path(f.name).unlink()
+
+        assert sources["test_wmts"].urls == ["https://example.com/{z}/{x}/{y}.png"]
+
+
+# --- Cache metadata tests ---
+
+
+class _DummyDownloader(BaseDownloader):
+    """Minimal concrete downloader for testing base class methods."""
+
+    def download_tile(self, x: int, y: int, zoom: int) -> Path:
+        return Path("/dummy")
+
+    def download_grid(
+        self, bbox: tuple[float, float, float, float], zoom: int
+    ) -> list[Path]:
+        return []
+
+
+def test_cache_metadata_write(tmp_path):
+    dl = _DummyDownloader("test_source", tmp_path, crs="EPSG:3857")
+    dl.write_cache_metadata()
+
+    metadata_path = tmp_path / "test_source" / "metadata.json"
+    assert metadata_path.exists()
+    import json
+
+    data = json.loads(metadata_path.read_text())
+    assert data["crs"] == "EPSG:3857"
+
+
+def test_cache_metadata_no_crs(tmp_path):
+    dl = _DummyDownloader("test_source", tmp_path, crs=None)
+    dl.write_cache_metadata()
+
+    metadata_path = tmp_path / "test_source" / "metadata.json"
+    assert metadata_path.exists()
+    import json
+
+    data = json.loads(metadata_path.read_text())
+    assert "crs" not in data
+
+
+def test_cache_metadata_idempotent(tmp_path):
+    dl = _DummyDownloader("test_source", tmp_path, crs="EPSG:3857")
+    dl.write_cache_metadata()
+
+    metadata_path = tmp_path / "test_source" / "metadata.json"
+
+    original = metadata_path.read_text()
+
+    # Second write should not overwrite
+    dl2 = _DummyDownloader("test_source", tmp_path, crs="EPSG:4326")
+    dl2.write_cache_metadata()
+    assert metadata_path.read_text() == original
+
+
+def test_read_cache_crs(tmp_path):
+    import json
+
+    cache_dir = tmp_path / "cache"
+    source_dir = cache_dir / "my_source"
+    source_dir.mkdir(parents=True)
+    (source_dir / "metadata.json").write_text(json.dumps({"crs": "EPSG:3857"}) + "\n")
+
+    assert BaseDownloader.read_cache_crs(cache_dir, "my_source") == "EPSG:3857"
+
+
+def test_read_cache_crs_missing(tmp_path):
+    assert BaseDownloader.read_cache_crs(tmp_path, "nonexistent") is None
+
+
+def test_read_cache_crs_corrupt(tmp_path):
+    source_dir = tmp_path / "broken_source"
+    source_dir.mkdir()
+    (source_dir / "metadata.json").write_text("not valid json{{{")
+
+    assert BaseDownloader.read_cache_crs(tmp_path, "broken_source") is None

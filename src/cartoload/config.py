@@ -14,10 +14,12 @@ class SourceConfig:
     id: str
     type: str  # wmts, geotiff, gpkg, geojson, pbf
     url_template: str | None = None
+    urls: list[str] = field(default_factory=list)
     stac_url: str | None = None
     attribution: str = ""
     rate_limit_ms: int = 150
     max_threads: int = 4
+    crs: str | None = None
 
 
 @dataclass
@@ -117,7 +119,18 @@ def load_sources_file(path: str) -> dict[str, SourceConfig]:
         # Validate type-specific required fields
         if source_type in SOURCE_TYPE_REQUIRED_FIELDS:
             for required_field in SOURCE_TYPE_REQUIRED_FIELDS[source_type]:
-                if (
+                # For WMTS, url_template can be replaced by urls list
+                if source_type == "wmts" and required_field == "url_template":
+                    has_url = (
+                        "url_template" in source_dict
+                        and source_dict["url_template"] is not None
+                    ) or ("urls" in source_dict and source_dict["urls"])
+                    if not has_url:
+                        raise ValueError(
+                            f"{path}: Source '{source_id}' (type=wmts) "
+                            f"missing required field 'url_template' or 'urls'"
+                        )
+                elif (
                     required_field not in source_dict
                     or source_dict[required_field] is None
                 ):
@@ -141,15 +154,32 @@ def load_sources_file(path: str) -> dict[str, SourceConfig]:
                 f"{path}: Source '{source_id}' field 'max_threads' must be an integer"
             )
 
+        if "crs" in source_dict and not isinstance(source_dict.get("crs"), str):
+            raise ValueError(
+                f"{path}: Source '{source_id}' field 'crs' must be a string"
+            )
+
+        # Parse URLs: accept url_template (string) or urls (list) or both
+        url_template = source_dict.get("url_template")
+        urls = source_dict.get("urls", [])
+        if isinstance(urls, str):
+            urls = [urls]
+        if not isinstance(urls, list):
+            raise ValueError(
+                f"{path}: Source '{source_id}' field 'urls' must be a list or string"
+            )
+
         # Create SourceConfig instance
         sources[source_id] = SourceConfig(
             id=source_id,
             type=source_type,
-            url_template=source_dict.get("url_template"),
+            url_template=url_template,
+            urls=urls,
             stac_url=source_dict.get("stac_url"),
             attribution=source_dict.get("attribution", ""),
             rate_limit_ms=source_dict.get("rate_limit_ms", 150),
             max_threads=source_dict.get("max_threads", 4),
+            crs=source_dict.get("crs"),
         )
 
     return sources

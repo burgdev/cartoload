@@ -1692,14 +1692,22 @@ class TestSubdivisionBinaryWriting:
             f"TRE7 size {tre7_size} != expected {expected_size}"
         )
 
-        # Last 5 bytes should be all zeros (sentinel)
+        # Last 5 bytes should be the sentinel entry containing the total RGN2
+        # data extent as the polygon offset (end boundary for last subdivision)
         tre7_data_offset = gmp_offset + tre7_pos
         sentinel = data[
             tre7_data_offset + len(subdivisions) * 5 : tre7_data_offset + tre7_size
         ]
-        assert sentinel == b"\x00" * 5, (
-            f"Sentinel should be all zeros, got {sentinel.hex()}"
+        sentinel_offset = struct.unpack_from("<I", sentinel)[0]
+        sentinel_flag = sentinel[4]
+        # Sentinel offset = total RGN2 data size = n_tiles × 42
+        if isinstance(tiles[0], tuple) and len(tiles[0]) == 2:
+            pass  # tiles are (jpeg, bounds) tuples
+        expected_extent = len(tiles) * 42  # RGN2_RASTER_RECORD_SIZE
+        assert sentinel_offset == expected_extent, (
+            f"Sentinel offset should be {expected_extent}, got {sentinel_offset}"
         )
+        assert sentinel_flag == 0, f"Sentinel flag should be 0, got {sentinel_flag}"
 
     def test_subdivision_preserves_tile_data_in_lbl29(self, tmp_path):
         """Verify LBL29 contains all JPEG data when using subdivisions."""
@@ -1752,52 +1760,153 @@ class TestSubdivisionBinaryWriting:
         assert e0_count == 9, f"Expected 9 Type E0 records, found {e0_count}"
 
 
-class TestPolylinePreamble:
-    """Tests for polyline preamble coordinate encoding."""
+class TestRgn2RasterRecord:
+    """Tests for the 42-byte compound RGN2 raster record."""
 
-    def test_preamble_is_18_bytes(self):
-        """Each preamble should be exactly 18 bytes."""
+    def test_record_is_42_bytes(self):
+        """Each raster record should be exactly 42 bytes."""
         buf = io.BytesIO()
-        from cartoload.exporters.garmin_img_writer import _write_polyline_preamble
+        from cartoload.exporters.garmin_img_writer import _write_rgn2_raster_record
 
-        _write_polyline_preamble(buf, 47.0, 8.5)
-        assert len(buf.getvalue()) == 18
-
-    def test_preamble_starts_with_06_b3(self):
-        """Preamble type bytes should be 0x06 0xB3."""
-        buf = io.BytesIO()
-        from cartoload.exporters.garmin_img_writer import _write_polyline_preamble
-
-        _write_polyline_preamble(buf, 47.0, 8.5)
-        data = buf.getvalue()
-        assert data[0] == 0x06
-        assert data[1] == 0xB3
-
-    def test_preamble_with_tile_bounds_nonzero(self):
-        """Preamble with tile bounds should produce non-zero bitstream."""
-        buf = io.BytesIO()
-        from cartoload.exporters.garmin_img_writer import _write_polyline_preamble
-
-        _write_polyline_preamble(
+        _write_rgn2_raster_record(
             buf,
-            center_lat=47.0,
-            center_lon=8.5,
+            subdiv_center_lat=47.0,
+            subdiv_center_lon=8.5,
             tile_lat_min=46.9,
             tile_lon_min=8.4,
             tile_lat_max=47.1,
             tile_lon_max=8.6,
+            tile_center_lat=47.0,
+            tile_center_lon=8.5,
+            jpeg_size=5000,
+            image_index=0,
+        )
+        assert len(buf.getvalue()) == 42
+
+    def test_record_starts_with_06_b3(self):
+        """Record type bytes should be 0x06 0xB3."""
+        buf = io.BytesIO()
+        from cartoload.exporters.garmin_img_writer import _write_rgn2_raster_record
+
+        _write_rgn2_raster_record(
+            buf,
+            subdiv_center_lat=47.0,
+            subdiv_center_lon=8.5,
+            tile_lat_min=46.9,
+            tile_lon_min=8.4,
+            tile_lat_max=47.1,
+            tile_lon_max=8.6,
+            tile_center_lat=47.0,
+            tile_center_lon=8.5,
+            jpeg_size=5000,
+            image_index=0,
         )
         data = buf.getvalue()
-        # Bitstream (bytes 2-17) should have non-zero data
-        bitstream = data[2:]
-        assert bitstream != b"\x00" * 16, "Bitstream should encode non-zero deltas"
+        assert data[0] == 0x06
+        assert data[1] == 0xB3
 
-    def test_preamble_without_bounds_zeros(self):
-        """Preamble without tile bounds should produce zero bitstream (legacy)."""
+    def test_record_class_flags_and_vuint32(self):
+        """Record should have class_flags=0xE0 and VUInt32(22)=0x2D at correct offsets."""
         buf = io.BytesIO()
-        from cartoload.exporters.garmin_img_writer import _write_polyline_preamble
+        from cartoload.exporters.garmin_img_writer import _write_rgn2_raster_record
 
-        _write_polyline_preamble(buf, 47.0, 8.5)
+        _write_rgn2_raster_record(
+            buf,
+            subdiv_center_lat=47.0,
+            subdiv_center_lon=8.5,
+            tile_lat_min=46.9,
+            tile_lon_min=8.4,
+            tile_lat_max=47.1,
+            tile_lon_max=8.6,
+            tile_center_lat=47.0,
+            tile_center_lon=8.5,
+            jpeg_size=5000,
+            image_index=0,
+        )
         data = buf.getvalue()
-        # Legacy mode: bytes 2-17 should be all zeros
-        assert data[2:] == b"\x00" * 16
+        # byte 6: VUInt32(8) = 0x11
+        assert data[6] == 0x11
+        # byte 18: class_flags = 0xE0
+        assert data[18] == 0xE0
+        # byte 19: VUInt32(22) = 0x2D
+        assert data[19] == 0x2D
+
+    def test_record_image_id_and_jpeg_size(self):
+        """Record should encode image_index and jpeg_size at correct offsets."""
+        import struct
+
+        buf = io.BytesIO()
+        from cartoload.exporters.garmin_img_writer import _write_rgn2_raster_record
+
+        _write_rgn2_raster_record(
+            buf,
+            subdiv_center_lat=47.0,
+            subdiv_center_lon=8.5,
+            tile_lat_min=46.9,
+            tile_lon_min=8.4,
+            tile_lat_max=47.1,
+            tile_lon_max=8.6,
+            tile_center_lat=47.0,
+            tile_center_lon=8.5,
+            jpeg_size=12345,
+            image_index=42,
+        )
+        data = buf.getvalue()
+        # image_id at bytes 20-21
+        image_id = struct.unpack_from("<H", data, 20)[0]
+        assert image_id == 42
+        # jpeg_size at bytes 38-41
+        jpeg_size = struct.unpack_from("<I", data, 38)[0]
+        assert jpeg_size == 12345
+
+    def test_record_deltas_zero_when_centered(self):
+        """Lon/lat deltas should be zero when tile center equals subdivision center."""
+        import struct
+
+        buf = io.BytesIO()
+        from cartoload.exporters.garmin_img_writer import _write_rgn2_raster_record
+
+        _write_rgn2_raster_record(
+            buf,
+            subdiv_center_lat=47.0,
+            subdiv_center_lon=8.5,
+            tile_lat_min=46.9,
+            tile_lon_min=8.4,
+            tile_lat_max=47.1,
+            tile_lon_max=8.6,
+            tile_center_lat=47.0,
+            tile_center_lon=8.5,
+            jpeg_size=5000,
+            image_index=0,
+        )
+        data = buf.getvalue()
+        lon_delta = struct.unpack_from("<h", data, 2)[0]
+        lat_delta = struct.unpack_from("<h", data, 4)[0]
+        assert lon_delta == 0
+        assert lat_delta == 0
+
+    def test_record_deltas_nonzero_when_offset(self):
+        """Lon/lat deltas should be non-zero when tile center differs from subdivision center."""
+        import struct
+
+        buf = io.BytesIO()
+        from cartoload.exporters.garmin_img_writer import _write_rgn2_raster_record
+
+        _write_rgn2_raster_record(
+            buf,
+            subdiv_center_lat=47.0,
+            subdiv_center_lon=8.5,
+            tile_lat_min=46.85,
+            tile_lon_min=8.35,
+            tile_lat_max=46.95,
+            tile_lon_max=8.45,
+            tile_center_lat=46.9,
+            tile_center_lon=8.4,
+            jpeg_size=5000,
+            image_index=0,
+        )
+        data = buf.getvalue()
+        lon_delta = struct.unpack_from("<h", data, 2)[0]
+        lat_delta = struct.unpack_from("<h", data, 4)[0]
+        assert lon_delta != 0
+        assert lat_delta != 0

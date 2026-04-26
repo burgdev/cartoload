@@ -246,19 +246,30 @@ int(47.65 * 2^24 / 360) = 2,225,653 = 0x21E825 → bytes 25 E8 21
 
 After the 21-byte common header, the RGN sub-header uses the following layout (positions are **GMP-relative** offsets):
 
-| RGN Offset | Size | Field              | Description                      |
-| ---------- | ---- | ------------------ | -------------------------------- |
-| 0x15       | 8    | RGN1 position/size | pos(4) + size(4) — standard data |
-| 0x1D       | 8    | RGN2 position/size | pos(4) + size(4) — raster layers |
-| 0x25       | 20   | Flags/padding      | Zeros                            |
-| 0x39       | 8    | RGN3 position/size | pos(4) + size(4)                 |
-| 0x41       | 20   | Flags/padding      | Zeros                            |
-| 0x55       | 8    | RGN4 position/size | pos(4) + size(4)                 |
-| 0x5D       | 20   | Flags/padding      | Zeros                            |
-| 0x71       | 8    | RGN5 position/size | pos(4) + size(4)                 |
-| 0x79+      |      | RGNEXT header      | Extended data                    |
+| RGN Offset | Size | Field              | Description                                          |
+| ---------- | ---- | ------------------ | ---------------------------------------------------- |
+| 0x15       | 8    | RGN1 position/size | pos(4) + size(4) — standard data                     |
+| 0x1D       | 8    | RGN2 position/size | pos(4) + size(4) — raster layers / extended polygons |
+| 0x25       | 8    | RGN2 ext position  | Extended polygon data position and size (see below)  |
+| 0x2D       | 2    | RGN2 ext rec_size  | Record size for extended polygon entries              |
+| 0x2F       | 2    | Unknown            | Observed non-zero in SwissTopo reference              |
+| 0x31       | 8    | RGN2 ext flags     | Extended polygon section flags                        |
+| 0x39       | 8    | RGN3 position/size | pos(4) + size(4) — extended polylines                |
+| 0x41       | 8    | RGN3 ext position  | Extended polyline data position and size              |
+| 0x49       | 2    | RGN3 ext rec_size  | Record size for extended polyline entries             |
+| 0x4B       | 2    | Unknown            | Observed non-zero in SwissTopo reference              |
+| 0x4D       | 8    | RGN3 ext flags     | Extended polyline section flags                       |
+| 0x55       | 8    | RGN4 position/size | pos(4) + size(4) — extended POIs                     |
+| 0x5D       | 8    | RGN4 ext position  | Extended POI data position and size                   |
+| 0x65       | 2    | RGN4 ext rec_size  | Record size for extended POI entries                  |
+| 0x67       | 2    | Unknown            |                                                      |
+| 0x69       | 8    | RGN4 ext flags     | Extended POI section flags                            |
+| 0x71       | 8    | RGN5 position/size | pos(4) + size(4)                                     |
+| 0x79+      |      | RGNEXT header      | Extended data                                        |
 
 **Note:** All `pos` values in the RGN sub-header are GMP-relative offsets, matching the TRE header convention.
+
+**SwissTopo reference RGN sub-header differences:** The SwissTopo_West.img reference has non-zero bytes at multiple offsets where a naive implementation writes zeros. Key offsets with non-zero values in the reference include 0x25 (RGN2 ext position), 0x2D-0x33 (RGN2 ext rec_size and flags), 0x39-0x3B (RGN3 position), 0x49 (RGN3 ext rec_size), 0x4C-0x4E, 0x55-0x57 (RGN4 position), 0x65-0x66, 0x68-0x6C, 0x71-0x72 (RGN5 position), and 0x79. These extended fields are critical for device rendering — GPXSee uses them to locate per-subdivision segment boundaries within the RGN2 data section. See Section 4.5.4 for the full parsing chain.
 
 ### 3.7 LBL Sub-Header (596 bytes)
 
@@ -385,6 +396,27 @@ RGN2 contains compound records that describe the raster tiles for each subdivisi
 | `0xBC` | Boundary marker        | 3 bytes: `BC 00 00`. Multi-map format only.                                                                                                                 |
 | `0xDE` | Ext boundary marker    | 3 bytes: `DE 00 00`. Multi-map format only.                                                                                                                 |
 
+**Polyline preamble type decoding (0x06 / 0xB3):**
+
+The raster polyline preamble uses type byte `0x06` and subtype byte `0xB3`. The decoded type ID is:
+
+```
+type = 0x10000 | (0x06 << 8) | (0xB3 & 0x1F)
+     = 0x10000 | 0x0600 | 0x13
+     = 0x10613
+```
+
+This matches GPXSee's `isRaster()` check (`type == 0x10613`). The subtype byte 0xB3 encodes:
+
+| Bit(s) | Value | Meaning                                            |
+| ------ | ----- | -------------------------------------------------- |
+| 0-4    | 0x13  | Raster subtype identifier (19 decimal)             |
+| 5      | 0x20  | Has label pointer (required for image reference)   |
+| 6      | 0x00  | Unused                                             |
+| 7      | 0x80  | Has class fields (triggers `readRasterInfo` in GPXSee) |
+
+When bit 7 is set, GPXSee calls `readClassFields()` followed by `readRasterInfo()`, which reads the variable-length image ID and the four uint32 bounds from the subsequent data. This is the chain that leads to the E0 record parsing.
+
 **Single-map raster format (SwissTopo):** RGN2 consists of consecutive `0x06` preamble + `0xE0` tile record pairs, with no outline records (`0x0D`), boundary markers (`0xBC`), or level separators (`0xDE`). Each subdivision's tiles are simply concatenated.
 
 **Multi-map raster format (IOM):** May include `0x0D`, `0xBC`, and `0xDE` records for boundaries between subdivisions and zoom levels.
@@ -443,6 +475,74 @@ RGN5 is a smaller metadata section observed in IOM.img but not present in SwissT
 | SwissTopo_West     | 0 bytes   | Not present (size=0)                             |
 
 The RGN5 section may contain rendering hints or extended metadata for the raster layer. For writer implementation, it can safely be omitted (size=0), as SwissTopo_West validates correctly without it.
+
+#### 4.5.4 RGN2 Per-Subdivision Segment Boundaries
+
+RGN2 data is not a flat byte stream — it is logically divided into per-subdivision segments whose boundaries are defined by the **TRE7 offset table**. This is how Garmin devices and GPXSee locate individual subdivision data within RGN2.
+
+**Segment boundary semantics:**
+
+TRE7 entries (one per subdivision) contain offsets into the RGN2 section. Adjacent entries form start/end pairs:
+
+```
+Subdivision 0:  RGN2 offset[0]  →  RGN2 offset[1]
+Subdivision 1:  RGN2 offset[1]  →  RGN2 offset[2]
+Subdivision 2:  RGN2 offset[2]  →  RGN2 offset[3]
+...
+Subdivision N:  RGN2 offset[N]  →  RGN2 offset[N+1]  (sentinel)
+```
+
+The sentinel entry (all zeros) at the end of TRE7 provides the end boundary for the last real subdivision. Each subdivision's RGN2 data starts at its TRE7 offset and ends at the next entry's offset.
+
+**Extended offsets in RGN sub-header:** The RGN2 base position (at RGN offset 0x1D) is added to the TRE7 offsets to compute the absolute GMP-relative position. GPXSee reads these via:
+
+1. `subdivInit()` — reads TRE7 entries and stores `extPolygonsOffset` / `extPolygonsEnd` per subdivision
+2. `segments()` — uses the subdivision's polygon offset and end to define a byte range within the RGN2 section
+3. `extPolyObjects()` — parses the polyline preambles and E0 records within that byte range
+
+**TRE7 `_flags` field (at TRE offset 0x86):**
+
+The TRE sub-header contains a 4-byte flags field at offset 0x86 that determines how TRE7 entries are parsed:
+
+| Flag bit | Meaning when set                                 |
+| -------- | ------------------------------------------------ |
+| 0        | Polygons present — read uint32 offset for polygons |
+| 1        | Lines present — read uint32 offset for lines     |
+| 2        | Points present — read uint32 offset for points   |
+
+SwissTopo has `_flags = 0x00000481` (bits 0 and 7 set). Bit 0 = polygons present as uint32. GPXSee's `readExtEntry()` reads entries conditionally based on which bits are set:
+
+```cpp
+if (_flags & 1) { readUInt32(hdl, polygons); rb += 4; }  // polygons offset
+if (_flags & 2) { readUInt32(hdl, lines);    rb += 4; }  // lines offset
+if (_flags & 4) { readUInt32(hdl, points);   rb += 4; }  // points offset
+```
+
+For SwissTopo (rec_size=5, flags=0x81), each TRE7 entry is: `[uint32 rgn2_offset][uint8 flag]`. The flag byte is 0x01 for empty/overview subdivisions and 0x00 for data subdivisions.
+
+**Complete RGN2 raster parsing flow (as implemented by GPXSee):**
+
+```
+TRE header → read _flags at TRE+0x86
+           → read TRE7 section descriptor at TRE+0x7C
+           → iterate TRE7 entries using readExtEntry()
+           → store extPolygonsOffset/End per subdivision
+
+RGN header → read _polygons section at RGN+0x1D (this IS RGN2)
+
+Per subdivision:
+  segment_start = _polygons.offset + extPolygonsOffset
+  segment_end   = _polygons.offset + extPolygonsEnd
+  parse extPolyObjects() within [segment_start, segment_end)
+    → read type byte (0x06) + subtype (0xB3)
+    → decode: type = 0x10000 | (0x06 << 8) | (0xB3 & 0x1F) = 0x10613
+    → isRaster(0x10613) = true
+    → readClassFields() + readRasterInfo()
+    → read image_id (variable size from LBL) + bounds (4×uint32)
+    → locate E0 record → fetch JPEG from LBL29 via LBL28 index
+```
+
+**Implication for the writer:** The RGN2 data must be laid out so that each subdivision's records occupy a contiguous byte range, and the TRE7 offsets must correctly delimit these ranges. If TRE7 offsets are wrong or overlapping, the device will parse garbage data and fail to display tiles.
 
 ### 4.6 Complete GMP Data Layout
 
@@ -590,7 +690,9 @@ Group 0: rgn_off=0, obj=0x00, lon=7.47°, lat=46.83°, subdivs=560, next=0
 
 ### 5.4 TRE7 — Raster Layer Section
 
-TRE7 defines an offset table that maps zoom levels to their raster layer descriptions in RGN2. The section descriptor at TRE+0x7C includes a `rec_size` field that determines the record format.
+TRE7 defines an offset table that maps subdivisions to their raster layer data in RGN2. Each entry corresponds to one subdivision and provides the byte offset into RGN2 where that subdivision's data begins. **Adjacent entries form segment boundaries** — subdivision N's data spans from offset[N] to offset[N+1] (see Section 4.5.4 for details).
+
+The section descriptor at TRE+0x7C includes a `rec_size` field that determines the record format.
 
 **TRE7 descriptor header (at TRE+0x7C):**
 
@@ -601,12 +703,42 @@ rec_size(2): Size of each record in bytes
 pad(4):     Zeros
 ```
 
+**TRE7 `_flags` field (at TRE+0x86):**
+
+A 4-byte flags value that determines how each TRE7 entry is parsed. The flags indicate which offset types are present in each entry:
+
+| Flag bit | Meaning when set                                   |
+| -------- | -------------------------------------------------- |
+| 0        | Polygons — entry contains uint32 polygon offset    |
+| 1        | Lines — entry contains uint32 line offset          |
+| 2        | Points — entry contains uint32 point offset        |
+
+For SwissTopo (`_flags = 0x00000481`), only bit 0 (polygons) is relevant for the RGN2 data. The IOM reference uses a simpler format without extended flags.
+
 **Record format:**
 
 | Variant              | rec_size | Format                         |
 | -------------------- | -------- | ------------------------------ |
 | Simple (IOM)         | 4        | uint32 LE offset into RGN2     |
 | Extended (SwissTopo) | 5        | uint32 LE offset + 1 byte flag |
+
+**SwissTopo TRE7 entry flag byte:**
+
+| Value | Meaning                               |
+| ----- | ------------------------------------- |
+| 0x01  | Empty/overview subdivision (no tiles) |
+| 0x00  | Data subdivision (contains tile data) |
+
+**Segment boundary interpretation:**
+
+TRE7 has N+1 entries for N subdivisions (plus a sentinel entry of all zeros). The segment for subdivision `i` spans:
+
+```
+start = TRE7[i].offset
+end   = TRE7[i+1].offset
+```
+
+These offsets are relative to the RGN2 base position stored at RGN header offset 0x1D. To get absolute GMP positions: `abs_pos = RGN2_base + TRE7[i].offset`.
 
 **IOM subfile 00355951 example (rec_size=4):**
 
@@ -620,6 +752,7 @@ Offset table: [0, 46, 92, 138, 184, 243, 361, 420]
 ```
 748 entries with uint32 offset + 1 byte flag each
 → Points to raster layer descriptions for 560 groups across 5 zoom levels
++1 sentinel entry (all zeros) marking end of data
 ```
 
 ### 5.5 TRE8 — Object Type Parameters
@@ -1171,6 +1304,8 @@ Official Garmin maps (like SwissTopo Pro) combine raster and vector data in a si
 - Hexadecimal dumps of headers and GMP container sections
 - `cartoload analyze img info` — built-in CLI for inspecting IMG files with FAT chain traversal and GMP-relative offset parsing
 - Willink/Pinns "Exploring Garmin's IMG Format" (2015) — see `expl_img2015.pdf` in this directory
+- GPXSee source code (`/home/tobias/git/tmp/GPXSee/src/map/IMG/`) — C++ reference parser for TRE/RGN/LBL files, critical for understanding RGN2 segment boundaries and raster type decoding
+- mkgmap source code (`/home/tobias/git/tmp/mkgmap-r4924`) — Java reference implementation for IMG writing (vector-focused but core format logic applies)
 - **Device tested:** Garmin Fenix 6 (confirmed working with reference files)
 
-**Last updated:** 2026-04-23
+**Last updated:** 2026-04-26

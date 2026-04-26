@@ -1,5 +1,6 @@
 # Python
 test_output/
+tmp/
 node_modules/
 __pycache__/
 *.py[cod]

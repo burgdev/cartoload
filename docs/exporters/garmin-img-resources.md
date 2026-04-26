@@ -131,14 +131,55 @@ This document provides a curated list of resources, tools, libraries, and docume
 
 ### Map Analysis and Inspection Tools
 
-#### 9. imgdecode
+#### 9. GPXSee (Open Source)
+
+- **Purpose:** GPS data viewer with full Garmin IMG parser
+- **Type:** Desktop application (C++/Qt)
+- **License:** GPL
+- **Repository:** <https://github.com/tumic0/GPXSee>
+- **Use Case:** Reference implementation for reading Garmin IMG files (both vector and raster)
+- **Capabilities:**
+  - Full TRE/RGN/LBL/NET parser with extended raster support
+  - Raster tile extraction and display from IMG files
+  - TRE7 segment boundary parsing for per-subdivision RGN2 data
+  - LBL28/LBL29 image index and JPEG retrieval
+- **Value for this project:**
+  - Primary reference for understanding how devices parse RGN2 raster data
+  - Confirmed polyline preamble type: `0x06/0xB3` → `type = 0x10613` (raster)
+  - Documents TRE7 `_flags` field semantics (bits 0-2: polygon/line/point offsets)
+  - Shows complete parsing chain: TRE7 → extPolygonsOffset → extPolyObjects → readRasterInfo → E0 record
+- **Key source files:**
+  - `src/map/IMG/rgnfile.cpp` — RGN2 parsing, raster info reading
+  - `src/map/IMG/trefile.cpp` — TRE7 entry reading, subdivision initialization
+  - `src/map/IMG/lblfile.cpp` — LBL28 raster table loading, JPEG retrieval
+  - `src/map/IMG/style_img.h` — `isRaster()` type check (`type == 0x10613`)
+
+#### 10. imgdecode
 
 - **Purpose:** Decode and inspect IMG file structures
 - **Type:** Command-line tool
 - **Use Case:** Reverse-engineering IMG format, debugging
 - **Availability:** Various open-source implementations on GitHub
 
-#### 10. img2gps
+#### 10a. SasPlanet (Open Source)
+
+- **Purpose:** Satellite imagery viewer and map tile downloader with Garmin IMG export
+- **Type:** Desktop application (Delphi/Pascal)
+- **License:** GPL
+- **Repository:** <https://github.com/sasgis/sas.planet.src>
+- **Use Case:** Understanding the MTX intermediate format used for raster IMG creation
+- **Key findings from source analysis:**
+  - SasPlanet does **NOT** write binary IMG directly — it generates MTX text files compiled by proprietary `bld_gmap32.exe`
+  - MTX format includes map format (MF=2, MG=1 for OF_GMP), map series 36 (GB Discoverer)
+  - Feature types: polyline=23670 (0x5C56), polygon=20122 (0x4E9A)
+  - Two submap architecture: Fine (zooms ≤7) + Coarse (zooms >7), compiled separately then joined by `gmt.exe`
+  - Fixed generalization levels table mapping zoom levels to scale values
+- **Value for this project:** Understanding how commercial tools organize raster data (submap splitting, zoom level mappings, feature type assignments), but not directly usable as binary reference since output goes through `bld_gmap32.exe`
+- **Key source files:**
+  - `Src/RegionProcess/Export/IMG/u_ExportTaskToIMG.pas` — MTX file generation and external tool invocation
+  - `Src/RegionProcess/Export/IMG/t_ExportToIMGTask.pas` — Data structures and format definitions
+
+#### 11. img2gps
 
 - **Purpose:** Extract GPS data and metadata from IMG files
 - **Type:** Parser/extractor
@@ -684,6 +725,8 @@ Garmin's professional maps (like SwissTopo Pro) combine both raster and vector d
 
 - [mkgmap SVN](https://svn.mkgmap.org.uk/mkgmap/) - Reference implementation (Java)
 - [splitter SVN](https://svn.mkgmap.org.uk/splitter/) - OSM data splitter
+- [GPXSee GitHub](https://github.com/tumic0/GPXSee) - Reference IMG parser (C++/Qt), critical for RGN2 raster parsing
+- [SasPlanet GitHub](https://github.com/sasgis/sas.planet.src) - MTX format reference (Delphi)
 
 ### Format Information
 
@@ -700,5 +743,4 @@ Garmin's professional maps (like SwissTopo Pro) combine both raster and vector d
 ---
 
 **Last Updated:** 2026-04-26
-
 **Key Takeaway:** This project implements the first known open-source Garmin raster IMG writer, filling a significant gap in the GIS ecosystem. The GMP container format has been fully reverse-engineered, with GMapTool validation passing for generated files.

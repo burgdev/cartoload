@@ -14,6 +14,7 @@ from rich.progress import (
     SpinnerColumn,
     TextColumn,
     TimeElapsedColumn,
+    TimeRemainingColumn,
 )
 
 from .cli_analyze import analyze
@@ -27,6 +28,12 @@ from .pipeline import (
     get_downloader,
     resolve_source,
 )
+from .processor.checkpoint import delete_checkpoint
+from .processor.build_summary import (
+    compute_build_summary,
+    format_build_summary,
+)
+from .processor.preview import generate_previews
 from .downloader.geotiff import GeoTIFFDownloader
 from .downloader.wmts import WMTSDownloader
 
@@ -204,6 +211,24 @@ main.add_command(analyze)
 @click.option("-c", "--cache-dir", default="./cache", help="Default: ./cache")
 @click.option("--no-download", is_flag=True, help="Use existing cache only")
 @click.option("-f", "--force", is_flag=True, help="Overwrite existing output files")
+@click.option("--dry-run", is_flag=True, help="Show build plan without executing")
+@click.option(
+    "--cache-warmup", is_flag=True, help="Download and cache tiles only, skip IMG build"
+)
+@click.option("--preview", is_flag=True, help="Generate preview images after build")
+@click.option(
+    "-P",
+    "--preview-tiles",
+    type=int,
+    default=9,
+    help="Max tiles per preview mosaic (default: 9)",
+)
+@click.option(
+    "--preview-center",
+    nargs=2,
+    type=float,
+    help="Override preview center: LNG LAT",
+)
 @click.option(
     "-q",
     "--quality",
@@ -226,6 +251,11 @@ def build(
     cache_dir: str,
     no_download: bool,
     force: bool,
+    dry_run: bool,
+    cache_warmup: bool,
+    preview: bool,
+    preview_tiles: int,
+    preview_center: tuple[float, ...] | None,
     quality: int,
 ) -> None:
     """Build one or more layers into output files."""
@@ -250,16 +280,51 @@ def build(
             _validate_extent_within_layer(extent, layer_config.bounds)
 
         zoom_list = _parse_zoom(zoom)
-        if exporter:
-            import dataclasses
 
+        # Apply overrides to layer_config early (before build summary)
+        import dataclasses
+
+        if extent is not None:
+            layer_config = dataclasses.replace(layer_config, bounds=extent)
+        if zoom_list is not None:
+            layer_config = dataclasses.replace(layer_config, zoom_levels=zoom_list)
+        if exporter:
             layer_config = dataclasses.replace(layer_config, exporter=exporter)
 
-        # Create output dir
+        # Create paths (don't mkdir yet — dry-run shouldn't create dirs)
         out_dir = Path(output_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
         cache = Path(cache_dir)
+
+        # Compute and display build summary
+        source = resolve_source(layer_config, config.sources)
+        try:
+            dl = get_downloader(source, cache, layer_name=layer_config.wmts_layer or "")
+            summary = compute_build_summary(layer_config, dl, quality=quality)
+            if summary.total_tiles > 0:
+                click.echo(
+                    format_build_summary(
+                        summary, fast_build=summary.all_cached and no_download
+                    )
+                )
+                click.echo()
+        except Exception:
+            # Summary is best-effort; don't block the build if it fails
+            pass
+
+        # Dry run: show plan and exit without creating any files
+        if dry_run:
+            click.echo("Dry run — no files will be created.")
+            return
+
+        # Now create directories (only after dry-run check)
+        # Warmup only needs cache dir, not output dir
         cache.mkdir(parents=True, exist_ok=True)
+        if not cache_warmup:
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+        # Discard checkpoint when --force is used
+        if force:
+            delete_checkpoint(cache, layer)
 
         # Progress callback
         def on_progress(stage: str, description: str) -> None:
@@ -272,6 +337,7 @@ def build(
             BarColumn(),
             TextColumn("{task.completed}/{task.total}"),
             TimeElapsedColumn(),
+            TimeRemainingColumn(),
             console=None,
             transient=False,
         )
@@ -307,13 +373,38 @@ def build(
                     quality=quality,
                     progress_callback=on_progress,
                     export_progress_callback=on_export_progress,
+                    warmup_only=cache_warmup,
                 )
             )
 
         # Summary
-        for path in output_paths:
-            size = path.stat().st_size
-            click.echo(f"Output: {path} ({_human_size(size)})")
+        if cache_warmup:
+            click.echo("Cache warmup complete. Tiles are cached and ready for build.")
+        else:
+            for path in output_paths:
+                size = path.stat().st_size
+                click.echo(f"Output: {path} ({_human_size(size)})")
+
+        # Generate previews if requested
+        if preview:
+            try:
+                dl = get_downloader(
+                    source, cache, layer_name=layer_config.wmts_layer or ""
+                )
+                if isinstance(dl, WMTSDownloader):
+                    preview_paths = generate_previews(
+                        layer_config,
+                        dl,
+                        out_dir,
+                        max_tiles_per_zoom=preview_tiles,
+                        quality=quality,
+                    )
+                    for pp in preview_paths:
+                        click.echo(f"Preview: {pp}")
+                    if not preview_paths:
+                        click.echo("No previews generated (no cached tiles available)")
+            except Exception as e:
+                click.echo(f"Preview generation failed: {e}", err=True)
 
     except click.ClickException:
         raise
@@ -570,3 +661,143 @@ def list_layers(
         if layer.description:
             click.echo(f"    Description: {layer.description}")
         click.echo()
+
+
+# ---------------------------------------------------------------------------
+# Cache management commands
+# ---------------------------------------------------------------------------
+
+
+@main.group()
+@click.option("-c", "--cache-dir", default="./cache", help="Default: ./cache")
+@click.pass_context
+def cache(ctx: click.Context, cache_dir: str) -> None:
+    """Inspect and manage the tile cache."""
+    ctx.ensure_object(dict)
+    ctx.obj["cache_dir"] = Path(cache_dir)
+
+
+@cache.command("status")
+@click.pass_context
+def cache_status(ctx: click.Context) -> None:
+    """Report cache size, tile counts per source, download vs reprojection."""
+    cache_dir: Path = ctx.obj["cache_dir"]
+
+    if not cache_dir.exists():
+        click.echo(f"Cache directory does not exist: {cache_dir}")
+        return
+
+    # Discover source directories
+    source_dirs = sorted(
+        d for d in cache_dir.iterdir() if d.is_dir() and not d.name.startswith(".")
+    )
+
+    if not source_dirs:
+        click.echo("Cache is empty.")
+        return
+
+    total_size = 0
+    total_tiles = 0
+
+    for source_dir in source_dirs:
+        name = source_dir.name
+        # Reprojection caches end with _epsg_NNNN (lowercase crs code)
+        is_reprojection = (
+            name.endswith("_epsg_4326")
+            or name.endswith("_epsg_3857")
+            or "_epsg_" in name
+        )
+
+        # Count tiles and size
+        tile_count = 0
+        tile_size = 0
+        tile_extensions = {".jpeg", ".jpg", ".png", ".tif", ".tiff"}
+        for f in source_dir.rglob("*"):
+            if f.is_file() and f.suffix in tile_extensions:
+                tile_count += 1
+                tile_size += f.stat().st_size
+
+        total_size += tile_size
+        total_tiles += tile_count
+
+        tier = "reprojection" if is_reprojection else "download"
+        click.echo(f"  {name} ({tier})")
+        click.echo(f"    Tiles: {tile_count}")
+        click.echo(f"    Size:  {_human_size(tile_size)}")
+        click.echo()
+
+    click.echo(f"Total: {total_tiles} tiles, {_human_size(total_size)}")
+
+
+@cache.command("clean")
+@click.option("--source", help="Clean only a specific source's cache")
+@click.option(
+    "--reprojection-only",
+    is_flag=True,
+    help="Clean only reprojection cache directories",
+)
+@click.option("-f", "--force", is_flag=True, help="Skip confirmation prompt")
+@click.pass_context
+def cache_clean(
+    ctx: click.Context, source: str | None, reprojection_only: bool, force: bool
+) -> None:
+    """Remove cached tiles (download and/or reprojection)."""
+    cache_dir: Path = ctx.obj["cache_dir"]
+
+    if not cache_dir.exists():
+        click.echo(f"Cache directory does not exist: {cache_dir}")
+        return
+
+    # Find directories to remove
+    dirs_to_remove: list[Path] = []
+
+    if source:
+        # Clean specific source
+        source_dir = cache_dir / source
+        if source_dir.exists():
+            dirs_to_remove.append(source_dir)
+        # Also clean reprojection cache for this source
+        for d in cache_dir.iterdir():
+            if d.is_dir() and d.name.startswith(f"{source}_"):
+                dirs_to_remove.append(d)
+    elif reprojection_only:
+        # Clean only reprojection cache dirs (those with _epsg_ suffix)
+        for d in cache_dir.iterdir():
+            if d.is_dir() and "_epsg_" in d.name:
+                parts = d.name.rsplit("_", 2)
+                if len(parts) >= 2:
+                    dirs_to_remove.append(d)
+    else:
+        # Clean everything
+        dirs_to_remove = sorted(
+            d for d in cache_dir.iterdir() if d.is_dir() and not d.name.startswith(".")
+        )
+
+    if not dirs_to_remove:
+        click.echo("Nothing to clean.")
+        return
+
+    # Calculate total size
+    total_size = 0
+    for d in dirs_to_remove:
+        for f in d.rglob("*"):
+            if f.is_file():
+                total_size += f.stat().st_size
+
+    # Confirm
+    if not force:
+        dir_names = ", ".join(d.name for d in dirs_to_remove)
+        click.echo(f"Will remove: {dir_names}")
+        click.echo(f"Total size: {_human_size(total_size)}")
+        if not click.confirm("Continue?"):
+            click.echo("Aborted.")
+            return
+
+    # Remove
+    import shutil
+
+    for d in dirs_to_remove:
+        shutil.rmtree(d)
+        click.echo(f"Removed: {d.name}")
+
+    click.echo(f"Freed: {_human_size(total_size)}")

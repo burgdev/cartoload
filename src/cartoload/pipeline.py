@@ -3,14 +3,26 @@
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 from typing import Callable
 
 from .config import LayerConfig, SourceConfig
+from .downloader.base import BaseDownloader
 from .downloader.geotiff import GeoTIFFDownloader
 from .downloader.wmts import WMTSDownloader
 from .exporters.garmin_img import GarminImgExporter
-from .processor.raster import RasterProcessor
+from .processor.batch import BatchTileProcessor
+from .processor.checkpoint import (
+    CheckpointData,
+    delete_checkpoint,
+    mark_zoom_complete,
+    read_checkpoint,
+    write_checkpoint,
+)
+
+# Legacy import — kept for backward compatibility and debug use
+from .processor.raster import RasterProcessor  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -78,17 +90,21 @@ def get_downloader(
     if source.type == "geotiff":
         return GeoTIFFDownloader(cache_dir)
     if source.type == "wmts":
-        if not source.url_template:
+        if not source.url_template and not source.urls:
             raise PipelineError(
-                f"WMTS source '{source.id}' missing required 'url_template'"
+                f"WMTS source '{source.id}' missing required 'url_template' or 'urls'"
             )
+        # Use first url_template or first URL from list
+        url_template = source.url_template or source.urls[0]
         return WMTSDownloader(
             source_id=source.id,
-            url_template=source.url_template,
+            url_template=url_template,
             cache_dir=cache_dir,
             max_workers=source.max_threads,
             delay_ms=source.rate_limit_ms,
             layer_name=layer_name,
+            crs=source.crs,
+            urls=source.urls if source.urls else None,
         )
     raise PipelineError(
         f"Unknown source type '{source.type}' for source '{source.id}'. "
@@ -173,8 +189,14 @@ async def build_layer(
     quality: int = 85,
     progress_callback: ProgressCallback | None = None,
     export_progress_callback: ExportProgressCallback | None = None,
+    checkpoint: bool = True,
+    warmup_only: bool = False,
 ) -> list[Path]:
-    """Orchestrate download → process → export for a single layer.
+    """Orchestrate download → batch process → export for a single layer.
+
+    Uses the fast pipeline: downloads tiles to cache, then reads them
+    directly via BatchTileProcessor (no intermediate GeoTIFF), and
+    writes to Garmin IMG via export_from_tiles.
 
     Args:
         layer: Layer configuration
@@ -182,10 +204,14 @@ async def build_layer(
         cache_dir: Directory for caching downloaded tiles
         output_dir: Directory for output files
         no_download: If True, skip the download stage
+        force: If True, overwrite existing output files
         bounds_override: Override the layer bounds
         zoom_override: Override the layer zoom levels
         quality: JPEG quality for tile encoding
         progress_callback: Called with (stage_id, description) at each stage
+        export_progress_callback: Called with (stage, current, total) for export progress
+        checkpoint: If True, write checkpoint after each zoom level for resume support
+        warmup_only: If True, download and process tiles but skip IMG export
 
     Returns:
         List of paths to output files (may be multiple if >4GB split)
@@ -202,8 +228,58 @@ async def build_layer(
     # Apply overrides to a copy of the layer config
     effective_layer = _apply_overrides(layer, bounds_override, zoom_override)
 
+    # --- Checkpoint: detect and resume ---
+    cp_data: CheckpointData | None = None
+    if checkpoint:
+        cp_data = read_checkpoint(cache_dir, effective_layer.id)
+        if cp_data is not None:
+            # Validate that the checkpoint matches current config
+            completed = set(cp_data.completed_zoom_levels)
+            requested = set(effective_layer.zoom_levels)
+            if completed <= requested:
+                skipped = completed & requested
+                if skipped:
+                    logger.info(
+                        "Resuming build for layer '%s': zoom levels %s already completed",
+                        effective_layer.id,
+                        sorted(skipped),
+                    )
+            else:
+                # Checkpoint has zooms not in current request — stale, discard
+                logger.warning(
+                    "Stale checkpoint for layer '%s' (extra zooms), starting fresh",
+                    effective_layer.id,
+                )
+                cp_data = None
+
+    # Determine remaining zoom levels
+    if cp_data is not None:
+        completed_zooms = set(cp_data.completed_zoom_levels)
+        remaining_zooms = [
+            z for z in effective_layer.zoom_levels if z not in completed_zooms
+        ]
+    else:
+        remaining_zooms = list(effective_layer.zoom_levels)
+        # Create initial checkpoint
+        if checkpoint:
+            cp_data = CheckpointData(
+                layer_id=effective_layer.id,
+                completed_zoom_levels=[],
+                remaining_zoom_levels=list(effective_layer.zoom_levels),
+            )
+            write_checkpoint(cache_dir, cp_data)
+
+    # Determine source CRS
+    source_crs: str | None
+    if source.crs:
+        source_crs = source.crs
+    elif source.type == "wmts":
+        source_crs = "EPSG:3857"
+    else:
+        source_crs = None
+
     # --- Download stage ---
-    downloaded_paths: list[Path] = []
+    downloader: BaseDownloader | None = None
     if not no_download:
         if progress_callback:
             progress_callback("download", "Downloading tiles...")
@@ -212,7 +288,7 @@ async def build_layer(
                 source, cache_dir, layer_name=effective_layer.wmts_layer or ""
             )
             if isinstance(downloader, GeoTIFFDownloader):
-                downloaded_paths = downloader.run(source, effective_layer)
+                downloader.run(source, effective_layer)
             elif isinstance(downloader, WMTSDownloader):
                 bounds = effective_layer.bounds
                 if not bounds:
@@ -226,65 +302,94 @@ async def build_layer(
                     bounds["east"],
                     bounds["north"],
                 )
-                for zoom in effective_layer.zoom_levels:
+                for zoom in remaining_zooms:
                     paths = downloader.download_grid(bbox, zoom)
-                    downloaded_paths.extend(paths)
-            else:
-                downloaded_paths = await downloader.download(
-                    effective_layer.zoom_levels,
-                    effective_layer.bounds or {},
-                )
+                    downloaded_count = len(paths)
+                    expected = len(downloader._bbox_to_tile_indices(bbox, zoom))
+                    if downloaded_count < expected and progress_callback:
+                        progress_callback(
+                            "download",
+                            f"Warning: zoom {zoom} — only {downloaded_count}/{expected} tiles available",
+                        )
         except PipelineError:
             raise
         except Exception as e:
             raise DownloadError(source.id, str(e), cause=e) from e
     else:
         logger.info("Skipping download stage (--no-download)")
-        # Collect already-cached tiles
-        downloaded_paths = _collect_cached_tiles(cache_dir, source, effective_layer)
 
-    # --- Process stage ---
+    # --- Process stage: batch read tiles from cache ---
     if progress_callback:
-        progress_callback("process", "Processing raster data...")
-    processed_path: Path
+        progress_callback("process", "Processing tiles from cache...")
 
-    # Check for existing output files
-    output_tif = output_dir / f"{layer.id}.tif"
-    existing = [
-        p for ext in (".tif", ".vrt") if (p := output_tif.with_suffix(ext)).exists()
-    ]
-    if existing:
-        if force:
-            for p in existing:
-                p.unlink()
-        else:
-            paths_str = ", ".join(str(p) for p in existing)
-            raise ProcessingError(
-                layer.id,
-                f"Output file(s) already exist: {paths_str}. Use --force to overwrite.",
+    # Get the downloader for cache path resolution (create if not set)
+    if downloader is None:
+        try:
+            downloader = get_downloader(
+                source, cache_dir, layer_name=effective_layer.wmts_layer or ""
             )
+        except PipelineError:
+            raise
+        except Exception as e:
+            raise ProcessingError(layer.id, str(e), cause=e) from e
 
-    # Determine source CRS for georeferencing
-    source_crs = "EPSG:3857" if source.type == "wmts" else None
-
+    # Compute tile coordinates for each zoom level
+    compressed_tiles: dict[int, list] = {}
     try:
-        processor = RasterProcessor(
-            target_crs="EPSG:4326",
-            output_path=output_dir / f"{layer.id}.tif",
+        processor = BatchTileProcessor(
             source_crs=source_crs,
+            target_crs="EPSG:4326",
+            quality=quality,
         )
-        if downloaded_paths:
-            processed_path = processor.process(downloaded_paths)
-        else:
-            raise ProcessingError(layer.id, "No tiles available for processing")
-    except ProcessingError:
+
+        for zoom in remaining_zooms:
+            tile_coords = _compute_tile_coords(effective_layer, zoom)
+            if tile_coords:
+                tiles = processor.process_zoom_level(
+                    downloader,
+                    tile_coords,
+                    zoom,
+                    progress_callback=export_progress_callback,
+                )
+                compressed_tiles[zoom] = tiles
+            else:
+                compressed_tiles[zoom] = []
+                logger.debug(f"No tile coordinates for zoom level {zoom}")
+
+            # Write checkpoint after each zoom level
+            if checkpoint and cp_data is not None:
+                mark_zoom_complete(
+                    cache_dir, cp_data, zoom, len(compressed_tiles.get(zoom, []))
+                )
+    except PipelineError:
         raise
     except Exception as e:
         raise ProcessingError(layer.id, str(e), cause=e) from e
 
-    # --- Export stage ---
+    total_tiles = sum(len(t) for t in compressed_tiles.values())
+    if total_tiles == 0:
+        raise ProcessingError(layer.id, "No tiles available for processing")
+
+    logger.info(
+        "Processed %d tiles across %d zoom levels",
+        total_tiles,
+        len(compressed_tiles),
+    )
+
+    # Warmup mode: stop after processing, skip export
+    if warmup_only:
+        logger.info(
+            "Warmup complete for layer '%s': %d tiles cached", layer.id, total_tiles
+        )
+        # Delete checkpoint since we're not building an IMG
+        if checkpoint:
+            delete_checkpoint(cache_dir, effective_layer.id)
+        return []
+
+    # --- Export stage: write directly to IMG ---
     if progress_callback:
         progress_callback("export", "Exporting to Garmin IMG...")
+
     output_paths: list[Path]
     try:
         exporter = get_exporter(effective_layer, output_dir)
@@ -301,8 +406,8 @@ async def build_layer(
                     f"Use --force to overwrite.",
                 )
 
-        output_paths = exporter.export(
-            processed_path,
+        output_paths = exporter.export_from_tiles(
+            compressed_tiles,
             effective_layer,
             output_file,
             progress_callback=export_progress_callback,
@@ -315,7 +420,71 @@ async def build_layer(
     logger.info(
         f"Build complete for layer '{layer.id}': {len(output_paths)} file(s) produced"
     )
+
+    # Delete checkpoint on successful completion
+    if checkpoint:
+        delete_checkpoint(cache_dir, effective_layer.id)
+
     return output_paths
+
+
+def _compute_tile_coords(layer: LayerConfig, zoom: int) -> list[tuple[int, int]]:
+    """Compute tile grid coordinates for a zoom level within the layer bounds.
+
+    Uses Web Mercator tile math to determine which (x, y) tiles cover
+    the layer's geographic bounds at the given zoom level.
+
+    Args:
+        layer: Layer configuration with bounds
+        zoom: Zoom level
+
+    Returns:
+        List of (x, y) tile coordinates
+    """
+    bounds = layer.bounds
+    if not bounds:
+        return []
+
+    n = 2**zoom
+    west = bounds["west"]
+    east = bounds["east"]
+    north = bounds["north"]
+    south = bounds["south"]
+
+    def lon_to_x(lon: float) -> int:
+        return max(0, min(int((lon + 180.0) / 360.0 * n), n - 1))
+
+    def lat_to_y(lat: float) -> int:
+        lat_rad = math.radians(lat)
+        return max(
+            0,
+            min(
+                int(
+                    (
+                        1.0
+                        - math.log(
+                            max(math.tan(lat_rad), 1e-10)
+                            + 1.0 / max(math.cos(lat_rad), 1e-10)
+                        )
+                        / math.pi
+                    )
+                    / 2.0
+                    * n
+                ),
+                n - 1,
+            ),
+        )
+
+    x_min = lon_to_x(west)
+    x_max = lon_to_x(east)
+    y_min = lat_to_y(north)
+    y_max = lat_to_y(south)
+
+    coords = []
+    for x in range(x_min, x_max + 1):
+        for y in range(y_min, y_max + 1):
+            coords.append((x, y))
+    return coords
 
 
 def _apply_overrides(

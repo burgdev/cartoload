@@ -521,3 +521,284 @@ class TestEndToEnd:
         assert dl._cache_path(*tiles[1], zoom) in result_paths
         # Tile 2 should NOT be cached (404)
         assert dl._cache_path(*tiles[2], zoom) not in result_paths
+
+
+# ===================================================================
+# 2.6 – Multi-URL distribution, rate limiting, and failover tests
+# ===================================================================
+
+
+class TestPerUrlRateLimiter:
+    """Tests for _PerUrlRateLimiter."""
+
+    def test_allows_immediate_first_request(self) -> None:
+        """First request should not wait."""
+        from cartoload.downloader.wmts import _PerUrlRateLimiter
+
+        limiter = _PerUrlRateLimiter(delay_ms=1000)
+        with patch("cartoload.downloader.wmts.time.sleep") as mock_sleep:
+            limiter.wait()
+        # No sleep needed for the very first request
+        mock_sleep.assert_not_called()
+
+    def test_enforces_delay_between_requests(self) -> None:
+        """Second request too soon should trigger sleep."""
+        from cartoload.downloader.wmts import _PerUrlRateLimiter
+
+        limiter = _PerUrlRateLimiter(delay_ms=200)
+        # First call sets _last_request
+        limiter.wait()
+        # Advance time only 50ms (less than 200ms delay)
+        with (
+            patch("cartoload.downloader.wmts.time.monotonic") as mock_mono,
+            patch("cartoload.downloader.wmts.time.sleep") as mock_sleep,
+        ):
+            # Return sequence: now=50ms after first request
+            mock_mono.return_value = limiter._last_request + 0.05
+            limiter.wait()
+
+        # Should have slept for the remaining ~150ms
+        mock_sleep.assert_called_once()
+        actual_sleep = mock_sleep.call_args[0][0]
+        assert actual_sleep > 0.1  # ~150ms give or take
+
+    def test_no_sleep_when_enough_time_elapsed(self) -> None:
+        """If enough time has passed since last request, no sleep needed."""
+        from cartoload.downloader.wmts import _PerUrlRateLimiter
+
+        limiter = _PerUrlRateLimiter(delay_ms=100)
+        limiter.wait()
+        # Simulate a long delay
+        limiter._last_request = time.monotonic() - 1.0
+
+        with patch("cartoload.downloader.wmts.time.sleep") as mock_sleep:
+            limiter.wait()
+        mock_sleep.assert_not_called()
+
+    def test_thread_safety(self) -> None:
+        """Multiple threads should be able to use the limiter safely."""
+        import threading
+
+        from cartoload.downloader.wmts import _PerUrlRateLimiter
+
+        limiter = _PerUrlRateLimiter(delay_ms=0)  # No actual delay
+        errors: list[Exception] = []
+        barrier = threading.Barrier(4)
+
+        def worker():
+            try:
+                barrier.wait(timeout=5)
+                for _ in range(50):
+                    limiter.wait()
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors
+
+
+class TestUrlSelector:
+    """Tests for _UrlSelector."""
+
+    def test_round_robin_distribution(self) -> None:
+        """URLs should be distributed in round-robin order."""
+        from cartoload.downloader.wmts import _UrlSelector
+
+        selector = _UrlSelector(["a", "b", "c"])
+        results = [selector.next() for _ in range(6)]
+        assert results == ["a", "b", "c", "a", "b", "c"]
+
+    def test_single_url(self) -> None:
+        """With one URL, should always return that URL."""
+        from cartoload.downloader.wmts import _UrlSelector
+
+        selector = _UrlSelector(["only"])
+        assert selector.next() == "only"
+        assert selector.next() == "only"
+
+    def test_active_urls_property(self) -> None:
+        """active_urls should list all non-disabled URLs."""
+        from cartoload.downloader.wmts import _UrlSelector
+
+        selector = _UrlSelector(["a", "b", "c"])
+        assert selector.active_urls == ["a", "b", "c"]
+
+    def test_disable_after_consecutive_failures(self) -> None:
+        """URL should be disabled after max_consecutive_failures."""
+        from cartoload.downloader.wmts import _UrlSelector
+
+        selector = _UrlSelector(["a", "b"], max_consecutive_failures=3)
+        for _ in range(3):
+            selector.report_failure("a")
+
+        assert "a" not in selector.active_urls
+        assert "b" in selector.active_urls
+
+    def test_not_disabled_before_threshold(self) -> None:
+        """URL should not be disabled before reaching the threshold."""
+        from cartoload.downloader.wmts import _UrlSelector
+
+        selector = _UrlSelector(["a", "b"], max_consecutive_failures=5)
+        for _ in range(4):
+            selector.report_failure("a")
+
+        assert "a" in selector.active_urls
+
+    def test_success_resets_failure_count(self) -> None:
+        """A success should reset the consecutive failure counter."""
+        from cartoload.downloader.wmts import _UrlSelector
+
+        selector = _UrlSelector(["a", "b"], max_consecutive_failures=3)
+        selector.report_failure("a")
+        selector.report_failure("a")
+        selector.report_success("a")  # Reset
+        selector.report_failure("a")
+        # Only 1 failure since reset, not enough to disable
+        assert "a" in selector.active_urls
+
+    def test_returns_none_when_all_disabled(self) -> None:
+        """Should return None when all URLs are disabled."""
+        from cartoload.downloader.wmts import _UrlSelector
+
+        selector = _UrlSelector(["a"], max_consecutive_failures=2)
+        selector.report_failure("a")
+        selector.report_failure("a")
+        assert selector.next() is None
+
+    def test_round_robin_skips_disabled(self) -> None:
+        """Round-robin should skip disabled URLs."""
+        from cartoload.downloader.wmts import _UrlSelector
+
+        selector = _UrlSelector(["a", "b", "c"], max_consecutive_failures=2)
+        # Disable 'b'
+        selector.report_failure("b")
+        selector.report_failure("b")
+        results = [selector.next() for _ in range(4)]
+        assert "b" not in results
+        assert all(u in ("a", "c") for u in results)
+
+
+class TestMultiUrlDownloader:
+    """Integration tests for multi-URL download behavior."""
+
+    def test_multi_url_uses_all_urls(self, tmp_path: Path) -> None:
+        """When multiple URLs are provided, all should be used."""
+        dl = _make_downloader(
+            tmp_path,
+            url_template="https://s1.example.com/{z}/{x}/{y}.jpeg",
+            urls=[
+                "https://s2.example.com/{z}/{x}/{y}.jpeg",
+                "https://s3.example.com/{z}/{x}/{y}.jpeg",
+            ],
+        )
+        assert dl._url_selector is not None
+        assert len(dl._all_urls) == 3
+        assert dl._max_workers == 6  # 3 URLs * 2
+
+    def test_single_url_no_selector(self, tmp_path: Path) -> None:
+        """Single URL should not create a URL selector."""
+        dl = _make_downloader(tmp_path)
+        assert dl._url_selector is None
+
+    def test_multi_url_downloads_tiles(self, tmp_path: Path) -> None:
+        """Multi-URL download should successfully download tiles."""
+        dl = _make_downloader(
+            tmp_path,
+            url_template="https://s1.example.com/{z}/{x}/{y}.jpeg",
+            urls=["https://s2.example.com/{z}/{x}/{y}.jpeg"],
+        )
+        bbox = (0.0, 0.0, 5.0, 5.0)
+        zoom = 2
+
+        with patch(
+            "cartoload.downloader.wmts.requests.get", return_value=_mock_response()
+        ):
+            results = dl.download_grid(bbox, zoom)
+
+        assert len(results) > 0
+        for p in results:
+            assert p.exists()
+
+    def test_failover_to_healthy_url(self, tmp_path: Path) -> None:
+        """When one URL fails consistently, requests should use the healthy URL."""
+        dl = _make_downloader(
+            tmp_path,
+            url_template="https://bad.example.com/{z}/{x}/{y}.jpeg",
+            urls=["https://good.example.com/{z}/{x}/{y}.jpeg"],
+        )
+        bbox = (0.0, 0.0, 5.0, 5.0)
+        zoom = 2
+
+        request_urls: list[str] = []
+
+        def selective_response(url, *args, **kwargs):
+            request_urls.append(url)
+            if "bad.example.com" in url:
+                return _mock_response(503)
+            return _mock_response()
+
+        with (
+            patch(
+                "cartoload.downloader.wmts.requests.get", side_effect=selective_response
+            ),
+            patch("cartoload.downloader.wmts.time.sleep"),
+        ):
+            dl.download_grid(bbox, zoom)
+
+        # Good URL should have been used
+        good_requests = [u for u in request_urls if "good.example.com" in u]
+        assert len(good_requests) > 0
+
+    def test_per_url_rate_limiters_created(self, tmp_path: Path) -> None:
+        """Each URL should have its own rate limiter."""
+        dl = WMTSDownloader(
+            source_id="test_source",
+            url_template="https://s1.example.com/{z}/{x}/{y}.jpeg",
+            cache_dir=tmp_path / "cache",
+            delay_ms=100,
+            urls=["https://s2.example.com/{z}/{x}/{y}.jpeg"],
+        )
+        assert len(dl._rate_limiters) == 2
+        assert "https://s1.example.com/{z}/{x}/{y}.jpeg" in dl._rate_limiters
+        assert "https://s2.example.com/{z}/{x}/{y}.jpeg" in dl._rate_limiters
+
+    def test_duplicate_urls_deduplicated(self, tmp_path: Path) -> None:
+        """Duplicate URLs in the list should not be duplicated."""
+        dl = _make_downloader(
+            tmp_path,
+            url_template="https://s1.example.com/{z}/{x}/{y}.jpeg",
+            urls=[
+                "https://s1.example.com/{z}/{x}/{y}.jpeg",  # duplicate of template
+                "https://s2.example.com/{z}/{x}/{y}.jpeg",
+            ],
+        )
+        assert len(dl._all_urls) == 2  # deduplicated
+
+    def test_thread_pool_scaling_with_urls(self, tmp_path: Path) -> None:
+        """Thread pool should scale with URL count (default multiplier)."""
+        dl = _make_downloader(
+            tmp_path,
+            url_template="https://s1.example.com/{z}/{x}/{y}.jpeg",
+            urls=[
+                "https://s2.example.com/{z}/{x}/{y}.jpeg",
+                "https://s3.example.com/{z}/{x}/{y}.jpeg",
+                "https://s4.example.com/{z}/{x}/{y}.jpeg",
+            ],
+        )
+        # 4 URLs * 2 = 8, max(4, 8) = 8
+        assert dl._max_workers == 8
+
+    def test_explicit_max_workers_not_overridden(self, tmp_path: Path) -> None:
+        """Explicitly set max_workers should not be auto-scaled."""
+        dl = _make_downloader(
+            tmp_path,
+            url_template="https://s1.example.com/{z}/{x}/{y}.jpeg",
+            urls=["https://s2.example.com/{z}/{x}/{y}.jpeg"],
+            max_workers=2,
+        )
+        assert dl._max_workers == 2  # Not overridden since not default

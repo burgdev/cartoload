@@ -91,7 +91,7 @@ RGN_HEADER_LENGTH = 125  # RGN sub-header length
 LBL_HEADER_LENGTH = 596  # LBL sub-header length
 NET_HEADER_LENGTH = 100  # NET sub-header length
 TILE_INDEX_ENTRY_SIZE = 4  # Tile index: one uint32 per tile
-RGN2_POLYLINE_PREAMBLE_SIZE = 18  # Type 0x06 polyline record before each E0 tile
+RGN2_RASTER_RECORD_SIZE = 42  # Compound raster record: type+subtype+deltas+len+bitstream+label+class+rs+imgid+coords+tail
 MPS_SUBFILE_SIZE = 98
 
 
@@ -106,6 +106,35 @@ def _deg_to_map_units(deg: float) -> int:
     Used in TRE sub-header bounds fields.
     """
     return int(deg * (2**24) / 360)
+
+
+def _encode_vuint32(value: int) -> bytes:
+    """Encode a value using Garmin's variable-length unsigned int format.
+
+    Matches GPXSee's SubFile::readVUInt32 (subfile_img.cpp:43).
+
+    The encoding uses the low bits of the first byte to indicate size:
+    - bit[0]=1: single byte, value = byte >> 1  (0-127)
+    - bit[1:0]=10: two bytes, value uses 13 bits
+    - bit[2:0]=000: three bytes, value uses 20 bits
+    - bit[2:0]=001: four bytes, value uses 28 bits
+
+    For raster records, values are small (bitstream_len=8 → 0x11, rs=22 → 0x2D).
+    """
+    if value < 0:
+        raise ValueError(f"VUInt32 cannot encode negative value {value}")
+    if value < (1 << 7):
+        # Single byte: bit[0]=1, value in bits[7:1]
+        return bytes([(value << 1) | 1])
+    elif value < (1 << 13):
+        # Two bytes: bit[1:0]=10, 6 bits in byte0, 8 bits in byte1
+        b0 = ((value & 0x3F) << 2) | 0x02
+        b1 = (value >> 6) & 0xFF
+        return bytes([b0, b1])
+    elif value < (1 << 20):
+        raise NotImplementedError("3-byte VUInt32 not needed for raster records")
+    else:
+        raise ValueError(f"Value {value} too large for VUInt32 encoding")
 
 
 def _put3s(val: int) -> bytes:
@@ -302,7 +331,7 @@ class LayoutComputer:
             tre7_size = (n_subdivisions + 1) * tre7_rec_size  # +1 sentinel
         else:
             tre7_rec_size = 4  # Legacy: uint32 offset only
-            tre7_size = n_subdivisions * tre7_rec_size  # no sentinel in legacy mode
+            tre7_size = (n_subdivisions + 1) * tre7_rec_size  # +1 sentinel
         # TRE extended sections (TRE5, TRE7, TRE8)
         tre5_size = 3  # 3 bytes: 4B 02 01
         tre8_size = 3  # TRE8: single 3-byte entry (06 02 13)
@@ -311,11 +340,8 @@ class LayoutComputer:
         # RGN data sections:
         # RGN1: minimal (empty or near-empty for raster maps)
         rgn1_data = 0
-        # RGN2: Polyline preamble + Type E0 record per tile (no outline records — SwissTopo reference)
-        type_e0_record_size = (
-            24  # Always 24: E0(1) + bits(1) + idx(2) + 4*coords(16) + size(4)
-        )
-        rgn2_data = total_tiles * (RGN2_POLYLINE_PREAMBLE_SIZE + type_e0_record_size)
+        # RGN2: Compound raster record per tile (42 bytes each)
+        rgn2_data = total_tiles * RGN2_RASTER_RECORD_SIZE
 
         # LBL labels (tile filenames)
         lbl_labels = sum(len(f"{i}.jpg\0".encode("ascii")) for i in range(total_tiles))
@@ -649,9 +675,6 @@ class GMPWriter:
         total_tiles = sum(len(t) for t in compressed_tiles.values())
         n_zoom = len(img_file.zoom_levels)
         now = img_file.gmp_creation_date or datetime.now()
-        type_e0_record_size = (
-            24  # Always 24: E0(1) + bits(1) + idx(2) + 4*coords(16) + size(4)
-        )
 
         # Determine subdivision mode
         use_subdivisions = subdivisions is not None and len(subdivisions) > 0
@@ -734,7 +757,7 @@ class GMPWriter:
         if use_subdivisions:
             tre7_size = (n_subdivisions + 1) * tre7_rec_size  # +1 sentinel
         else:
-            tre7_size = n_subdivisions * tre7_rec_size  # no sentinel in legacy mode
+            tre7_size = (n_subdivisions + 1) * tre7_rec_size  # +1 sentinel
         pos += tre7_size
 
         # --- RGN data sections ---
@@ -743,7 +766,7 @@ class GMPWriter:
 
         # RGN2: Polyline preamble + Type E0 records per tile
         rgn2_pos = pos  # GMP-relative
-        rgn2_size = total_tiles * (RGN2_POLYLINE_PREAMBLE_SIZE + type_e0_record_size)
+        rgn2_size = total_tiles * RGN2_RASTER_RECORD_SIZE
         pos += rgn2_size
 
         # --- LBL labels (tile filenames) ---
@@ -814,9 +837,7 @@ class GMPWriter:
                 else:
                     sub.rgn2_offset = rgn2_running_offset
                     sub.tre7_flag = 0x00
-                    chunk_size = tile_count * (
-                        RGN2_POLYLINE_PREAMBLE_SIZE + type_e0_record_size
-                    )
+                    chunk_size = tile_count * RGN2_RASTER_RECORD_SIZE
                     rgn2_running_offset += chunk_size
                     rgn2_total_extent = rgn2_running_offset
 
@@ -903,9 +924,7 @@ class GMPWriter:
                 struct.pack_into("<H", subdiv_data, off + 12, h)
                 if not is_last_level:
                     struct.pack_into("<H", subdiv_data, off + 14, z_idx + 1)
-                rgn_tile_offset += tile_count * (
-                    RGN2_POLYLINE_PREAMBLE_SIZE + type_e0_record_size
-                )
+                rgn_tile_offset += tile_count * RGN2_RASTER_RECORD_SIZE
                 off += rec_size
 
             # Trailing 4 bytes: total RGN2 data extent
@@ -996,17 +1015,20 @@ class GMPWriter:
             for sub in subdivisions:
                 f.write(struct.pack("<I", sub.rgn2_offset))
                 f.write(struct.pack("<B", sub.tre7_flag))
-            # Sentinel entry (all zeros)
-            f.write(b"\x00" * tre7_rec_size)
+            # Sentinel entry: contains the total RGN2 data size as the end offset
+            # for the last real subdivision (NOT all zeros — that would make
+            # extPolygonsEnd == extPolygonsOffset == 0, preventing segment creation)
+            f.write(struct.pack("<I", total_tiles * RGN2_RASTER_RECORD_SIZE))
+            f.write(b"\x00")  # flag byte = 0
         else:
             # Legacy: one uint32 per zoom level
             rgn2_offset = 0
             for z_idx, zoom in enumerate(img_file.zoom_levels):
                 tile_count = len(compressed_tiles.get(zoom.level_number, []))
                 f.write(struct.pack("<I", rgn2_offset))
-                rgn2_offset += tile_count * (
-                    RGN2_POLYLINE_PREAMBLE_SIZE + type_e0_record_size
-                )
+                rgn2_offset += tile_count * RGN2_RASTER_RECORD_SIZE
+            # Sentinel entry: total RGN2 data extent as the end offset
+            f.write(struct.pack("<I", rgn2_offset))
 
         # 13. RGN2 data section (Type E0 records)
         if use_subdivisions:
@@ -1305,71 +1327,117 @@ def _build_net_subheader(now: datetime) -> bytes:
     return bytes(buf)
 
 
-def _compute_bits_field(total_tiles: int) -> int:
-    """
-    Compute bits_field value for Type E0 records.
-
-    Always returns 0x2D (2-byte image index) matching SwissTopo reference files.
-
-    Args:
-        total_tiles: Total number of tiles across all zoom levels
-
-    Returns:
-        0x2D (16-bit image index, matching SwissTopo_West/Est reference)
-    """
-    return 0x2D
-
-
-def _write_type_e0_record(
+def _write_rgn2_raster_record(
     f: io.BufferedWriter,
-    lat_min: float,
-    lon_min: float,
-    lat_max: float,
-    lon_max: float,
+    subdiv_center_lat: float,
+    subdiv_center_lon: float,
+    tile_lat_min: float,
+    tile_lon_min: float,
+    tile_lat_max: float,
+    tile_lon_max: float,
+    tile_center_lat: float,
+    tile_center_lon: float,
     jpeg_size: int,
     image_index: int,
-    bits_field: int,
 ) -> None:
-    """
-    Write a single RGN Type E0 record for a raster tile.
+    """Write a single 42-byte RGN2 compound raster record.
 
-    Binary format (SwissTopo reference, bits_field=0x2D):
-      - marker (1 byte): 0xE0
-      - bits_field (1 byte): 0x2D
-      - image_index (uint16 LE): index into LBL28 offset array
-      - max_lat, max_lon, min_lat, min_lon (4× int32 LE): bounds in Garmin map units
-      - block_size (uint32 LE): JPEG file size in bytes
+    This is a single extended polyline object parsed by GPXSee's extPolyObjects().
+    The record combines what was previously a separate preamble + E0 record into
+    one compound record that Garmin devices parse as a unit.
+
+    Record layout (42 bytes total, matching SwissTopo reference):
+      [0x00] type = 0x06 (polyline)
+      [0x01] subtype = 0xB3 (bit7=1→has class fields, bit5=1→has label, bits[4:0]=0x13)
+             subtype & 0x1F = 0x13, type | (0x13<<8) | 0x10000 = 0x10613 = isRaster()
+      [0x02-03] lon_delta (int16 LE) — tile center lon minus subdiv center lon, in map units
+      [0x04-05] lat_delta (int16 LE) — tile center lat minus subdiv center lat, in map units
+      [0x06] VUInt32(bitstream_len) = 0x11 (value=8, single-byte encoding)
+      [0x07-0E] bitstream (8 bytes) — degenerate 1-point polyline at tile center
+                byte 0: bitstreamInfo = 0x00 (no extra bytes, 1 address point)
+                bytes 1-7: coordinate deltas (zeros for single-point degenerate line)
+      [0x0F-11] label_ptr (uint24 LE) = 0x000000 (no label needed for raster)
+      [0x12] class_flags = 0xE0 (flags>>5 = 7 → triggers readRasterInfo)
+      [0x13] VUInt32(remaining_size) = 0x2D (value=22, single-byte encoding)
+      [0x14-15] image_id (uint16 LE) — index into LBL28 offset array
+      [0x16-19] top (int32 LE) — max latitude in Garmin 32-bit map units
+      [0x1A-1D] right (int32 LE) — max longitude in Garmin 32-bit map units
+      [0x1E-21] bottom (int32 LE) — min latitude in Garmin 32-bit map units
+      [0x22-25] left (int32 LE) — min longitude in Garmin 32-bit map units
+      [0x26-29] JPEG block_size (uint32 LE) — JPEG file size in bytes
+
+    GPXSee parsing flow (rgnfile.cpp extPolyObjects):
+      read type(1) + subtype(1) → type = 0x10000 | (type<<8) | (subtype & 0x1F)
+      → type = 0x10613 → isRaster()
+      read lon_delta(int16) + lat_delta(int16)
+      read VUInt32(len) → bitstream_len
+      read bitstream (bitstream_len bytes)
+      if subtype & 0x20: read label_ptr (uint24)
+      if subtype & 0x80: readClassFields() → read flags byte
+        → flags>>5 == 7 → read VUInt32(rs) → readRasterInfo()
+        → readRasterInfo: read imgId(imgIdSize) + top(u32) + right(u32) + bottom(u32) + left(u32)
 
     Args:
         f: File handle to write to
-        lat_min, lon_min, lat_max, lon_max: Tile bounds in decimal degrees
+        subdiv_center_lat: Subdivision center latitude (degrees)
+        subdiv_center_lon: Subdivision center longitude (degrees)
+        tile_lat_min: Tile south bound (degrees)
+        tile_lon_min: Tile west bound (degrees)
+        tile_lat_max: Tile north bound (degrees)
+        tile_lon_max: Tile east bound (degrees)
+        tile_center_lat: Tile center latitude (degrees)
+        tile_center_lon: Tile center longitude (degrees)
         jpeg_size: JPEG file size in bytes
         image_index: Index into LBL28 array (0-based)
-        bits_field: 0x2D for 16-bit index (standard SwissTopo format)
     """
-    # Marker byte
+    # Type 0x06 + subtype 0xB3
+    f.write(bytes([0x06, 0xB3]))
+
+    # Lon/lat deltas from subdivision center (int16 LE, in 24-bit map units)
+    center_lat_mu = _deg_to_map_units(subdiv_center_lat)
+    center_lon_mu = _deg_to_map_units(subdiv_center_lon)
+    tile_center_lat_mu = _deg_to_map_units(tile_center_lat)
+    tile_center_lon_mu = _deg_to_map_units(tile_center_lon)
+
+    lon_delta = tile_center_lon_mu - center_lon_mu
+    lat_delta = tile_center_lat_mu - center_lat_mu
+
+    # Clamp to int16 range
+    lon_delta = max(-32768, min(32767, lon_delta))
+    lat_delta = max(-32768, min(32767, lat_delta))
+
+    f.write(struct.pack("<h", lon_delta))
+    f.write(struct.pack("<h", lat_delta))
+
+    # VUInt32(bitstream_len=8) → 0x11
+    f.write(_encode_vuint32(8))
+
+    # Bitstream (8 bytes): degenerate 1-point polyline
+    # byte 0: bitstreamInfo — 0x00 means: no special flags, single address point
+    # bytes 1-7: zeros (no coordinate deltas for a degenerate single-point line)
+    f.write(b"\x00" + b"\x00" * 7)
+
+    # Label pointer (uint24 LE) — 0 for raster tiles (no label)
+    f.write(b"\x00\x00\x00")
+
+    # Class flags byte: 0xE0 → flags>>5 = 7, triggers readRasterInfo
     f.write(bytes([0xE0]))
 
-    # bits_field
-    f.write(bytes([bits_field]))
+    # VUInt32(remaining_size=22) → 0x2D
+    f.write(_encode_vuint32(22))
 
-    # Image index (always uint16 for 0x2D)
+    # Image ID (uint16 LE) — index into LBL28 offset array
     f.write(struct.pack("<H", image_index))
 
-    # Coordinates in Garmin map units (32-bit signed)
-    # SwissTopo reference order: max_lat, max_lon, min_lat, min_lon (NE corner then SW corner)
-    lat_max_units = _deg_to_garmin(lat_max)
-    lon_max_units = _deg_to_garmin(lon_max)
-    lat_min_units = _deg_to_garmin(lat_min)
-    lon_min_units = _deg_to_garmin(lon_min)
+    # Tile bounds in Garmin 32-bit map units (int32 LE)
+    # Order: top(max_lat), right(max_lon), bottom(min_lat), left(min_lon)
+    f.write(struct.pack("<i", _deg_to_garmin(tile_lat_max)))  # top
+    f.write(struct.pack("<i", _deg_to_garmin(tile_lon_max)))  # right
+    f.write(struct.pack("<i", _deg_to_garmin(tile_lat_min)))  # bottom
+    f.write(struct.pack("<i", _deg_to_garmin(tile_lon_min)))  # left
 
-    f.write(struct.pack("<i", lat_max_units))  # signed int32 — NE latitude
-    f.write(struct.pack("<i", lon_max_units))  # NE longitude
-    f.write(struct.pack("<i", lat_min_units))  # SW latitude
-    f.write(struct.pack("<i", lon_min_units))  # SW longitude
-
-    # Block size (JPEG size)
-    f.write(struct.pack("<I", jpeg_size))  # unsigned int32
+    # JPEG block size (uint32 LE)
+    f.write(struct.pack("<I", jpeg_size))
 
 
 def _write_lbl28_section(
@@ -1424,139 +1492,16 @@ def _write_lbl29_section(
                 f.write(tile_data)
 
 
-def _write_polyline_preamble(
-    f: io.BufferedWriter,
-    center_lat: float,
-    center_lon: float,
-    tile_lat_min: float = 0.0,
-    tile_lon_min: float = 0.0,
-    tile_lat_max: float = 0.0,
-    tile_lon_max: float = 0.0,
-) -> None:
-    """Write an 18-byte polyline preamble record before each E0 tile record.
-
-    This record is required for GMT and Garmin devices to properly detect
-    and display raster bitmap tiles. The preamble is a type 0x06 polyline
-    record (subtype 0xB3) containing a 2-point line in Garmin bitstream format
-    encoding the tile's geographic extent as coordinate deltas from the
-    subdivision center.
-
-    Format: type(1) + subtype(1) + bitstream(16) = 18 bytes total.
-
-    The bitstream encodes:
-    - Byte 0: direction(1)=1 + two_addresses(1)=1 + extra_bytes_count(6 bits)=2
-      → 0xC2 (direction=1 means south-to-north, two_addresses=1 means base+delta,
-        extra_bytes_count=2 means 2 extra bytes follow for bit width)
-    - Bytes 1-2: extra bytes defining coordinate bit width (2 bytes)
-    - Remaining: coordinate deltas in Garmin bitstream format
-
-    Args:
-        f: File handle to write to
-        center_lat: Subdivision center latitude (degrees)
-        center_lon: Subdivision center longitude (degrees)
-        tile_lat_min: Tile south bound (degrees)
-        tile_lon_min: Tile west bound (degrees)
-        tile_lat_max: Tile north bound (degrees)
-        tile_lon_max: Tile east bound (degrees)
-    """
-    # Type 0x06 (polyline), subtype 0xB3
-    f.write(bytes([0x06, 0xB3]))
-
-    # Compute coordinate deltas in Garmin map units (24-bit)
-    center_lat_mu = _deg_to_map_units(center_lat)
-    center_lon_mu = _deg_to_map_units(center_lon)
-
-    if tile_lat_min != 0.0 or tile_lon_min != 0.0:
-        # Encode actual tile extent as two points: SW corner and NE corner
-        # relative to the subdivision center
-        sw_lat_mu = _deg_to_map_units(tile_lat_min)
-        sw_lon_mu = _deg_to_map_units(tile_lon_min)
-        ne_lat_mu = _deg_to_map_units(tile_lat_max)
-        ne_lon_mu = _deg_to_map_units(tile_lon_max)
-
-        # Deltas from center (signed 24-bit values)
-        d_lat1 = sw_lat_mu - center_lat_mu
-        d_lon1 = sw_lon_mu - center_lon_mu
-        d_lat2 = ne_lat_mu - center_lat_mu
-        d_lon2 = ne_lon_mu - center_lon_mu
-
-        # Encode in Garmin polyline bitstream format
-        # First byte: direction(1) + two_addresses(1) + extra_bytes_count(6)
-        # = 1 + 1 + 2 = 0xC2
-        bitstream = bytearray(16)
-        bitstream[0] = 0xC2  # direction=1, two_addresses=1, extra_bytes=2
-
-        # Determine bit width needed for the largest delta
-        max_delta = max(abs(d_lat1), abs(d_lon1), abs(d_lat2), abs(d_lon2))
-        if max_delta == 0:
-            # Zero deltas — write minimal bitstream
-            f.write(b"\xc2" + b"\x00" * 15)
-            return
-
-        bits_needed = max_delta.bit_length() + 1  # +1 for sign bit
-        # Round up to next multiple of 2 for alignment
-        bits_needed = max(2, ((bits_needed + 1) // 2) * 2)
-
-        # Extra bytes encode bit width information
-        # Byte 1: low byte of bit width info
-        # Byte 2: high byte of bit width info
-        bitstream[1] = bits_needed & 0xFF
-        bitstream[2] = (bits_needed >> 8) & 0xFF
-
-        # Pack coordinate deltas as signed integers at bit width
-        # Garmin format: first point base, then deltas
-        # Point 1 (SW): lat_delta, lon_delta
-        # Point 2 (NE): lat_delta, lon_delta
-        bit_offset = 24  # Start after 3 header bytes
-        for delta in [d_lat1, d_lon1, d_lat2, d_lon2]:
-            _pack_signed_bits(bitstream, bit_offset, delta, bits_needed)
-            bit_offset += bits_needed
-
-        f.write(bytes(bitstream))
-    else:
-        # Fallback: all zeros (legacy behavior)
-        f.write(b"\x00" * 16)
-
-
-def _pack_signed_bits(
-    buf: bytearray, bit_offset: int, value: int, bit_width: int
-) -> None:
-    """Pack a signed integer into a byte buffer at a given bit offset.
-
-    Args:
-        buf: Target byte buffer
-        bit_offset: Starting bit position in buffer
-        value: Signed integer value to pack
-        bit_width: Number of bits to use
-    """
-    # Convert to unsigned representation for bit packing
-    if value < 0:
-        # Two's complement for negative values
-        mask = (1 << bit_width) - 1
-        value = (value + (1 << bit_width)) & mask
-
-    for i in range(bit_width):
-        byte_idx = (bit_offset + i) // 8
-        bit_idx = 7 - ((bit_offset + i) % 8)
-        if byte_idx < len(buf) and (value >> (bit_width - 1 - i)) & 1:
-            buf[byte_idx] |= 1 << bit_idx
-
-
 def _write_rgn_data_section(
     f: io.BufferedWriter,
     compressed_tiles: CompressedTiles,
     zoom_levels: list,
     img_file,
 ) -> None:
-    """
-    Write RGN data section (polyline preamble + Type E0 records).
+    """Write RGN2 data section (compound raster records).
 
-    For each raster tile, writes:
-      1. Polyline preamble (18 bytes): type 0x06, subtype 0xB3, + 16 data bytes
-      2. Type E0 record (23-24 bytes): tile bounds, JPEG size, image index
-
-    The polyline preamble provides line element metadata for the Garmin renderer.
-    SwissTopo reference uses this structure without separate outline records.
+    For each raster tile, writes a single 42-byte compound record combining
+    the polyline header and raster info into one record parsed by extPolyObjects().
 
     Uses per-tile geographic bounds when available (from tile extraction),
     falling back to full map bounds as a default.
@@ -1567,12 +1512,7 @@ def _write_rgn_data_section(
         zoom_levels: List of ZoomLevel objects defining zoom order
         img_file: IMGFile with map bounds (used as fallback)
     """
-    total_tiles = sum(
-        len(compressed_tiles.get(z.level_number, [])) for z in zoom_levels
-    )
-    bits_field = _compute_bits_field(total_tiles)
-
-    # Precompute the subdivision center for preamble records.
+    # Use map center as subdivision center (for non-subdivision path)
     center_lat = (img_file.bounds_north + img_file.bounds_south) / 2
     center_lon = (img_file.bounds_east + img_file.bounds_west) / 2
 
@@ -1591,19 +1531,21 @@ def _write_rgn_data_section(
                 lat_max = img_file.bounds_north
                 lon_max = img_file.bounds_east
 
-            # Write polyline preamble (18 bytes)
-            _write_polyline_preamble(f, center_lat, center_lon)
+            tile_center_lat = (lat_min + lat_max) / 2
+            tile_center_lon = (lon_min + lon_max) / 2
 
-            # Write Type E0 record
-            _write_type_e0_record(
+            _write_rgn2_raster_record(
                 f,
-                lat_min=lat_min,
-                lon_min=lon_min,
-                lat_max=lat_max,
-                lon_max=lon_max,
+                subdiv_center_lat=center_lat,
+                subdiv_center_lon=center_lon,
+                tile_lat_min=lat_min,
+                tile_lon_min=lon_min,
+                tile_lat_max=lat_max,
+                tile_lon_max=lon_max,
+                tile_center_lat=tile_center_lat,
+                tile_center_lon=tile_center_lon,
                 jpeg_size=len(jpeg_data),
                 image_index=image_index,
-                bits_field=bits_field,
             )
             image_index += 1
 
@@ -1614,13 +1556,11 @@ def _write_rgn_data_section_subdivisions(
     total_tiles: int,
     img_file: IMGFile,
 ) -> None:
-    """Write RGN data section grouped by subdivision.
+    """Write RGN2 data section grouped by subdivision.
 
-    For each subdivision, writes preamble + E0 records for all its tiles.
-    The preamble encodes tile extent relative to subdivision center.
+    For each subdivision, writes compound raster records for all its tiles.
+    Each record encodes the tile's position relative to the subdivision center.
     """
-    bits_field = _compute_bits_field(total_tiles)
-
     image_index = 0
     for sub in subdivisions:
         for tile_entry in sub.tile_entries:
@@ -1634,27 +1574,21 @@ def _write_rgn_data_section_subdivisions(
                 lat_max = img_file.bounds_north
                 lon_max = img_file.bounds_east
 
-            # Write polyline preamble with tile extent relative to subdivision center
-            _write_polyline_preamble(
+            tile_center_lat = (lat_min + lat_max) / 2
+            tile_center_lon = (lon_min + lon_max) / 2
+
+            _write_rgn2_raster_record(
                 f,
-                center_lat=sub.center_lat,
-                center_lon=sub.center_lon,
+                subdiv_center_lat=sub.center_lat,
+                subdiv_center_lon=sub.center_lon,
                 tile_lat_min=lat_min,
                 tile_lon_min=lon_min,
                 tile_lat_max=lat_max,
                 tile_lon_max=lon_max,
-            )
-
-            # Write Type E0 record
-            _write_type_e0_record(
-                f,
-                lat_min=lat_min,
-                lon_min=lon_min,
-                lat_max=lat_max,
-                lon_max=lon_max,
+                tile_center_lat=tile_center_lat,
+                tile_center_lon=tile_center_lon,
                 jpeg_size=len(jpeg_data),
                 image_index=image_index,
-                bits_field=bits_field,
             )
             image_index += 1
 

@@ -3,9 +3,11 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Sequence
 
 import requests
 from rich.progress import (
@@ -21,6 +23,66 @@ from cartoload.downloader.base import BaseDownloader
 logger = logging.getLogger(__name__)
 
 
+class _PerUrlRateLimiter:
+    """Thread-safe per-URL rate limiter."""
+
+    def __init__(self, delay_ms: int):
+        self._delay = delay_ms / 1000.0
+        self._lock = threading.Lock()
+        self._last_request: float = 0.0
+
+    def wait(self) -> None:
+        """Block until the rate limit allows the next request."""
+        with self._lock:
+            now = time.monotonic()
+            elapsed = now - self._last_request
+            if elapsed < self._delay:
+                time.sleep(self._delay - elapsed)
+            self._last_request = time.monotonic()
+
+
+class _UrlSelector:
+    """Round-robin URL selector with failover tracking."""
+
+    def __init__(self, urls: Sequence[str], max_consecutive_failures: int = 5):
+        self._urls = list(urls)
+        self._max_failures = max_consecutive_failures
+        self._consecutive_failures: dict[str, int] = {u: 0 for u in self._urls}
+        self._disabled: set[str] = set()
+        self._lock = threading.Lock()
+        self._index = 0
+
+    @property
+    def active_urls(self) -> list[str]:
+        return [u for u in self._urls if u not in self._disabled]
+
+    def next(self) -> str | None:
+        """Get next URL in round-robin order, skipping disabled ones."""
+        with self._lock:
+            active = self.active_urls
+            if not active:
+                return None
+            self._index = self._index % len(active)
+            url = active[self._index]
+            self._index += 1
+            return url
+
+    def report_success(self, url: str) -> None:
+        with self._lock:
+            self._consecutive_failures[url] = 0
+
+    def report_failure(self, url: str) -> None:
+        with self._lock:
+            self._consecutive_failures[url] += 1
+            if self._consecutive_failures[url] >= self._max_failures:
+                self._disabled.add(url)
+                logger.warning(
+                    "URL disabled after %d consecutive failures: %s",
+                    self._max_failures,
+                    url,
+                )
+
+
 class WMTSDownloader(BaseDownloader):
     """Downloads tiles from WMTS/XYZ tile services."""
 
@@ -33,11 +95,31 @@ class WMTSDownloader(BaseDownloader):
         delay_ms: int = 150,
         tile_format: str = "jpeg",
         layer_name: str = "",
+        crs: str | None = None,
+        urls: Sequence[str] | None = None,
     ) -> None:
-        super().__init__(source_id, cache_dir, max_workers, delay_ms)
+        super().__init__(source_id, cache_dir, max_workers, delay_ms, crs=crs)
         self._url_template = url_template
         self._tile_format = tile_format
         self._layer_name = layer_name
+
+        # Multi-URL support: if additional URLs provided, use round-robin
+        all_urls = [url_template] if url_template else []
+        if urls:
+            for u in urls:
+                if u not in all_urls:
+                    all_urls.append(u)
+        self._all_urls = all_urls
+        self._url_selector = _UrlSelector(all_urls) if len(all_urls) > 1 else None
+
+        # Per-URL rate limiters
+        self._rate_limiters: dict[str, _PerUrlRateLimiter] = {
+            u: _PerUrlRateLimiter(delay_ms) for u in all_urls
+        }
+
+        # Scale thread pool with URL count
+        if urls and len(urls) > 1 and max_workers == 4:
+            self._max_workers = max(4, len(all_urls) * 2)
 
     # ------------------------------------------------------------------
     # Tile grid computation
@@ -376,6 +458,9 @@ class WMTSDownloader(BaseDownloader):
             logger.info("All %d tiles already cached", total)
             return results
 
+        # Write CRS metadata on first download
+        self.write_cache_metadata()
+
         logger.info(
             "Downloading %d tiles (%d cached, %d to fetch) at zoom %d",
             total,
@@ -400,6 +485,7 @@ class WMTSDownloader(BaseDownloader):
             if cached_count > 0:
                 progress.update(task_id, advance=cached_count)
 
+            failed = 0
             with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
                 future_to_tile = {
                     executor.submit(self._download_worker, x, y, zoom): (x, y)
@@ -412,9 +498,20 @@ class WMTSDownloader(BaseDownloader):
                         path = future.result()
                         if path and path.exists():
                             results.append(path)
+                        else:
+                            failed += 1
                     except Exception:
+                        failed += 1
                         logger.warning("Tile (%d, %d, z=%d) failed", x, y, zoom)
                     progress.update(task_id, advance=1)
+
+        if failed > 0:
+            logger.warning(
+                "Zoom %d: %d/%d tiles failed to download",
+                zoom,
+                failed,
+                len(uncached),
+            )
 
         return results
 
@@ -431,17 +528,35 @@ class WMTSDownloader(BaseDownloader):
             self._write_world_file(cache_path, x, y, zoom)
             return cache_path
 
+        # Select URL (round-robin or single)
+        if self._url_selector:
+            url_template = self._url_selector.next()
+            if url_template is None:
+                logger.error(
+                    "All URLs disabled, cannot download tile (%d, %d, z=%d)", x, y, zoom
+                )
+                return None
+        else:
+            url_template = self._url_template
+
         url = self._build_tile_url(
-            self._url_template, x, y, zoom, self._source_id, self._layer_name
+            url_template, x, y, zoom, self._source_id, self._layer_name
         )
-        delay_seconds = self._delay_ms / 1000.0
-        time.sleep(delay_seconds)
+
+        # Per-URL rate limiting
+        limiter = self._rate_limiters.get(url_template)
+        if limiter:
+            limiter.wait()
 
         data = self._download_with_retry(url, x, y, zoom)
         if data is not None:
             self._write_to_cache(cache_path, data)
             self._write_world_file(cache_path, x, y, zoom)
+            if self._url_selector:
+                self._url_selector.report_success(url_template)
             return cache_path
 
         logger.warning("Failed to download tile (%d, %d, z=%d)", x, y, zoom)
+        if self._url_selector:
+            self._url_selector.report_failure(url_template)
         return None
