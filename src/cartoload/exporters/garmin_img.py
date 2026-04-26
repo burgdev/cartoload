@@ -14,6 +14,7 @@ from .garmin_img_model import (
     DrawOrderEntry,
     IMGFile,
     IMGHeader,
+    Subdivision,
     ZoomLevel,
 )
 from .garmin_img_writer import (
@@ -35,11 +36,12 @@ logger = logging.getLogger(__name__)
 
 # Garmin zoom code computation (position-based, not absolute)
 # The TRE1 level records store a zoom_code byte at offset 0.
-# Pattern (confirmed from IOM.img and SwissTopo_West.img reference files):
-#   For N levels: first level = 0x80 + (N-1), remaining count down from N-2 to 0.
+# Pattern (confirmed from SwissTopo_West.img reference files):
+#   For N levels: first two levels get 0x80 + (N-1) and 0x80 + (N-2),
+#   remaining levels count down from N-3 to 0.
 # Examples:
-#   SwissTopo 5 levels [20-24]: codes 0x84, 0x03, 0x02, 0x01, 0x00
-#   IOM 8 levels [17-24]:       codes 0x87, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0x00
+#   SwissTopo 5 levels [20-24]: codes 0x84, 0x83, 0x02, 0x01, 0x00
+#   IOM 8 levels [17-24]:       codes 0x87, 0x86, 0x05, 0x04, 0x03, 0x02, 0x01, 0x00
 
 
 def _compute_zoom_codes(sorted_level_numbers: list[int]) -> list[tuple[int, int]]:
@@ -54,12 +56,228 @@ def _compute_zoom_codes(sorted_level_numbers: list[int]) -> list[tuple[int, int]
     n = len(sorted_level_numbers)
     codes = []
     for i, level_num in enumerate(sorted_level_numbers):
-        if i == 0:
-            code = 0x80 + (n - 1)
+        if i <= 1:
+            code = 0x80 + (n - 1 - i)
         else:
             code = n - 1 - i
         codes.append((level_num, code))
     return codes
+
+
+def generate_subdivisions(
+    compressed_tiles: CompressedTiles,
+    sorted_zoom_levels: list[int],
+    bounds: dict[str, float],
+) -> list[Subdivision]:
+    """Generate spatial subdivisions for all zoom levels.
+
+    Divides the map area into a geographic grid at each zoom level.
+    The grid size increases with zoom level detail (fewer for overview
+    zooms, more for detailed zooms), matching the SwissTopo pattern.
+
+    Each tile is assigned to a subdivision based on its geographic position.
+
+    Args:
+        compressed_tiles: Dict mapping zoom level number to list of
+            (jpeg_bytes, (lat_min, lon_min, lat_max, lon_max)) tuples.
+        sorted_zoom_levels: Zoom level numbers in ascending order.
+        bounds: Geographic bounds dict with north, south, west, east keys.
+
+    Returns:
+        Flat list of Subdivision objects across all zoom levels, ordered
+        by zoom level (overview first). Each subdivision contains its
+        assigned tiles.
+    """
+    if not sorted_zoom_levels:
+        return []
+
+    n_zoom = len(sorted_zoom_levels)
+    subdivisions: list[Subdivision] = []
+
+    for z_idx, zoom_level in enumerate(sorted_zoom_levels):
+        tiles = compressed_tiles.get(zoom_level, [])
+        if not tiles:
+            # No tiles at this zoom level — create one empty subdivision
+            sub = Subdivision(
+                center_lat=(bounds.get("north", 0) + bounds.get("south", 0)) / 2,
+                center_lon=(bounds.get("west", 0) + bounds.get("east", 0)) / 2,
+                zoom_level_index=z_idx,
+            )
+            subdivisions.append(sub)
+            continue
+
+        # Compute grid dimensions for this zoom level.
+        # SwissTopo pattern: subdiv_counts=[1, 3, 138, 156, 300] for 5 levels.
+        # For overview levels (z_idx=0,1): 1 subdivision
+        # For detail levels: subdivide proportionally to tile count.
+        if z_idx <= 1 or len(tiles) <= 4:
+            # Few tiles or overview level: one subdivision for all tiles
+            _assign_tiles_to_single_subdivision(tiles, z_idx, subdivisions)
+        else:
+            # Subdivide into a regular grid
+            n_tiles = len(tiles)
+            # Target roughly sqrt(n_tiles) subdivisions, but at least 4
+            grid_side = max(2, int(n_tiles**0.25))
+            _assign_tiles_to_grid(tiles, z_idx, grid_side, grid_side, subdivisions)
+
+    # Set TRE2 links and bounds
+    _set_subdivision_links(subdivisions, n_zoom, bounds)
+
+    return subdivisions
+
+
+def _assign_tiles_to_single_subdivision(
+    tiles: list, z_idx: int, subdivisions: list[Subdivision]
+) -> None:
+    """Assign all tiles to a single subdivision."""
+    # Compute center and bounds from tiles
+    lats: list[float] = []
+    lons: list[float] = []
+    for tile_entry in tiles:
+        if isinstance(tile_entry, tuple):
+            _, tile_bounds = tile_entry
+            lat_min, lon_min, lat_max, lon_max = tile_bounds
+            lats.extend([lat_min, lat_max])
+            lons.extend([lon_min, lon_max])
+
+    center_lat = (min(lats) + max(lats)) / 2 if lats else 0.0
+    center_lon = (min(lons) + max(lons)) / 2 if lons else 0.0
+
+    sub = Subdivision(
+        center_lat=center_lat,
+        center_lon=center_lon,
+        zoom_level_index=z_idx,
+        tile_entries=list(tiles),
+        bounds_west=min(lons) if lons else 0.0,
+        bounds_east=max(lons) if lons else 0.0,
+        bounds_north=max(lats) if lats else 0.0,
+        bounds_south=min(lats) if lats else 0.0,
+    )
+    subdivisions.append(sub)
+
+
+def _assign_tiles_to_grid(
+    tiles: list,
+    z_idx: int,
+    grid_cols: int,
+    grid_rows: int,
+    subdivisions: list[Subdivision],
+) -> None:
+    """Assign tiles to a grid of subdivisions based on geographic position."""
+    # Find overall tile extent
+    lat_min_all = float("inf")
+    lat_max_all = float("-inf")
+    lon_min_all = float("inf")
+    lon_max_all = float("-inf")
+
+    for tile_entry in tiles:
+        if isinstance(tile_entry, tuple):
+            _, tile_bounds = tile_entry
+            t_lat_min, t_lon_min, t_lat_max, t_lon_max = tile_bounds
+            lat_min_all = min(lat_min_all, t_lat_min)
+            lat_max_all = max(lat_max_all, t_lat_max)
+            lon_min_all = min(lon_min_all, t_lon_min)
+            lon_max_all = max(lon_max_all, t_lon_max)
+
+    lat_range = lat_max_all - lat_min_all
+    lon_range = lon_max_all - lon_min_all
+
+    if lat_range <= 0:
+        lat_range = 1.0
+    if lon_range <= 0:
+        lon_range = 1.0
+
+    # Create grid cells
+    cell_lat = lat_range / grid_rows
+    cell_lon = lon_range / grid_cols
+
+    # Initialize grid cells
+    grid: dict[tuple[int, int], list] = {
+        (r, c): [] for r in range(grid_rows) for c in range(grid_cols)
+    }
+
+    # Assign tiles to grid cells
+    for tile_entry in tiles:
+        if isinstance(tile_entry, tuple):
+            _, tile_bounds = tile_entry
+            t_lat_min, t_lon_min, t_lat_max, t_lon_max = tile_bounds
+        else:
+            continue
+
+        tile_center_lat = (t_lat_min + t_lat_max) / 2
+        tile_center_lon = (t_lon_min + t_lon_max) / 2
+
+        row = min(int((tile_center_lat - lat_min_all) / cell_lat), grid_rows - 1)
+        col = min(int((tile_center_lon - lon_min_all) / cell_lon), grid_cols - 1)
+        row = max(0, row)
+        col = max(0, col)
+
+        grid[(row, col)].append(tile_entry)
+
+    # Create subdivisions for non-empty cells
+    for r in range(grid_rows):
+        for c in range(grid_cols):
+            cell_tiles = grid[(r, c)]
+            if not cell_tiles:
+                continue
+
+            cell_lat_min = lat_min_all + r * cell_lat
+            cell_lat_max = cell_lat_min + cell_lat
+            cell_lon_min = lon_min_all + c * cell_lon
+            cell_lon_max = cell_lon_min + cell_lon
+
+            center_lat = (cell_lat_min + cell_lat_max) / 2
+            center_lon = (cell_lon_min + cell_lon_max) / 2
+
+            sub = Subdivision(
+                center_lat=center_lat,
+                center_lon=center_lon,
+                zoom_level_index=z_idx,
+                tile_entries=cell_tiles,
+                bounds_west=cell_lon_min,
+                bounds_east=cell_lon_max,
+                bounds_north=cell_lat_max,
+                bounds_south=cell_lat_min,
+            )
+            subdivisions.append(sub)
+
+
+def _set_subdivision_links(
+    subdivisions: list[Subdivision], n_zoom: int, bounds: dict[str, float]
+) -> None:
+    """Set next_level_index links and bounds on subdivisions.
+
+    Links the subdivision hierarchy across zoom levels.
+    Sets bounds from the map bounds for empty subdivisions (overview levels).
+    """
+    if not subdivisions:
+        return
+
+    # Group subdivisions by zoom level index
+    by_level: dict[int, list[int]] = {}
+    for i, sub in enumerate(subdivisions):
+        by_level.setdefault(sub.zoom_level_index, []).append(i)
+
+    for i, sub in enumerate(subdivisions):
+        z_idx = sub.zoom_level_index
+
+        # Set bounds for empty subdivisions (overview levels with no tiles)
+        if not sub.tile_entries and sub.bounds_west == 0.0:
+            sub.bounds_west = bounds.get("west", 0.0)
+            sub.bounds_east = bounds.get("east", 0.0)
+            sub.bounds_north = bounds.get("north", 0.0)
+            sub.bounds_south = bounds.get("south", 0.0)
+
+        # next_level_index: index of first subdivision at next zoom level
+        has_children = z_idx < n_zoom - 1
+        if has_children:
+            next_z = z_idx + 1
+            if next_z in by_level and by_level[next_z]:
+                sub.next_level_index = by_level[next_z][0]
+            else:
+                sub.next_level_index = 0
+        else:
+            sub.next_level_index = 0
 
 
 MAP_NAME_MAX_LEN = 32
@@ -311,28 +529,41 @@ class GarminImgExporter(BaseExporter):
         Handles the 4 GB file size limit by splitting along zoom level
         boundaries when the output would exceed the limit.
         """
+        # Generate spatial subdivisions
+        bounds = {
+            "north": img_file.bounds_north,
+            "south": img_file.bounds_south,
+            "west": img_file.bounds_west,
+            "east": img_file.bounds_east,
+        }
+        sorted_zooms = [z.level_number for z in img_file.zoom_levels]
+        subdivisions = generate_subdivisions(compressed_tiles, sorted_zooms, bounds)
+
         # Compute total estimated size
-        computer = LayoutComputer(img_file, compressed_tiles)
+        computer = LayoutComputer(img_file, compressed_tiles, subdivisions=subdivisions)
         layouts = computer.compute()
         total_size = max(lay.end_offset for lay in layouts)
 
         if total_size <= MAX_FILE_SIZE:
             # Single file
             writer = IMGWriter(output_path)
-            writer.write(img_file, compressed_tiles)
+            writer.write(img_file, compressed_tiles, subdivisions=subdivisions)
             return [output_path]
 
         # Need to split
         logger.info(
             f"Output would be {total_size:,} bytes, splitting into multiple files"
         )
-        return self._split_write(img_file, compressed_tiles, output_path)
+        return self._split_write(
+            img_file, compressed_tiles, output_path, subdivisions=subdivisions
+        )
 
     def _split_write(
         self,
         img_file: IMGFile,
         compressed_tiles: CompressedTiles,
         output_path: Path,
+        subdivisions: list[Subdivision] | None = None,
     ) -> list[Path]:
         """
         Split output across multiple IMG files.
@@ -345,6 +576,13 @@ class GarminImgExporter(BaseExporter):
 
         # Group zoom levels into files
         zoom_groups = self._compute_zoom_splits(img_file, compressed_tiles)
+
+        bounds = {
+            "north": img_file.bounds_north,
+            "south": img_file.bounds_south,
+            "west": img_file.bounds_west,
+            "east": img_file.bounds_east,
+        }
 
         output_files = []
         for i, (zooms, tiles_for_group) in enumerate(zoom_groups, start=1):
@@ -374,8 +612,11 @@ class GarminImgExporter(BaseExporter):
                 ],
             )
 
+            # Generate subdivisions for this zoom subset
+            group_subdivs = generate_subdivisions(tiles_for_group, zooms, bounds)
+
             writer = IMGWriter(file_path)
-            writer.write(file_img, tiles_for_group)
+            writer.write(file_img, tiles_for_group, subdivisions=group_subdivs)
             output_files.append(file_path)
 
             logger.info(f"Wrote split file {i}: {file_path}")

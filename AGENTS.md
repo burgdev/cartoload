@@ -34,6 +34,12 @@ Guidelines for AI coding agents working on cartoload.
 
 - **Branches:** `develop` is the working branch, `main` is for releases.
 - **Garmin IMG format:** This is a proprietary binary format with significant complexity. Before modifying any exporter code, read the existing specs and designs in `openspec/specs/` and any open changes in `openspec/changes/` to understand the format.
+- **Inspecting IMG files:** Use `cartoload analyze img info <file>` to inspect Garmin IMG binary files. Use `--summary`/`-m` for a concise overview (bounds, bitmap stats, encoding, map name), `--rgn2`/`-r` for annotated RGN2 analysis, `--segments`/`-g` for TRE7-based zoom level segmentation, and `--hex <section>`/`-x` for raw hex dumps. Use `cartoload analyze img compare <file1> <file2>` for side-by-side comparison of two IMG files.
+
+## Reference Source Code
+
+- **mkgmap** (Java Garmin IMG writer): `~/git/tmp/mkgmap-r4924` — the definitive open-source reference for Garmin IMG format. Key packages: `uk.me.parabola.mkgmap.reader`, `uk.me.parabola.mkgmap.building`, `uk.me.parabola.mkgmap.general`, `uk.me.parabola.mkgmap.outputs`.
+- **GPXSee** (C++ Garmin IMG reader): `~/git/tmp/GPXSee` — useful for understanding how IMG files are parsed. Key directories: `src/map/IMG`, `src/GPXSee` (main app).
 
 ## General Guidelines
 

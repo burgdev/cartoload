@@ -16,6 +16,7 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 
+from .cli_analyze import analyze
 from .config import load_config
 from .pipeline import (
     DownloadError,
@@ -149,6 +150,9 @@ def _handle_unexpected_error(error: Exception) -> None:
 @click.group()
 def main() -> None:
     """cartoload — convert geodata into GPS device maps."""
+
+
+main.add_command(analyze)
 
 
 @main.command()

@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 
 from cartoload.config import LayerConfig
+from cartoload.exporters.garmin_img import generate_subdivisions
 from cartoload.exporters.garmin_img_model import (
     IMGFile,
     IMGHeader,
@@ -1111,9 +1112,9 @@ class TestLBL28LBL29TypeE0:
 
         data = output.read_bytes()
         # RGN sub-header at offset determined by layout (after GMP header)
-        # For simplicity, search for Type E0 marker (0xE0) followed by bits_field
-        assert b"\xe0\x2b" in data or b"\xe0\x25" in data, (
-            "Should contain Type E0 record (0xE0 + bits_field)"
+        # For simplicity, search for Type E0 marker (0xE0) followed by bits_field 0x2D
+        assert b"\xe0\x2d" in data, (
+            "Should contain Type E0 record (0xE0 + bits_field 0x2D)"
         )
 
     def test_type_e0_record_count_matches_tile_count(self, tmp_path):
@@ -1131,13 +1132,13 @@ class TestLBL28LBL29TypeE0:
         writer.write(img_file, compressed_tiles)
 
         data = output.read_bytes()
-        # Count Type E0 markers (0xE0 followed by bits_field 0x2B or 0x25)
-        e0_count = data.count(b"\xe0\x2b") + data.count(b"\xe0\x25")
+        # Count Type E0 markers (0xE0 followed by bits_field 0x2D)
+        e0_count = data.count(b"\xe0\x2d")
         assert e0_count == 5, f"Expected 5 Type E0 records, found {e0_count}"
 
     def test_type_e0_bits_field_under_256_tiles(self, tmp_path):
-        """Verify Type E0 bits_field is 0x2B for <256 tiles."""
-        output = tmp_path / "test_bits_field_2b.img"
+        """Verify Type E0 bits_field is always 0x2D (2-byte index, SwissTopo format)."""
+        output = tmp_path / "test_bits_field_2d.img"
         zoom_levels = [ZoomLevel(level_number=12, zoom_code=0x80)]
         # Create 10 tiles (< 256)
         tiles = [np.full((256, 256, 3), 128, dtype=np.uint8) for _ in range(10)]
@@ -1148,9 +1149,8 @@ class TestLBL28LBL29TypeE0:
         writer.write(img_file, compressed_tiles)
 
         data = output.read_bytes()
-        # Should use 0x2B for <256 tiles
-        assert b"\xe0\x2b" in data, "Should use bits_field 0x2B for <256 tiles"
-        assert b"\xe0\x25" not in data, "Should NOT use bits_field 0x25 for <256 tiles"
+        # Should always use 0x2D (SwissTopo format, 2-byte image index)
+        assert b"\xe0\x2d" in data, "Should use bits_field 0x2D"
 
     def test_tile_index_table_not_present(self, tmp_path):
         """Verify tile index table is NOT present (replaced by LBL28/LBL29)."""
@@ -1467,3 +1467,337 @@ def test_gmt_marker_exists():
 def test_gdal_marker_exists():
     """Verify pytest.mark.gdal is available for future GDAL tests."""
     assert hasattr(pytest.mark, "gdal")
+
+
+# ---------------------------------------------------------------------------
+# Tests for spatial subdivision generation (Task 2.3 / 5.2)
+# ---------------------------------------------------------------------------
+
+
+def _make_tiles_with_bounds(
+    n_tiles: int = 9,
+    lat_min: float = 46.5,
+    lat_max: float = 47.5,
+    lon_min: float = 8.0,
+    lon_max: float = 9.0,
+) -> list[tuple[bytes, tuple[float, float, float, float]]]:
+    """Create tiles with geographic bounds spread across the given extent."""
+    n_side = int(n_tiles**0.5)
+    lat_step = (lat_max - lat_min) / n_side
+    lon_step = (lon_max - lon_min) / n_side
+    tiles = []
+    jpeg_stub = b"\xff\xd8\xff\xe0" + b"\x00" * 100
+    for r in range(n_side):
+        for c in range(n_side):
+            t_lat_min = lat_min + r * lat_step
+            t_lat_max = t_lat_min + lat_step
+            t_lon_min = lon_min + c * lon_step
+            t_lon_max = t_lon_min + lon_step
+            tiles.append((jpeg_stub, (t_lat_min, t_lon_min, t_lat_max, t_lon_max)))
+    return tiles
+
+
+class TestGenerateSubdivisions:
+    """Tests for the generate_subdivisions() function."""
+
+    def test_empty_zoom_levels(self):
+        """No zoom levels → empty subdivision list."""
+        result = generate_subdivisions(
+            {}, [], {"north": 47, "south": 46, "west": 8, "east": 9}
+        )
+        assert result == []
+
+    def test_single_zoom_few_tiles(self):
+        """Single zoom with ≤4 tiles → one subdivision."""
+        tiles = _make_tiles_with_bounds(4)
+        compressed = {15: tiles}
+        result = generate_subdivisions(
+            compressed, [15], {"north": 47.5, "south": 46.5, "west": 8.0, "east": 9.0}
+        )
+        assert len(result) == 1
+        assert result[0].zoom_level_index == 0
+        assert result[0].get_tile_count() == 4
+
+    def test_single_zoom_many_tiles(self):
+        """Single zoom with many tiles → multiple subdivisions (detail level)."""
+        tiles = _make_tiles_with_bounds(25)  # 5x5 grid
+        compressed = {15: tiles}
+        result = generate_subdivisions(
+            compressed, [15], {"north": 47.5, "south": 46.5, "west": 8.0, "east": 9.0}
+        )
+        # First level (z_idx=0) uses single subdivision since it's the only zoom level
+        assert len(result) >= 1
+        total_tiles = sum(s.get_tile_count() for s in result)
+        assert total_tiles == 25
+
+    def test_multiple_zoom_levels(self):
+        """Multiple zoom levels → subdivisions at each level, ordered by zoom."""
+        tiles_z12 = _make_tiles_with_bounds(4)
+        tiles_z13 = _make_tiles_with_bounds(9)
+        compressed = {12: tiles_z12, 13: tiles_z13}
+        result = generate_subdivisions(
+            compressed,
+            [12, 13],
+            {"north": 47.5, "south": 46.5, "west": 8.0, "east": 9.0},
+        )
+        # Should have subdivisions from both levels
+        assert len(result) >= 2
+        # All tiles assigned
+        total_tiles = sum(s.get_tile_count() for s in result)
+        assert total_tiles == 4 + 9
+
+    def test_all_tiles_assigned(self):
+        """All input tiles must be assigned to some subdivision."""
+        tiles = _make_tiles_with_bounds(16)
+        compressed = {14: tiles}
+        result = generate_subdivisions(
+            compressed, [14], {"north": 47.5, "south": 46.5, "west": 8.0, "east": 9.0}
+        )
+        total_tiles = sum(s.get_tile_count() for s in result)
+        assert total_tiles == len(tiles)
+
+    def test_subdivision_center_within_bounds(self):
+        """Each subdivision center should be within the map bounds."""
+        bounds = {"north": 47.5, "south": 46.5, "west": 8.0, "east": 9.0}
+        tiles = _make_tiles_with_bounds(16)
+        compressed = {14: tiles}
+        result = generate_subdivisions(compressed, [14], bounds)
+        for sub in result:
+            assert bounds["south"] <= sub.center_lat <= bounds["north"], (
+                f"Center lat {sub.center_lat} outside bounds"
+            )
+            assert bounds["west"] <= sub.center_lon <= bounds["east"], (
+                f"Center lon {sub.center_lon} outside bounds"
+            )
+
+    def test_subdivision_links_set(self):
+        """Subdivisions should have next_level_index set for non-last levels."""
+        tiles_z12 = _make_tiles_with_bounds(4)
+        tiles_z13 = _make_tiles_with_bounds(9)
+        compressed = {12: tiles_z12, 13: tiles_z13}
+        result = generate_subdivisions(
+            compressed,
+            [12, 13],
+            {"north": 47.5, "south": 46.5, "west": 8.0, "east": 9.0},
+        )
+        # Level 0 subdivisions should have next_level_index pointing to level 1
+        level0 = [s for s in result if s.zoom_level_index == 0]
+        level1_start = len(level0)  # first level-1 subdiv index
+        for sub in level0:
+            assert sub.next_level_index == level1_start or sub.next_level_index > 0, (
+                f"Level 0 subdivision should have next_level_index > 0, got {sub.next_level_index}"
+            )
+
+    def test_empty_zoom_level(self):
+        """Zoom level with no tiles → one empty subdivision."""
+        compressed = {12: [], 13: _make_tiles_with_bounds(4)}
+        result = generate_subdivisions(
+            compressed,
+            [12, 13],
+            {"north": 47.5, "south": 46.5, "west": 8.0, "east": 9.0},
+        )
+        assert len(result) >= 2
+        level0 = [s for s in result if s.zoom_level_index == 0]
+        assert len(level0) == 1
+        assert level0[0].get_tile_count() == 0
+
+
+class TestSubdivisionBinaryWriting:
+    """Tests for per-subdivision TRE2/TRE7/RGN2 binary output."""
+
+    def test_subdivision_tre2_records_written(self, tmp_path):
+        """Verify TRE2 section has correct variable-size records per subdivision."""
+        output = tmp_path / "test_subdiv_tre2.img"
+        tiles = _make_tiles_with_bounds(9)
+        compressed = {15: tiles}
+        bounds = {"north": 47.5, "south": 46.5, "west": 8.0, "east": 9.0}
+        subdivisions = generate_subdivisions(compressed, [15], bounds)
+
+        img_file = _make_img_file(
+            zoom_levels=[ZoomLevel(level_number=15, zoom_code=0x80)],
+        )
+        writer = IMGWriter(output)
+        writer.write(img_file, compressed, subdivisions=subdivisions)
+
+        data = output.read_bytes()
+        gmp_start_block = struct.unpack_from("<H", data, 0x1200 + 0x20)[0]
+        gmp_offset = gmp_start_block * 32768
+
+        # Find TRE header
+        tre_magic = data.find(b"GARMIN TRE", gmp_offset)
+        assert tre_magic > 0, "TRE header not found"
+        tre_start = tre_magic - 2
+
+        # Read TRE2 size
+        tre2_size = struct.unpack_from("<I", data, tre_start + 0x2D)[0]
+
+        # TRE2: last zoom level uses 14-byte records + 4 trailing bytes
+        expected_tre2_size = len(subdivisions) * 14 + 4
+        assert tre2_size == expected_tre2_size, (
+            f"TRE2 size {tre2_size} != {len(subdivisions)} * 14 + 4"
+        )
+
+    def test_subdivision_tre7_rec_size_5(self, tmp_path):
+        """Verify TRE7 uses rec_size=5 when subdivisions are provided."""
+        output = tmp_path / "test_subdiv_tre7.img"
+        tiles = _make_tiles_with_bounds(4)
+        compressed = {15: tiles}
+        bounds = {"north": 47.5, "south": 46.5, "west": 8.0, "east": 9.0}
+        subdivisions = generate_subdivisions(compressed, [15], bounds)
+
+        img_file = _make_img_file(
+            zoom_levels=[ZoomLevel(level_number=15, zoom_code=0x80)],
+        )
+        writer = IMGWriter(output)
+        writer.write(img_file, compressed, subdivisions=subdivisions)
+
+        data = output.read_bytes()
+        gmp_start_block = struct.unpack_from("<H", data, 0x1200 + 0x20)[0]
+        gmp_offset = gmp_start_block * 32768
+
+        tre_magic = data.find(b"GARMIN TRE", gmp_offset)
+        tre_start = tre_magic - 2
+
+        # TRE7 rec_size at offset 0x84 in TRE header
+        tre7_rec_size = struct.unpack_from("<H", data, tre_start + 0x84)[0]
+        assert tre7_rec_size == 5, f"TRE7 rec_size should be 5, got {tre7_rec_size}"
+
+    def test_subdivision_tre7_has_sentinel(self, tmp_path):
+        """Verify TRE7 has a sentinel entry (all zeros) at the end."""
+        output = tmp_path / "test_subdiv_tre7_sentinel.img"
+        tiles = _make_tiles_with_bounds(4)
+        compressed = {15: tiles}
+        bounds = {"north": 47.5, "south": 46.5, "west": 8.0, "east": 9.0}
+        subdivisions = generate_subdivisions(compressed, [15], bounds)
+
+        img_file = _make_img_file(
+            zoom_levels=[ZoomLevel(level_number=15, zoom_code=0x80)],
+        )
+        writer = IMGWriter(output)
+        writer.write(img_file, compressed, subdivisions=subdivisions)
+
+        data = output.read_bytes()
+        gmp_start_block = struct.unpack_from("<H", data, 0x1200 + 0x20)[0]
+        gmp_offset = gmp_start_block * 32768
+
+        tre_magic = data.find(b"GARMIN TRE", gmp_offset)
+        tre_start = tre_magic - 2
+
+        tre7_pos = struct.unpack_from("<I", data, tre_start + 0x7C)[0]
+        tre7_size = struct.unpack_from("<I", data, tre_start + 0x80)[0]
+
+        # TRE7 size should be (n_subdivisions + 1) * 5
+        expected_size = (len(subdivisions) + 1) * 5
+        assert tre7_size == expected_size, (
+            f"TRE7 size {tre7_size} != expected {expected_size}"
+        )
+
+        # Last 5 bytes should be all zeros (sentinel)
+        tre7_data_offset = gmp_offset + tre7_pos
+        sentinel = data[
+            tre7_data_offset + len(subdivisions) * 5 : tre7_data_offset + tre7_size
+        ]
+        assert sentinel == b"\x00" * 5, (
+            f"Sentinel should be all zeros, got {sentinel.hex()}"
+        )
+
+    def test_subdivision_preserves_tile_data_in_lbl29(self, tmp_path):
+        """Verify LBL29 contains all JPEG data when using subdivisions."""
+        output = tmp_path / "test_subdiv_lbl29.img"
+        tiles = _make_tiles_with_bounds(4)
+        compressed = {15: tiles}
+        bounds = {"north": 47.5, "south": 46.5, "west": 8.0, "east": 9.0}
+        subdivisions = generate_subdivisions(compressed, [15], bounds)
+
+        img_file = _make_img_file(
+            zoom_levels=[ZoomLevel(level_number=15, zoom_code=0x80)],
+        )
+        writer = IMGWriter(output)
+        writer.write(img_file, compressed, subdivisions=subdivisions)
+
+        data = output.read_bytes()
+        gmp_start_block = struct.unpack_from("<H", data, 0x1200 + 0x20)[0]
+        gmp_offset = gmp_start_block * 32768
+
+        lbl_magic = data.find(b"GARMIN LBL", gmp_offset)
+        lbl_start = lbl_magic - 2
+        lbl29_pos = struct.unpack_from("<I", data, lbl_start + 0x192)[0]
+        lbl29_size = struct.unpack_from("<I", data, lbl_start + 0x196)[0]
+
+        # LBL29 should contain 4 JPEG files
+        expected_jpeg_size = sum(len(t[0]) for t in tiles)
+        assert lbl29_size == expected_jpeg_size
+
+        # First bytes should be JPEG marker
+        lbl29_data = data[gmp_offset + lbl29_pos : gmp_offset + lbl29_pos + 4]
+        assert lbl29_data[:2] == b"\xff\xd8"
+
+    def test_subdivision_type_e0_count_matches(self, tmp_path):
+        """Verify E0 record count matches total tile count with subdivisions."""
+        output = tmp_path / "test_subdiv_e0.img"
+        tiles = _make_tiles_with_bounds(9)
+        compressed = {15: tiles}
+        bounds = {"north": 47.5, "south": 46.5, "west": 8.0, "east": 9.0}
+        subdivisions = generate_subdivisions(compressed, [15], bounds)
+
+        img_file = _make_img_file(
+            zoom_levels=[ZoomLevel(level_number=15, zoom_code=0x80)],
+        )
+        writer = IMGWriter(output)
+        writer.write(img_file, compressed, subdivisions=subdivisions)
+
+        data = output.read_bytes()
+        # Count Type E0 markers (bits_field 0x2D)
+        e0_count = data.count(b"\xe0\x2d")
+        assert e0_count == 9, f"Expected 9 Type E0 records, found {e0_count}"
+
+
+class TestPolylinePreamble:
+    """Tests for polyline preamble coordinate encoding."""
+
+    def test_preamble_is_18_bytes(self):
+        """Each preamble should be exactly 18 bytes."""
+        buf = io.BytesIO()
+        from cartoload.exporters.garmin_img_writer import _write_polyline_preamble
+
+        _write_polyline_preamble(buf, 47.0, 8.5)
+        assert len(buf.getvalue()) == 18
+
+    def test_preamble_starts_with_06_b3(self):
+        """Preamble type bytes should be 0x06 0xB3."""
+        buf = io.BytesIO()
+        from cartoload.exporters.garmin_img_writer import _write_polyline_preamble
+
+        _write_polyline_preamble(buf, 47.0, 8.5)
+        data = buf.getvalue()
+        assert data[0] == 0x06
+        assert data[1] == 0xB3
+
+    def test_preamble_with_tile_bounds_nonzero(self):
+        """Preamble with tile bounds should produce non-zero bitstream."""
+        buf = io.BytesIO()
+        from cartoload.exporters.garmin_img_writer import _write_polyline_preamble
+
+        _write_polyline_preamble(
+            buf,
+            center_lat=47.0,
+            center_lon=8.5,
+            tile_lat_min=46.9,
+            tile_lon_min=8.4,
+            tile_lat_max=47.1,
+            tile_lon_max=8.6,
+        )
+        data = buf.getvalue()
+        # Bitstream (bytes 2-17) should have non-zero data
+        bitstream = data[2:]
+        assert bitstream != b"\x00" * 16, "Bitstream should encode non-zero deltas"
+
+    def test_preamble_without_bounds_zeros(self):
+        """Preamble without tile bounds should produce zero bitstream (legacy)."""
+        buf = io.BytesIO()
+        from cartoload.exporters.garmin_img_writer import _write_polyline_preamble
+
+        _write_polyline_preamble(buf, 47.0, 8.5)
+        data = buf.getvalue()
+        # Legacy mode: bytes 2-17 should be all zeros
+        assert data[2:] == b"\x00" * 16

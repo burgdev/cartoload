@@ -44,6 +44,7 @@ from PIL import Image
 from .garmin_img_model import (
     IMGFile,
     IMGHeader,
+    Subdivision,
     SubfileHeader,
     SubfileType,
 )
@@ -182,9 +183,15 @@ class LayoutComputer:
       5. Subfile data (GMP, MPS) starting after FAT region
     """
 
-    def __init__(self, img_file: IMGFile, compressed_tiles: CompressedTiles):
+    def __init__(
+        self,
+        img_file: IMGFile,
+        compressed_tiles: CompressedTiles,
+        subdivisions: list[Subdivision] | None = None,
+    ):
         self.img_file = img_file
         self.compressed_tiles = compressed_tiles
+        self.subdivisions = subdivisions
         self.layouts: list[SubfileLayout] = []
 
     def compute(self) -> list[SubfileLayout]:
@@ -270,24 +277,44 @@ class LayoutComputer:
         # TRE data sections
         n_zoom_levels = len(self.img_file.zoom_levels)
         map_levels_size = n_zoom_levels * 4  # 4 bytes per zoom level
-        # Subdivisions: for raster, one 16-byte group record per zoom level
-        # Must match the subdiv_data allocation in GMPWriter.write()
-        n_zoom = len(self.img_file.zoom_levels)
-        subdiv_size = n_zoom * 16
+
+        # Subdivisions: non-last levels use 16-byte records, last level uses 14-byte
+        # Plus 4 trailing bytes (total RGN2 extent marker)
+        n_subdivisions = len(self.subdivisions) if self.subdivisions else n_zoom_levels
+        if self.subdivisions:
+            by_level: dict[int, int] = {}
+            for sub in self.subdivisions:
+                by_level[sub.zoom_level_index] = (
+                    by_level.get(sub.zoom_level_index, 0) + 1
+                )
+            n_last_level = by_level.get(n_zoom_levels - 1, 0)
+            n_non_last = n_subdivisions - n_last_level
+            subdiv_size = n_non_last * 16 + n_last_level * 14 + 4  # +4 trailing extent
+        else:
+            subdiv_size = (
+                (n_subdivisions - 1) * 16 + 1 * 14 + 4
+            )  # legacy: last is 14-byte
         tre_data = 6 + subdiv_size + map_levels_size  # copyright + subdiv + map_levels
 
         # TRE extended sections (needed for GMT bitmap detection)
-        # TRE5 is empty (size=0) — matches IOM reference for bitmap detection
-        tre7_rec_size = 4  # uint32 offset per entry (matches IOM reference)
-        tre7_size = n_zoom * tre7_rec_size  # one entry per zoom level
-        tre8_size = 6  # TRE8: 2 entries x 3 bytes (polyline + raster type)
-        tre_ext_data = tre7_size + tre8_size
+        if self.subdivisions:
+            tre7_rec_size = 5  # SwissTopo format: uint32 offset + flag byte
+            tre7_size = (n_subdivisions + 1) * tre7_rec_size  # +1 sentinel
+        else:
+            tre7_rec_size = 4  # Legacy: uint32 offset only
+            tre7_size = n_subdivisions * tre7_rec_size  # no sentinel in legacy mode
+        # TRE extended sections (TRE5, TRE7, TRE8)
+        tre5_size = 3  # 3 bytes: 4B 02 01
+        tre8_size = 3  # TRE8: single 3-byte entry (06 02 13)
+        tre_ext_data = tre5_size + tre8_size + tre7_size
 
         # RGN data sections:
         # RGN1: minimal (empty or near-empty for raster maps)
         rgn1_data = 0
         # RGN2: Polyline preamble + Type E0 record per tile (no outline records — SwissTopo reference)
-        type_e0_record_size = 23 if total_tiles < 256 else 24
+        type_e0_record_size = (
+            24  # Always 24: E0(1) + bits(1) + idx(2) + 4*coords(16) + size(4)
+        )
         rgn2_data = total_tiles * (RGN2_POLYLINE_PREAMBLE_SIZE + type_e0_record_size)
 
         # LBL labels (tile filenames)
@@ -604,12 +631,36 @@ class GMPWriter:
         img_file: IMGFile,
         compressed_tiles: CompressedTiles,
         gmp_layout: SubfileLayout,
+        subdivisions: list[Subdivision] | None = None,
     ) -> None:
-        """Write complete GMP subfile with container format."""
+        """Write complete GMP subfile with container format.
+
+        Args:
+            f: File handle positioned at GMP start
+            img_file: IMGFile data structure
+            compressed_tiles: Dict mapping zoom level to tile data
+            gmp_layout: Computed layout for the GMP subfile
+            subdivisions: Optional list of Subdivision objects for spatial indexing.
+                When provided, writes per-subdivision TRE2/TRE7/RGN2 data.
+                When None, writes one subdivision per zoom level (legacy mode).
+        """
         f.seek(gmp_layout.start_offset)
 
         total_tiles = sum(len(t) for t in compressed_tiles.values())
+        n_zoom = len(img_file.zoom_levels)
         now = img_file.gmp_creation_date or datetime.now()
+        type_e0_record_size = (
+            24  # Always 24: E0(1) + bits(1) + idx(2) + 4*coords(16) + size(4)
+        )
+
+        # Determine subdivision mode
+        use_subdivisions = subdivisions is not None and len(subdivisions) > 0
+        if use_subdivisions:
+            n_subdivisions = len(subdivisions)
+            tre7_rec_size = 5  # SwissTopo format: uint32 offset + flag byte
+        else:
+            n_subdivisions = n_zoom
+            tre7_rec_size = 4  # Legacy: uint32 offset only
 
         # --- Phase 1: Compute layout (positions of all sections) ---
         copyright_str = img_file.copyright_string or "Copyright GARMIN."
@@ -649,10 +700,17 @@ class GMPWriter:
         tre_copyright_pos = pos  # GMP-relative
         pos += 6
 
-        # TRE subdivisions (16-byte group records per zoom level)
+        # TRE subdivisions: non-last levels use 16-byte records, last level uses 14-byte
+        # Plus 4 trailing bytes (total RGN2 extent marker)
         tre_subdiv_pos = pos  # GMP-relative
-        n_zoom = len(img_file.zoom_levels)
-        subdiv_data = bytearray(n_zoom * 16)
+        if use_subdivisions:
+            n_last = sum(1 for s in subdivisions if s.zoom_level_index == n_zoom - 1)
+            n_non_last = len(subdivisions) - n_last
+        else:
+            n_last = 1  # legacy: last zoom level has 1 subdivision
+            n_non_last = n_zoom - 1
+        subdiv_binary_size = n_non_last * 16 + n_last * 14 + 4  # +4 trailing extent
+        subdiv_data = bytearray(subdiv_binary_size)
         subdiv_size = len(subdiv_data)
         pos += subdiv_size
 
@@ -662,35 +720,29 @@ class GMPWriter:
         map_levels_size = len(map_levels_data)
         pos += map_levels_size
 
-        # --- TRE extended sections (TRE8, TRE7) ---
-        # Layout matches IOM reference: TRE8 data first, then TRE7 right after.
-        # TRE4/5/6 are empty (size=0) and share position with TRE8.
-        # TRE5 must be empty for GMT to detect bitmaps (IOM has size=0).
+        # --- TRE extended sections (TRE5, TRE8, TRE7) ---
+        tre5_pos = pos  # GMP-relative (separate from TRE8)
+        tre5_size = 3  # 3 bytes: 4B 02 01
+        pos += tre5_size
 
-        # TRE8 data (6 bytes): 2 object type entries
         tre8_pos = pos  # GMP-relative
-        tre8_size = 6
+        tre8_size = 3  # Single entry: 06 02 13 (SwissTopo reference)
         pos += tre8_size
 
-        # TRE5: empty (shares position with TRE8, size=0)
-        tre5_pos = tre8_pos
-        tre5_size = 0
-
-        # TRE7 data: one uint32 entry per zoom level
+        # TRE7 data: one entry per subdivision (+ sentinel only for SwissTopo format)
         tre7_pos = pos  # GMP-relative
-        tre7_rec_size = 4
-        tre7_size = n_zoom * tre7_rec_size
+        if use_subdivisions:
+            tre7_size = (n_subdivisions + 1) * tre7_rec_size  # +1 sentinel
+        else:
+            tre7_size = n_subdivisions * tre7_rec_size  # no sentinel in legacy mode
         pos += tre7_size
 
         # --- RGN data sections ---
-        # RGN1: empty for raster maps (all tile data goes to RGN2)
         rgn1_pos = pos  # GMP-relative
         rgn1_size = 0
 
-        # RGN2: Polyline preamble + Type E0 records per tile (no outline records)
+        # RGN2: Polyline preamble + Type E0 records per tile
         rgn2_pos = pos  # GMP-relative
-        type_e0_record_size = 23 if total_tiles < 256 else 24
-        # Each tile has a polyline preamble + E0 record (no per-zoom outline records)
         rgn2_size = total_tiles * (RGN2_POLYLINE_PREAMBLE_SIZE + type_e0_record_size)
         pos += rgn2_size
 
@@ -703,12 +755,11 @@ class GMPWriter:
 
         # --- LBL28 section (image index) ---
         lbl28_pos = pos  # GMP-relative
-        lbl28_size = total_tiles * 4  # uint32 offset per tile
+        lbl28_size = total_tiles * 4
         pos += lbl28_size
 
         # --- LBL29 section (image storage) ---
         lbl29_pos = pos  # GMP-relative
-        # Calculate LBL29 size (sum of all JPEG sizes)
         lbl29_size = 0
         for zoom in img_file.zoom_levels:
             tiles = compressed_tiles.get(zoom.level_number, [])
@@ -720,74 +771,161 @@ class GMPWriter:
                 )
         pos += lbl29_size
 
-        # Fill map levels data (4 bytes per level: zoom_code(1) + level_number(1) + subdiv_count(2 LE))
-        for z_idx, zoom in enumerate(img_file.zoom_levels):
-            map_levels_data[z_idx * 4] = zoom.zoom_code
-            map_levels_data[z_idx * 4 + 1] = zoom.level_number
-            # subdiv_count = number of subdivision groups at this zoom level (1 per level)
-            struct.pack_into("<H", map_levels_data, z_idx * 4 + 2, 1)
+        # --- Fill TRE1 map levels data ---
+        if use_subdivisions:
+            # Count subdivisions per zoom level
+            subdiv_count_per_level: dict[int, int] = {}
+            for sub in subdivisions:
+                subdiv_count_per_level[sub.zoom_level_index] = (
+                    subdiv_count_per_level.get(sub.zoom_level_index, 0) + 1
+                )
+            for z_idx in range(n_zoom):
+                map_levels_data[z_idx * 4] = img_file.zoom_levels[z_idx].zoom_code
+                map_levels_data[z_idx * 4 + 1] = img_file.zoom_levels[
+                    z_idx
+                ].level_number
+                struct.pack_into(
+                    "<H",
+                    map_levels_data,
+                    z_idx * 4 + 2,
+                    subdiv_count_per_level.get(z_idx, 1),
+                )
+        else:
+            for z_idx, zoom in enumerate(img_file.zoom_levels):
+                map_levels_data[z_idx * 4] = zoom.zoom_code
+                map_levels_data[z_idx * 4 + 1] = zoom.level_number
+                struct.pack_into("<H", map_levels_data, z_idx * 4 + 2, 1)
 
-        # Fill subdivision group records (16 bytes each, one per zoom level)
-        # Format: rgn_offset(3) + obj_types(1) + lon(3) + lat(3) + flags(2) + subdiv_count(2) + next_level(2)
-        map_center_lon = int(
-            (img_file.bounds_west + img_file.bounds_east) / 2 * (2**24) / 360
-        )
-        map_center_lat = int(
-            (img_file.bounds_north + img_file.bounds_south) / 2 * (2**24) / 360
-        )
-        rgn_tile_offset = 0
-        type_e0_record_size = 23 if total_tiles < 256 else 24
-        for z_idx, zoom in enumerate(img_file.zoom_levels):
-            tile_count = len(compressed_tiles.get(zoom.level_number, []))
-            off = z_idx * 16
-            # RGN offset (3 bytes LE): byte offset into RGN2 data section for this level's tiles
-            rgn_off_bytes = rgn_tile_offset.to_bytes(3, "little")
-            subdiv_data[off] = rgn_off_bytes[0]
-            subdiv_data[off + 1] = rgn_off_bytes[1]
-            subdiv_data[off + 2] = rgn_off_bytes[2]
-            # Object types: 0x00 (no vector objects in raster maps)
-            subdiv_data[off + 3] = 0x00
-            # Center longitude (3-byte signed map units)
-            lon_bytes = _put3s(map_center_lon)
-            subdiv_data[off + 4 : off + 7] = lon_bytes
-            # Center latitude (3-byte signed map units)
-            lat_bytes = _put3s(map_center_lat)
-            subdiv_data[off + 7 : off + 10] = lat_bytes
-            # Flags (uint16 LE): bit 15 (0x8000) = has child subdivisions
-            # Lower bits indicate zoom level bitmap (bit 0 for first level)
-            subdiv_flags = 0x8000 | (1 << z_idx)
-            struct.pack_into("<H", subdiv_data, off + 10, subdiv_flags)
-            # Subdivision count (uint16 LE): for raster maps, 1 group per zoom level
-            # (each group contains all tiles at this zoom)
-            struct.pack_into("<H", subdiv_data, off + 12, 1)
-            # Next level index (uint16 LE) = index of first subdivision at next zoom
-            if z_idx + 1 < n_zoom:
-                struct.pack_into("<H", subdiv_data, off + 14, z_idx + 1)
-            else:
-                struct.pack_into("<H", subdiv_data, off + 14, 0)
-            rgn_tile_offset += tile_count * (
-                RGN2_POLYLINE_PREAMBLE_SIZE + type_e0_record_size
+        # --- Fill TRE2 subdivision records ---
+        # Non-last levels: 16 bytes (rgn_off(3) + obj(1) + lon(3) + lat(3) + width(2) + height(2) + nextLevel(2))
+        # Last level: 14 bytes (no nextLevel field)
+        # Plus 4 trailing bytes (total RGN2 data extent)
+        if use_subdivisions:
+            # Assign RGN2 offsets to subdivisions (sequential per-subdivision)
+            # and set TRE7 flags (0x01 for empty subdivisions, 0x00 for those with tiles)
+            rgn2_running_offset = 0
+            rgn2_total_extent = 0
+            for sub in subdivisions:
+                tile_count = sub.get_tile_count()
+                if tile_count == 0:
+                    # Empty subdivision (overview zoom): no RGN2 data
+                    sub.rgn2_offset = 0
+                    sub.tre7_flag = 0x01
+                else:
+                    sub.rgn2_offset = rgn2_running_offset
+                    sub.tre7_flag = 0x00
+                    chunk_size = tile_count * (
+                        RGN2_POLYLINE_PREAMBLE_SIZE + type_e0_record_size
+                    )
+                    rgn2_running_offset += chunk_size
+                    rgn2_total_extent = rgn2_running_offset
+
+            # Compute shift per zoom level for width/height encoding
+            # shift = 24 - bits_per_coord, where bits_per_coord = level_number
+            zoom_shifts = {}
+            for z_idx, zoom in enumerate(img_file.zoom_levels):
+                zoom_shifts[z_idx] = max(0, 24 - zoom.level_number)
+
+            # Write per-subdivision TRE2 records with variable size
+            off = 0
+            for i, sub in enumerate(subdivisions):
+                is_last_level = sub.zoom_level_index == n_zoom - 1
+                rec_size = 14 if is_last_level else 16
+                shift = zoom_shifts.get(sub.zoom_level_index, 0)
+
+                # RGN offset (3 bytes LE)
+                rgn_off_bytes = sub.rgn2_offset.to_bytes(3, "little")
+                subdiv_data[off] = rgn_off_bytes[0]
+                subdiv_data[off + 1] = rgn_off_bytes[1]
+                subdiv_data[off + 2] = rgn_off_bytes[2]
+                # Object types: 0x00 (no traditional vector objects for raster)
+                subdiv_data[off + 3] = 0x00
+                # Center longitude (3-byte signed map units)
+                lon_mu = int(sub.center_lon * (2**24) / 360)
+                subdiv_data[off + 4 : off + 7] = _put3s(lon_mu)
+                # Center latitude (3-byte signed map units)
+                lat_mu = int(sub.center_lat * (2**24) / 360)
+                subdiv_data[off + 7 : off + 10] = _put3s(lat_mu)
+                # Width: encoded horizontal extent with bit 15 = has children
+                w = sub.encode_tre2_width(shift)
+                if not is_last_level:
+                    w |= 0x8000  # bit 15 = has children
+                struct.pack_into("<H", subdiv_data, off + 10, w)
+                # Height: encoded vertical extent
+                h = sub.encode_tre2_height(shift)
+                struct.pack_into("<H", subdiv_data, off + 12, h)
+                # Next level index (only for non-last levels)
+                if not is_last_level:
+                    struct.pack_into("<H", subdiv_data, off + 14, sub.next_level_index)
+
+                off += rec_size
+
+            # Trailing 4 bytes: total RGN2 data extent
+            struct.pack_into("<I", subdiv_data, off, rgn2_total_extent)
+        else:
+            # Legacy: one subdivision per zoom level
+            map_center_lon = int(
+                (img_file.bounds_west + img_file.bounds_east) / 2 * (2**24) / 360
             )
+            map_center_lat = int(
+                (img_file.bounds_north + img_file.bounds_south) / 2 * (2**24) / 360
+            )
+            # Compute map extent in map units for width/height encoding
+            map_w_mu = int(
+                (img_file.bounds_east - img_file.bounds_west) * (2**24) / 360
+            )
+            map_h_mu = int(
+                (img_file.bounds_north - img_file.bounds_south) * (2**24) / 360
+            )
+            rgn_tile_offset = 0
+            off = 0
+            for z_idx, zoom in enumerate(img_file.zoom_levels):
+                tile_count = len(compressed_tiles.get(zoom.level_number, []))
+                is_last_level = z_idx == n_zoom - 1
+                rec_size = 14 if is_last_level else 16
+                shift = max(0, 24 - zoom.level_number)
+                mask = (1 << shift) - 1
+
+                rgn_off_bytes = rgn_tile_offset.to_bytes(3, "little")
+                subdiv_data[off] = rgn_off_bytes[0]
+                subdiv_data[off + 1] = rgn_off_bytes[1]
+                subdiv_data[off + 2] = rgn_off_bytes[2]
+                subdiv_data[off + 3] = 0x00
+                subdiv_data[off + 4 : off + 7] = _put3s(map_center_lon)
+                subdiv_data[off + 7 : off + 10] = _put3s(map_center_lat)
+                # Width: encoded extent with bit 15 for has-children
+                w = ((map_w_mu + 1) // 2 + mask) >> shift
+                if not is_last_level:
+                    w |= 0x8000
+                struct.pack_into("<H", subdiv_data, off + 10, w)
+                # Height: encoded extent
+                h = ((map_h_mu + 1) // 2 + mask) >> shift
+                struct.pack_into("<H", subdiv_data, off + 12, h)
+                if not is_last_level:
+                    struct.pack_into("<H", subdiv_data, off + 14, z_idx + 1)
+                rgn_tile_offset += tile_count * (
+                    RGN2_POLYLINE_PREAMBLE_SIZE + type_e0_record_size
+                )
+                off += rec_size
+
+            # Trailing 4 bytes: total RGN2 data extent
+            struct.pack_into("<I", subdiv_data, off, rgn_tile_offset)
 
         # --- Phase 2: Write all sections ---
 
         # 1. GMP Container Header (53 bytes)
         gmp_header = bytearray(GMP_CONTAINER_HEADER_SIZE)
-        gmp_header[0] = GMP_CONTAINER_HEADER_SIZE  # header_size
-        gmp_header[1] = 0x00  # flag
-        gmp_header[2:12] = b"GARMIN GMP"  # signature
-        struct.pack_into("<H", gmp_header, 12, 1)  # version = 1
+        gmp_header[0] = GMP_CONTAINER_HEADER_SIZE
+        gmp_header[1] = 0x00
+        gmp_header[2:12] = b"GARMIN GMP"
+        struct.pack_into("<H", gmp_header, 12, 1)
         date_bytes = _encode_garmin_date_7(now)
         gmp_header[14:21] = date_bytes[:7]
-        struct.pack_into(
-            "<I", gmp_header, 21, 0
-        )  # section_table_offset = 0 (sections start immediately)
-        # Section offsets (7 × uint32): TRE, RGN, LBL, NET, 0, 0, 0
+        struct.pack_into("<I", gmp_header, 21, 0)
         struct.pack_into("<I", gmp_header, 25, tre_pos)
         struct.pack_into("<I", gmp_header, 29, rgn_pos)
         struct.pack_into("<I", gmp_header, 33, lbl_pos)
         struct.pack_into("<I", gmp_header, 37, net_pos)
-        # Sections 4-6: zeros (already zero)
         f.write(gmp_header)
 
         # 2. Copyright strings
@@ -810,6 +948,7 @@ class GMPWriter:
             tre7_rec_size,
             tre8_pos,
             tre8_size,
+            rgn1_pos,
         )
         f.write(tre_header)
 
@@ -836,8 +975,8 @@ class GMPWriter:
         net_header = _build_net_subheader(now)
         f.write(net_header)
 
-        # 8. TRE copyright data (6 bytes)
-        f.write(b"\x00\x80\xa4\x4f\x05\x58")  # placeholder from reference
+        # 8. TRE copyright data (6 bytes) — label offset indices matching SwissTopo
+        f.write(bytes([0x0C, 0x00, 0x00, 0x32, 0x00, 0x00]))
 
         # 9. TRE subdivisions
         f.write(subdiv_data)
@@ -845,35 +984,50 @@ class GMPWriter:
         # 10. TRE map levels
         f.write(map_levels_data)
 
-        # 11. TRE8 data (6 bytes): 2 object type entries
-        # Entry 1: raster tiles type 0x13 (required for GMT bitmap detection)
-        # Entry 2: DATA_BOUNDS type 0x0D (from IOM reference)
-        f.write(bytes([0x06, 0x06, 0x13, 0x0D, 0x06, 0x01]))
+        # 11. TRE5 data (3 bytes) — matching SwissTopo reference
+        f.write(bytes([0x4B, 0x02, 0x01]))
 
-        # 13. TRE7 data: raster layer offset table (4 bytes per entry)
-        # Each entry: uint32 LE offset into RGN2 data section
-        # Points to the first polyline preamble for each zoom level
-        rgn2_offset = 0
-        for z_idx, zoom in enumerate(img_file.zoom_levels):
-            tile_count = len(compressed_tiles.get(zoom.level_number, []))
-            # Write offset to the first preamble+E0 pair for this zoom level
-            f.write(struct.pack("<I", rgn2_offset))
-            # Advance past all preamble+E0 pairs (no outline records)
-            rgn2_offset += tile_count * (
-                RGN2_POLYLINE_PREAMBLE_SIZE + type_e0_record_size
-            )
+        # 12. TRE8 data (3 bytes) — single entry matching SwissTopo reference
+        f.write(bytes([0x06, 0x02, 0x13]))
 
-        # 14. RGN2 data section (Type E0 records)
-        _write_rgn_data_section(f, compressed_tiles, img_file.zoom_levels, img_file)
+        # 12. TRE7 data: raster layer offset table
+        if use_subdivisions:
+            # SwissTopo format: one entry per subdivision (uint32 offset + flag byte)
+            for sub in subdivisions:
+                f.write(struct.pack("<I", sub.rgn2_offset))
+                f.write(struct.pack("<B", sub.tre7_flag))
+            # Sentinel entry (all zeros)
+            f.write(b"\x00" * tre7_rec_size)
+        else:
+            # Legacy: one uint32 per zoom level
+            rgn2_offset = 0
+            for z_idx, zoom in enumerate(img_file.zoom_levels):
+                tile_count = len(compressed_tiles.get(zoom.level_number, []))
+                f.write(struct.pack("<I", rgn2_offset))
+                rgn2_offset += tile_count * (
+                    RGN2_POLYLINE_PREAMBLE_SIZE + type_e0_record_size
+                )
 
-        # 15. LBL labels (tile filenames)
+        # 13. RGN2 data section (Type E0 records)
+        if use_subdivisions:
+            _write_rgn_data_section_subdivisions(f, subdivisions, total_tiles, img_file)
+        else:
+            _write_rgn_data_section(f, compressed_tiles, img_file.zoom_levels, img_file)
+
+        # 14. LBL labels (tile filenames)
         f.write(label_strings)
 
-        # 16. LBL28 section (image index)
-        _write_lbl28_section(f, compressed_tiles, img_file.zoom_levels)
+        # 15. LBL28 section (image index)
+        if use_subdivisions:
+            _write_lbl28_section_subdivisions(f, subdivisions)
+        else:
+            _write_lbl28_section(f, compressed_tiles, img_file.zoom_levels)
 
-        # 17. LBL29 section (image storage - JPEG tiles)
-        _write_lbl29_section(f, compressed_tiles, img_file.zoom_levels)
+        # 16. LBL29 section (image storage - JPEG tiles)
+        if use_subdivisions:
+            _write_lbl29_section_subdivisions(f, subdivisions)
+        else:
+            _write_lbl29_section(f, compressed_tiles, img_file.zoom_levels)
 
         # Pad to aligned size
         current_pos = f.tell()
@@ -913,6 +1067,7 @@ def _build_tre_subheader(
     tre7_rec_size: int,
     tre8_pos: int,
     tre8_size: int,
+    rgn1_pos: int = 0,
 ) -> bytes:
     """Build the TRE sub-header (TRE_HEADER_LENGTH bytes).
 
@@ -975,10 +1130,14 @@ def _build_tre_subheader(
     struct.pack_into("<H", buf, 0x52, 2)  # rec_size=2
 
     # TRE+0x58: TRE5 descriptor: pos(4) + size(4) + rec_size(2) + pad(4)
-    # TRE5 must be EMPTY (size=0) for GMT to detect bitmaps (confirmed from IOM reference)
-    struct.pack_into("<I", buf, 0x58, tre8_pos)
-    struct.pack_into("<I", buf, 0x5C, 0)  # size=0 (empty, like IOM)
-    struct.pack_into("<H", buf, 0x60, 2)  # rec_size=2
+    # TRE5 contains 3 bytes of data (4B 02 01), matching SwissTopo reference
+    struct.pack_into("<I", buf, 0x58, tre5_pos)
+    struct.pack_into("<I", buf, 0x5C, tre5_size)  # size=3
+    struct.pack_into("<H", buf, 0x60, 3)  # rec_size=3
+    buf[0x62] = 0x01  # pad flag (SwissTopo reference: 01 00 00 00)
+    buf[0x63] = 0x00
+    buf[0x64] = 0x00
+    buf[0x65] = 0x00
 
     # TRE+0x66: TRE6 descriptor: pos(4) + size(4) + rec_size(2) + pad(4)
     # TRE6 shares position with TRE8 (size=0 for raster)
@@ -996,23 +1155,46 @@ def _build_tre_subheader(
     struct.pack_into("<I", buf, 0x7C, tre7_pos)
     struct.pack_into("<I", buf, 0x80, tre7_size)
     struct.pack_into("<H", buf, 0x84, tre7_rec_size)
-    buf[0x86] = 0x01  # flag from IOM reference (01000000)
-    buf[0x87] = 0x00
+    buf[0x86] = 0x81  # pad flag (SwissTopo reference: 81 04 00 00)
+    buf[0x87] = 0x04
+    buf[0x88] = 0x00
+    buf[0x89] = 0x00
 
     # TRE+0x8A: TRE8 descriptor (object types): pos(4) + size(4) + rec_size(2) + pad(4)
     struct.pack_into("<I", buf, 0x8A, tre8_pos)
     struct.pack_into("<I", buf, 0x8E, tre8_size)
     struct.pack_into("<H", buf, 0x92, 3)  # rec_size=3 (3-byte entries: type + 2 params)
-    buf[0x94] = 0x00  # padding flag (IOM reference: 00 00 02 00 at 0x94)
+    buf[0x94] = 0x00  # pad flag (SwissTopo reference: 00 00 01 00)
+    buf[0x95] = 0x00
+    buf[0x96] = 0x01
+    buf[0x97] = 0x00
+
+    # TRE+0x9A-0xAD: Map ID hash area (already zeros)
+
+    # TRE+0xAE: TRE9 descriptor: pos(4) + size(4) + rec_size(2) + pad(4)
+    # Points to RGN1 section (SwissTopo reference)
+    struct.pack_into("<I", buf, 0xAE, rgn1_pos)
+    struct.pack_into("<I", buf, 0xB2, 0)  # size=0
+    struct.pack_into("<H", buf, 0xB6, 0)  # rec_size=0
+
+    # TRE+0xBC: TRE10 descriptor: pos(4) + size(4) + rec_size(2) + pad(4)
+    # Points to RGN1 section with rec_size=1 (SwissTopo reference)
+    struct.pack_into("<I", buf, 0xBC, rgn1_pos)
+    struct.pack_into("<I", buf, 0xC0, 0)  # size=0
+    struct.pack_into("<H", buf, 0xC4, 1)  # rec_size=1
 
     # TRE+0xCF: Map ID copy / matching number (uint32 LE)
     struct.pack_into("<I", buf, 0xCF, img_file.map_id)
 
-    # TRE+0xD3: Map name (null-terminated ASCII, rest of 273-byte header)
-    name_str = img_file.header.map_name or "Raster Map"
-    name_bytes = name_str.encode("ascii")[: TRE_HEADER_LENGTH - 0xD3 - 1]
-    buf[0xD3 : 0xD3 + len(name_bytes)] = name_bytes
-    buf[0xD3 + len(name_bytes)] = 0x00  # null terminator
+    # TRE+0xD3: Extended map info area with section references
+    # SwissTopo reference has two 16-byte entries referencing TRE9/TRE10 positions.
+    # Structure: {uint16(0), uint16(section_pos), zeros(12)} repeated twice.
+    # Writing rgn1_pos (same as TRE9/TRE10 position) as the section reference.
+    struct.pack_into("<H", buf, 0xD3, 0)  # label index = 0
+    struct.pack_into(
+        "<H", buf, 0xD5, rgn1_pos & 0xFFFF
+    )  # section reference (low 16 bits)
+    struct.pack_into("<H", buf, 0xE3, rgn1_pos & 0xFFFF)  # second entry, same reference
 
     return bytes(buf)
 
@@ -1125,16 +1307,17 @@ def _build_net_subheader(now: datetime) -> bytes:
 
 def _compute_bits_field(total_tiles: int) -> int:
     """
-    Compute bits_field value for Type E0 records based on total tile count.
+    Compute bits_field value for Type E0 records.
+
+    Always returns 0x2D (2-byte image index) matching SwissTopo reference files.
 
     Args:
         total_tiles: Total number of tiles across all zoom levels
 
     Returns:
-        0x2B for <256 tiles (8-bit image index)
-        0x25 for ≥256 tiles (16-bit image index)
+        0x2D (16-bit image index, matching SwissTopo_West/Est reference)
     """
-    return 0x2B if total_tiles < 256 else 0x25
+    return 0x2D
 
 
 def _write_type_e0_record(
@@ -1150,19 +1333,19 @@ def _write_type_e0_record(
     """
     Write a single RGN Type E0 record for a raster tile.
 
-    Binary format:
+    Binary format (SwissTopo reference, bits_field=0x2D):
       - marker (1 byte): 0xE0
-      - bits_field (1 byte): 0x2B or 0x25
-      - lat_min, lon_min, lat_max, lon_max (4× uint32 LE): bounds in Garmin map units
+      - bits_field (1 byte): 0x2D
+      - image_index (uint16 LE): index into LBL28 offset array
+      - max_lat, max_lon, min_lat, min_lon (4× int32 LE): bounds in Garmin map units
       - block_size (uint32 LE): JPEG file size in bytes
-      - image_index (uint8 or uint16 LE): index into LBL28 offset array
 
     Args:
         f: File handle to write to
         lat_min, lon_min, lat_max, lon_max: Tile bounds in decimal degrees
         jpeg_size: JPEG file size in bytes
         image_index: Index into LBL28 array (0-based)
-        bits_field: 0x2B for 8-bit index, 0x25 for 16-bit index
+        bits_field: 0x2D for 16-bit index (standard SwissTopo format)
     """
     # Marker byte
     f.write(bytes([0xE0]))
@@ -1170,22 +1353,20 @@ def _write_type_e0_record(
     # bits_field
     f.write(bytes([bits_field]))
 
-    # Image index IMMEDIATELY after bits_field (per doc Section 4.5.2)
-    if bits_field == 0x2B:
-        f.write(struct.pack("<B", image_index))  # uint8
-    else:
-        f.write(struct.pack("<H", image_index))  # uint16
+    # Image index (always uint16 for 0x2D)
+    f.write(struct.pack("<H", image_index))
 
     # Coordinates in Garmin map units (32-bit signed)
-    lat_min_units = _deg_to_garmin(lat_min)
-    lon_min_units = _deg_to_garmin(lon_min)
+    # SwissTopo reference order: max_lat, max_lon, min_lat, min_lon (NE corner then SW corner)
     lat_max_units = _deg_to_garmin(lat_max)
     lon_max_units = _deg_to_garmin(lon_max)
+    lat_min_units = _deg_to_garmin(lat_min)
+    lon_min_units = _deg_to_garmin(lon_min)
 
-    f.write(struct.pack("<i", lat_min_units))  # signed int32
-    f.write(struct.pack("<i", lon_min_units))
-    f.write(struct.pack("<i", lat_max_units))
-    f.write(struct.pack("<i", lon_max_units))
+    f.write(struct.pack("<i", lat_max_units))  # signed int32 — NE latitude
+    f.write(struct.pack("<i", lon_max_units))  # NE longitude
+    f.write(struct.pack("<i", lat_min_units))  # SW latitude
+    f.write(struct.pack("<i", lon_min_units))  # SW longitude
 
     # Block size (JPEG size)
     f.write(struct.pack("<I", jpeg_size))  # unsigned int32
@@ -1247,33 +1428,118 @@ def _write_polyline_preamble(
     f: io.BufferedWriter,
     center_lat: float,
     center_lon: float,
+    tile_lat_min: float = 0.0,
+    tile_lon_min: float = 0.0,
+    tile_lat_max: float = 0.0,
+    tile_lon_max: float = 0.0,
 ) -> None:
     """Write an 18-byte polyline preamble record before each E0 tile record.
 
     This record is required for GMT and Garmin devices to properly detect
     and display raster bitmap tiles. The preamble is a type 0x06 polyline
-    record (subtype 0xB3) containing a minimal 2-point line in Garmin
-    bitstream format.
+    record (subtype 0xB3) containing a 2-point line in Garmin bitstream format
+    encoding the tile's geographic extent as coordinate deltas from the
+    subdivision center.
 
     Format: type(1) + subtype(1) + bitstream(16) = 18 bytes total.
+
+    The bitstream encodes:
+    - Byte 0: direction(1)=1 + two_addresses(1)=1 + extra_bytes_count(6 bits)=2
+      → 0xC2 (direction=1 means south-to-north, two_addresses=1 means base+delta,
+        extra_bytes_count=2 means 2 extra bytes follow for bit width)
+    - Bytes 1-2: extra bytes defining coordinate bit width (2 bytes)
+    - Remaining: coordinate deltas in Garmin bitstream format
 
     Args:
         f: File handle to write to
         center_lat: Subdivision center latitude (degrees)
         center_lon: Subdivision center longitude (degrees)
+        tile_lat_min: Tile south bound (degrees)
+        tile_lon_min: Tile west bound (degrees)
+        tile_lat_max: Tile north bound (degrees)
+        tile_lon_max: Tile east bound (degrees)
     """
-    # Type 0x06 (polyline), subtype 0xB3 (line type 51, preamble marker)
+    # Type 0x06 (polyline), subtype 0xB3
     f.write(bytes([0x06, 0xB3]))
 
-    # Garmin polyline bitstream for a 2-point line at the subdivision center.
-    # The bitstream uses the standard Garmin RGN polyline encoding:
-    # - Byte 0: direction(1) + two_addresses(1) + extra_bytes_count(6 bits)
-    # - Extra bytes: define coordinate delta bit width
-    # - Coordinate deltas: signed integers at specified bit width
-    #
-    # Using zero deltas (both points at subdivision center) for simplicity.
-    # This matches the IOM reference file's approach of using minimal offsets.
-    f.write(b"\x00" * 16)
+    # Compute coordinate deltas in Garmin map units (24-bit)
+    center_lat_mu = _deg_to_map_units(center_lat)
+    center_lon_mu = _deg_to_map_units(center_lon)
+
+    if tile_lat_min != 0.0 or tile_lon_min != 0.0:
+        # Encode actual tile extent as two points: SW corner and NE corner
+        # relative to the subdivision center
+        sw_lat_mu = _deg_to_map_units(tile_lat_min)
+        sw_lon_mu = _deg_to_map_units(tile_lon_min)
+        ne_lat_mu = _deg_to_map_units(tile_lat_max)
+        ne_lon_mu = _deg_to_map_units(tile_lon_max)
+
+        # Deltas from center (signed 24-bit values)
+        d_lat1 = sw_lat_mu - center_lat_mu
+        d_lon1 = sw_lon_mu - center_lon_mu
+        d_lat2 = ne_lat_mu - center_lat_mu
+        d_lon2 = ne_lon_mu - center_lon_mu
+
+        # Encode in Garmin polyline bitstream format
+        # First byte: direction(1) + two_addresses(1) + extra_bytes_count(6)
+        # = 1 + 1 + 2 = 0xC2
+        bitstream = bytearray(16)
+        bitstream[0] = 0xC2  # direction=1, two_addresses=1, extra_bytes=2
+
+        # Determine bit width needed for the largest delta
+        max_delta = max(abs(d_lat1), abs(d_lon1), abs(d_lat2), abs(d_lon2))
+        if max_delta == 0:
+            # Zero deltas — write minimal bitstream
+            f.write(b"\xc2" + b"\x00" * 15)
+            return
+
+        bits_needed = max_delta.bit_length() + 1  # +1 for sign bit
+        # Round up to next multiple of 2 for alignment
+        bits_needed = max(2, ((bits_needed + 1) // 2) * 2)
+
+        # Extra bytes encode bit width information
+        # Byte 1: low byte of bit width info
+        # Byte 2: high byte of bit width info
+        bitstream[1] = bits_needed & 0xFF
+        bitstream[2] = (bits_needed >> 8) & 0xFF
+
+        # Pack coordinate deltas as signed integers at bit width
+        # Garmin format: first point base, then deltas
+        # Point 1 (SW): lat_delta, lon_delta
+        # Point 2 (NE): lat_delta, lon_delta
+        bit_offset = 24  # Start after 3 header bytes
+        for delta in [d_lat1, d_lon1, d_lat2, d_lon2]:
+            _pack_signed_bits(bitstream, bit_offset, delta, bits_needed)
+            bit_offset += bits_needed
+
+        f.write(bytes(bitstream))
+    else:
+        # Fallback: all zeros (legacy behavior)
+        f.write(b"\x00" * 16)
+
+
+def _pack_signed_bits(
+    buf: bytearray, bit_offset: int, value: int, bit_width: int
+) -> None:
+    """Pack a signed integer into a byte buffer at a given bit offset.
+
+    Args:
+        buf: Target byte buffer
+        bit_offset: Starting bit position in buffer
+        value: Signed integer value to pack
+        bit_width: Number of bits to use
+    """
+    # Convert to unsigned representation for bit packing
+    if value < 0:
+        # Two's complement for negative values
+        mask = (1 << bit_width) - 1
+        value = (value + (1 << bit_width)) & mask
+
+    for i in range(bit_width):
+        byte_idx = (bit_offset + i) // 8
+        bit_idx = 7 - ((bit_offset + i) % 8)
+        if byte_idx < len(buf) and (value >> (bit_width - 1 - i)) & 1:
+            buf[byte_idx] |= 1 << bit_idx
 
 
 def _write_rgn_data_section(
@@ -1340,6 +1606,85 @@ def _write_rgn_data_section(
                 bits_field=bits_field,
             )
             image_index += 1
+
+
+def _write_rgn_data_section_subdivisions(
+    f: io.BufferedWriter,
+    subdivisions: list[Subdivision],
+    total_tiles: int,
+    img_file: IMGFile,
+) -> None:
+    """Write RGN data section grouped by subdivision.
+
+    For each subdivision, writes preamble + E0 records for all its tiles.
+    The preamble encodes tile extent relative to subdivision center.
+    """
+    bits_field = _compute_bits_field(total_tiles)
+
+    image_index = 0
+    for sub in subdivisions:
+        for tile_entry in sub.tile_entries:
+            if isinstance(tile_entry, tuple):
+                jpeg_data, tile_bounds = tile_entry
+                lat_min, lon_min, lat_max, lon_max = tile_bounds
+            else:
+                jpeg_data = tile_entry
+                lat_min = img_file.bounds_south
+                lon_min = img_file.bounds_west
+                lat_max = img_file.bounds_north
+                lon_max = img_file.bounds_east
+
+            # Write polyline preamble with tile extent relative to subdivision center
+            _write_polyline_preamble(
+                f,
+                center_lat=sub.center_lat,
+                center_lon=sub.center_lon,
+                tile_lat_min=lat_min,
+                tile_lon_min=lon_min,
+                tile_lat_max=lat_max,
+                tile_lon_max=lon_max,
+            )
+
+            # Write Type E0 record
+            _write_type_e0_record(
+                f,
+                lat_min=lat_min,
+                lon_min=lon_min,
+                lat_max=lat_max,
+                lon_max=lon_max,
+                jpeg_size=len(jpeg_data),
+                image_index=image_index,
+                bits_field=bits_field,
+            )
+            image_index += 1
+
+
+def _write_lbl28_section_subdivisions(
+    f: io.BufferedWriter, subdivisions: list[Subdivision]
+) -> None:
+    """Write LBL28 section (image index table) for subdivision-ordered tiles."""
+    offset = 0
+    for sub in subdivisions:
+        for tile_entry in sub.tile_entries:
+            f.write(struct.pack("<I", offset))
+            jpeg_data = tile_entry[0] if isinstance(tile_entry, tuple) else tile_entry
+            offset += len(jpeg_data)
+
+
+def _write_lbl29_section_subdivisions(
+    f: io.BufferedWriter, subdivisions: list[Subdivision]
+) -> None:
+    """Write LBL29 section (image storage) for subdivision-ordered tiles."""
+    for sub in subdivisions:
+        for tile_entry in sub.tile_entries:
+            tile_data = tile_entry[0] if isinstance(tile_entry, tuple) else tile_entry
+            if len(tile_data) >= 4 and tile_data[0:2] == b"\xff\xd8":
+                f.write(tile_data)
+            else:
+                logger.warning(
+                    "Tile in subdivision does not start with JPEG marker (FFD8)"
+                )
+                f.write(tile_data)
 
 
 class MPSWriter:
@@ -1712,18 +2057,24 @@ class IMGWriter:
         self.output_path = output_path
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def write(self, img_file: IMGFile, compressed_tiles: CompressedTiles) -> None:
+    def write(
+        self,
+        img_file: IMGFile,
+        compressed_tiles: CompressedTiles,
+        subdivisions: list[Subdivision] | None = None,
+    ) -> None:
         """
         Write complete IMG file using two-pass layout.
 
         Args:
             img_file: IMGFile data structure to serialize
             compressed_tiles: Dict mapping zoom level to list of (jpeg_bytes, bounds) tuples or plain bytes
+            subdivisions: Optional pre-computed subdivisions. If None, writes one per zoom level.
         """
         logger.info(f"Writing IMG file: {self.output_path}")
 
         # Pass 1: Compute layout
-        computer = LayoutComputer(img_file, compressed_tiles)
+        computer = LayoutComputer(img_file, compressed_tiles, subdivisions=subdivisions)
         layouts = computer.compute()
 
         # Update subfile headers in img_file
@@ -1752,7 +2103,9 @@ class IMGWriter:
             gmp_layout = next(
                 lay for lay in layouts if lay.subfile_type == SubfileType.GMP
             )
-            GMPWriter.write(f, img_file, compressed_tiles, gmp_layout)
+            GMPWriter.write(
+                f, img_file, compressed_tiles, gmp_layout, subdivisions=subdivisions
+            )
 
             # Write MPS subfile
             mps_layout = next(

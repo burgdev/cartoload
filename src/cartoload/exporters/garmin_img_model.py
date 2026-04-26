@@ -361,6 +361,82 @@ class LBLSectionInfo:
 
 
 @dataclass
+class Subdivision:
+    """
+    A spatial subdivision within a Garmin raster IMG file.
+
+    Each subdivision represents a geographic region at a specific zoom level.
+    Tiles are assigned to subdivisions based on their geographic position,
+    and each subdivision gets its own TRE2 record, TRE7 entry, and RGN2 data group.
+
+    The subdivision hierarchy matches the SwissTopo reference format:
+    fewer subdivisions at overview zoom levels, more at detailed levels.
+
+    TRE2 binary format:
+      Non-last zoom levels: 16 bytes
+        [rgn_offset(3)] [objects(1)] [lon(3)] [lat(3)] [width(2)] [height(2)] [nextLevel(2)]
+      Last zoom level: 14 bytes (no nextLevel field)
+        [rgn_offset(3)] [objects(1)] [lon(3)] [lat(3)] [width(2)] [height(2)]
+
+    width encodes: bit 15 = has children, bits 0-14 = encoded horizontal extent
+    height encodes: signed vertical extent (negative → has_points flag)
+    """
+
+    # Geographic center (WGS84 decimal degrees)
+    center_lat: float
+    center_lon: float
+
+    # Which zoom level this subdivision belongs to (index into zoom_levels list)
+    zoom_level_index: int
+
+    # Tile data for this subdivision: list of (jpeg_bytes, (lat_min, lon_min, lat_max, lon_max))
+    tile_entries: list = field(default_factory=list)
+
+    # RGN2 byte offset (computed during layout, not set at construction)
+    rgn2_offset: int = 0
+
+    # TRE7 flag byte (0=normal data, 1=boundary/empty)
+    tre7_flag: int = 0
+
+    # Index of first child subdivision at next zoom level
+    next_level_index: int = 0
+
+    # Geographic bounds of this subdivision (WGS84 decimal degrees)
+    bounds_west: float = 0.0
+    bounds_east: float = 0.0
+    bounds_north: float = 0.0
+    bounds_south: float = 0.0
+
+    def get_tile_count(self) -> int:
+        """Return the number of tiles in this subdivision."""
+        return len(self.tile_entries)
+
+    def encode_tre2_width(self, shift: int) -> int:
+        """Encode the horizontal extent for TRE2 width field.
+
+        Returns width with bit 15 set if this subdivision has children
+        (i.e., is not at the last zoom level — caller must set bit 15).
+        The encoded value represents (extent_in_map_units >> shift).
+        """
+        center_mu = int(self.center_lon * (2**24) / 360)
+        west_mu = int(self.bounds_west * (2**24) / 360)
+        w = 2 * (center_mu - west_mu)
+        mask = (1 << shift) - 1
+        return ((w + 1) // 2 + mask) >> shift
+
+    def encode_tre2_height(self, shift: int) -> int:
+        """Encode the vertical extent for TRE2 height field.
+
+        Returns signed height value in encoded map units.
+        """
+        center_mu = int(self.center_lat * (2**24) / 360)
+        south_mu = int(self.bounds_south * (2**24) / 360)
+        h = 2 * (center_mu - south_mu)
+        mask = (1 << shift) - 1
+        return ((h + 1) // 2 + mask) >> shift
+
+
+@dataclass
 class IMGFile:
     """
     Top-level container representing a complete Garmin .img file.

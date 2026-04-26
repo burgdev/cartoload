@@ -1,10 +1,9 @@
-#!/usr/bin/env python3
 """
-Garmin IMG Binary Analysis Tool
+Garmin IMG Binary Parser
 
 Parses GMP container headers and computes TRE/RGN/LBL section offsets
 from any GMP subfile in an IMG file. Supports FAT chain traversal
-for multi-part subfiles (needed for IOM.img).
+for multi-part subfiles.
 
 TRE header layout based on Alex Whiter's QMapShack wiki analysis:
   TRE+0x00:  sub-header (21 bytes: hdr_len(2), sig(10), ver(1), lock(1), date(7))
@@ -30,17 +29,10 @@ TRE header layout based on Alex Whiter's QMapShack wiki analysis:
   TRE+0xCA:  padding(5)
   TRE+0xCF:  matching number(4)
   TRE+0xD3:  name string (rest of header)
-
-Usage:
-    python img_analysis.py <img_file> [--subfile <name>] [--hex <section>] [--dump <section>]
-
-Sections: gmp-header, tre-header, tre-levels, tre-subdivs, tre7, tre8,
-          rgn-header, rgn-data, rgn2, rgn5, lbl-header, lbl-data, all
 """
 
-import struct
 import os
-import argparse
+import struct
 
 
 def decode_garmin_date(data):
@@ -73,6 +65,17 @@ def map_units_to_degrees(map_units):
 def map_units_to_degrees_32(map_units):
     """Convert Garmin 4-byte map units (int32) to degrees."""
     return map_units * 180.0 / (2**31)
+
+
+def format_hex_dump(data, bytes_per_line=16):
+    """Format binary data as hex dump with ASCII."""
+    lines = []
+    for i in range(0, len(data), bytes_per_line):
+        chunk = data[i : i + bytes_per_line]
+        hex_part = " ".join(f"{b:02x}" for b in chunk)
+        ascii_part = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
+        lines.append(f"{i:04x}  {hex_part:<{bytes_per_line * 3}}  {ascii_part}")
+    return "\n".join(lines)
 
 
 class IMGParser:
@@ -141,13 +144,15 @@ class IMGParser:
 
     def parse_fat(self):
         """Parse FAT entries to find all subfiles and their block chains."""
-        fat_start = self.header["fat_block"] * 512
+        fat_block = self.header["fat_block"]
+        assert isinstance(fat_block, int)
+        fat_start = fat_block * 512
         self.fat_entries = []
         self.subfiles = {}
 
-        offset = fat_start
+        fat_offset = fat_start
         while True:
-            data = self.read_at(offset, 512)
+            data = self.read_at(fat_offset, 512)
             flag = data[0]
             if flag == 0x00:
                 break
@@ -166,6 +171,7 @@ class IMGParser:
                     break
                 blocks.append(blk)
 
+            file_offset = fat_offset
             entry = {
                 "flag": flag,
                 "name": name,
@@ -174,7 +180,7 @@ class IMGParser:
                 "flag2": flag2,
                 "part": part,
                 "blocks": blocks,
-                "offset": offset,
+                "offset": file_offset,
             }
             self.fat_entries.append(entry)
 
@@ -189,7 +195,7 @@ class IMGParser:
                 }
             self.subfiles[key]["parts"].append(entry)
 
-            offset += 512
+            fat_offset += 512
 
         return self.subfiles
 
@@ -881,263 +887,3 @@ class IMGParser:
             return data[pos : pos + min(size, 200)].hex() if pos > 0 else ""
 
         return f"(Unknown section: {section})"
-
-
-def format_hex_dump(data, bytes_per_line=16):
-    """Format binary data as hex dump with ASCII."""
-    lines = []
-    for i in range(0, len(data), bytes_per_line):
-        chunk = data[i : i + bytes_per_line]
-        hex_part = " ".join(f"{b:02x}" for b in chunk)
-        ascii_part = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
-        lines.append(f"{i:04x}  {hex_part:<{bytes_per_line * 3}}  {ascii_part}")
-    return "\n".join(lines)
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Garmin IMG Binary Analysis Tool")
-    parser.add_argument("img_file", help="Path to IMG file")
-    parser.add_argument(
-        "--subfile", default=None, help='Subfile name (e.g., "00355951")'
-    )
-    parser.add_argument("--hex", default=None, help="Dump hex of section")
-    parser.add_argument(
-        "--dump", default=None, help="Full hex dump of section with ASCII"
-    )
-    parser.add_argument("--all", action="store_true", help="Dump all sections")
-    parser.add_argument("--list", action="store_true", help="List subfiles")
-    parser.add_argument(
-        "--raw-offset", type=int, default=None, help="Read raw bytes at offset"
-    )
-    parser.add_argument("--raw-size", type=int, default=64, help="Size for raw read")
-
-    args = parser.parse_args()
-
-    with IMGParser(args.img_file) as img:
-        print(f"=== IMG File: {args.img_file} ({img.filesize:,} bytes) ===\n")
-
-        img.parse_header()
-        print(
-            f"Header: magic={img.header['magic']}, block_size={img.header['block_size']}"
-        )
-        print(f"Date: {img.header['date']}")
-        print(f"Description: {img.header['description']}")
-        print()
-
-        img.parse_fat()
-        print(f"Found {len(img.subfiles)} subfiles:")
-        for key, sf in img.subfiles.items():
-            total_blocks = sum(len(p["blocks"]) for p in sf["parts"])
-            print(
-                f"  {sf['name']:12s} {sf['type']:3s}  size={sf['size']:>10,}  "
-                f"parts={len(sf['parts'])}  blocks={total_blocks}"
-            )
-        print()
-
-        if args.list:
-            return
-
-        # Select subfile
-        gmp_key = None
-        if args.subfile:
-            for key in img.subfiles:
-                if args.subfile.upper() in key.upper():
-                    gmp_key = key
-                    break
-            if not gmp_key:
-                print(f"Subfile '{args.subfile}' not found. Available:")
-                for key in img.subfiles:
-                    print(f"  {key}")
-                return
-        else:
-            # Auto-select first GMP subfile
-            for key in img.subfiles:
-                if img.subfiles[key]["type"] == "GMP":
-                    gmp_key = key
-                    break
-
-        if not gmp_key:
-            print("No GMP subfile found!")
-            return
-
-        print(f"=== Analyzing GMP subfile: {gmp_key} ===\n")
-
-        gmp = img.parse_gmp_container(gmp_key)
-        print(
-            f"GMP Container: sig={gmp['signature']}, version={gmp['version']}, date={gmp['date']}"
-        )
-        print(f"  Data size: {gmp['data_size']:,} bytes")
-        print(f"  Sections: {list(gmp['sections'].keys())}")
-        print()
-
-        if args.hex:
-            hex_str = img.dump_section_hex(gmp, args.hex)
-            print(f"=== Hex: {args.hex} ===")
-            print(hex_str)
-            return
-
-        if args.dump:
-            hex_str = img.dump_section_hex(gmp, args.dump)
-            if hex_str and not hex_str.startswith("("):
-                print(f"=== Hex dump: {args.dump} ===")
-                print(format_hex_dump(bytes.fromhex(hex_str)))
-            else:
-                print(hex_str)
-            return
-
-        # Parse all sections
-        print("--- TRE ---")
-        tre = img.parse_tre(gmp)
-        print(
-            f"Header: {tre['sub_header']['header_length']} bytes, version={tre['sub_header']['version']}"
-        )
-        print(
-            f"Bounds: N={tre['north_deg']:.6f} S={tre['south_deg']:.6f} "
-            f"W={tre['west_deg']:.6f} E={tre['east_deg']:.6f}"
-        )
-
-        if "levels" in tre:
-            print(f"\n  TRE1 Levels ({len(tre['levels'])}):")
-            for i, lvl in enumerate(tre["levels"]):
-                print(
-                    f"    [{i}] level={lvl['level_number']:3d}  zoom={lvl['zoom_code']:3d}  "
-                    f"subdivs={lvl['subdivision_count']:5d}"
-                )
-
-        if "display_priority" in tre:
-            print(f"\n  Display priority: {tre['display_priority']}")
-
-        if "map_id" in tre:
-            print(f"  Map ID: 0x{tre['map_id']:08X}")
-
-        if "matching_number" in tre:
-            print(f"  Matching number: 0x{tre['matching_number']:08X}")
-
-        if "map_name" in tre:
-            print(f"  Map name: {tre['map_name']}")
-
-        # TRE2 groups
-        if "tre2" in tre:
-            t2 = tre["tre2"]
-            print(f"\n  TRE2 Groups: pos={t2['position']}, size={t2['size']}")
-            if "groups_16byte" in tre:
-                print(f"    16-byte group records ({len(tre['groups_16byte'])}):")
-                for i, g in enumerate(tre["groups_16byte"][:20]):
-                    print(
-                        f"      [{i}] rgn_off={g['rgn_offset']:8d} obj={g['obj_types']} "
-                        f"lon={g['lon_center_deg']:.6f} lat={g['lat_center_deg']:.6f} "
-                        f"flags=0x{g['flags']:04X} subdivs={g['subdiv_count']} next={g['next_level_index']}"
-                    )
-                if len(tre["groups_16byte"]) > 20:
-                    print(f"      ... ({len(tre['groups_16byte']) - 20} more)")
-
-        if "tre7" in tre:
-            t7 = tre["tre7"]
-            print(
-                f"\n  TRE7 (raster layer): pos={t7['position']}, size={t7['size']}, "
-                f"rec_size={t7['record_size']}"
-            )
-            if "tre7_offsets" in tre:
-                print(
-                    f"    Offset table ({len(tre['tre7_offsets'])} entries): {tre['tre7_offsets'][:20]}"
-                )
-                if len(tre["tre7_offsets"]) > 20:
-                    print(f"    ... ({len(tre['tre7_offsets']) - 20} more entries)")
-
-        if "tre8" in tre:
-            t8 = tre["tre8"]
-            print(
-                f"\n  TRE8 (object types): pos={t8['position']}, size={t8['size']}, "
-                f"rec_size={t8['record_size']}"
-            )
-            if "tre8_entries" in tre:
-                for entry in tre["tre8_entries"]:
-                    print(
-                        f"    Entry: type={entry['type']} param1={entry['param1']} "
-                        f"param2={entry['param2']} raw={entry['raw']}"
-                    )
-
-        # TRE4-TRE6
-        for sec_name in ["tre4", "tre5", "tre6", "tre9", "tre10"]:
-            if sec_name in tre:
-                sec = tre[sec_name]
-                print(
-                    f"\n  {sec_name.upper()}: pos={sec['position']}, size={sec['size']}, "
-                    f"rec_size={sec['record_size']}"
-                )
-
-        print()
-        print("--- RGN ---")
-        rgn = img.parse_rgn(gmp)
-        print(f"Header: {rgn['sub_header']['header_length']} bytes")
-
-        for sec_name in ["rgn1", "rgn2", "rgn3", "rgn4", "rgn5"]:
-            if sec_name in rgn:
-                sec = rgn[sec_name]
-                print(
-                    f"  {sec_name.upper()}: pos={sec['position']}, size={sec['size']}"
-                )
-
-        if "rgn2_records" in rgn:
-            recs = rgn["rgn2_records"]
-            print(f"\n  RGN2 records ({len(recs)}):")
-            for rec in recs[:30]:
-                if rec["type"] == "E0 (raster tile)":
-                    print(
-                        f"    {rec['type']} @{rec['offset']}: "
-                        f"bounds=({rec['lat_min_deg']:.6f},{rec['lon_min_deg']:.6f})-"
-                        f"({rec['lat_max_deg']:.6f},{rec['lon_max_deg']:.6f}) "
-                        f"blk_sz={rec['block_size']} img_idx={rec['image_index']}"
-                    )
-                else:
-                    print(
-                        f"    {rec['type']} @{rec['offset']}: {rec.get('raw_hex', '')}"
-                    )
-            if len(recs) > 30:
-                print(f"    ... ({len(recs) - 30} more records)")
-
-        if "rgn5_hex" in rgn:
-            print(f"\n  RGN5 data hex: {rgn['rgn5_hex'][:200]}")
-
-        print()
-        print("--- LBL ---")
-        lbl = img.parse_lbl(gmp)
-        if lbl:
-            print(f"Header: {lbl['sub_header']['header_length']} bytes")
-            if "lbl1" in lbl:
-                print(
-                    f"  LBL1: pos={lbl['lbl1']['position']}, size={lbl['lbl1']['size']}, "
-                    f"offset_mult={lbl['lbl1']['offset_multiplier']}, encoding={lbl['lbl1']['encoding']}"
-                )
-            if "lbl28" in lbl:
-                print(
-                    f"  LBL28 (img offsets): pos={lbl['lbl28']['position']}, size={lbl['lbl28']['size']}"
-                )
-            if "lbl29" in lbl:
-                print(
-                    f"  LBL29 (img storage): pos={lbl['lbl29']['position']}, size={lbl['lbl29']['size']}"
-                )
-            if "labels" in lbl:
-                print(f"  Labels (first 10): {lbl['labels'][:10]}")
-                print(f"  Total labels: {lbl['total_labels']}")
-        else:
-            print("(No LBL section)")
-
-        if args.all:
-            print("\n=== Full GMP Container Hex Dump ===")
-            all_data = gmp["data"]
-            limit = min(len(all_data), 2048)
-            print(format_hex_dump(all_data[:limit]))
-            if len(all_data) > limit:
-                print(f"... ({len(all_data) - limit:,} more bytes)")
-
-        if args.raw_offset is not None:
-            raw = img.read_at(args.raw_offset, args.raw_size)
-            print(
-                f"\n=== Raw read at 0x{args.raw_offset:X} ({args.raw_size} bytes) ==="
-            )
-            print(format_hex_dump(raw))
-
-
-if __name__ == "__main__":
-    main()
