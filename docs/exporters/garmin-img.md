@@ -382,88 +382,76 @@ LBL29: [JPEG_0][JPEG_1][JPEG_2]...[JPEG_N-1]
 
 The RGN data in raster maps is organized into multiple sub-sections. The most important for raster maps are **RGN2** (containing raster tile records) and **RGN5** (metadata).
 
-#### 4.5.1 RGN2 — Raster Layer Descriptions
+#### 4.5.1 RGN2 — Raster Tile Compound Records
 
-RGN2 contains compound records that describe the raster tiles for each subdivision. The data is a sequence of mixed record types:
+RGN2 raster tiles are stored as **42-byte compound records**, one per tile. Each record is a single structure containing a polyline-like preamble and a raster tile descriptor. The record is NOT split into separate preamble + E0 records.
 
-**Record types within RGN2:**
-
-| Marker | Type                   | Description                                                                                                                                                 |
-| ------ | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `0x06` | Polyline-like preamble | 18-byte record before each tile: `06 xx` + 16 bytes of coordinate bitstream. All-zeros is valid (degenerate polyline with delta=0 from subdivision center). |
-| `0xE0` | Raster tile (Type E0)  | Tile bounds, JPEG size, image index (see below)                                                                                                             |
-| `0x0D` | POI-like record        | Variable-length. Used in multi-map format (IOM) only. NOT present in SwissTopo single-map raster.                                                           |
-| `0xBC` | Boundary marker        | 3 bytes: `BC 00 00`. Multi-map format only.                                                                                                                 |
-| `0xDE` | Ext boundary marker    | 3 bytes: `DE 00 00`. Multi-map format only.                                                                                                                 |
-
-**Polyline preamble type decoding (0x06 / 0xB3):**
-
-The raster polyline preamble uses type byte `0x06` and subtype byte `0xB3`. The decoded type ID is:
+**42-byte compound record layout:**
 
 ```
-type = 0x10000 | (0x06 << 8) | (0xB3 & 0x1F)
-     = 0x10000 | 0x0600 | 0x13
-     = 0x10613
+Offset | Size | Field           | Description
+-------|------|-----------------|------------------------------------------
+0      | 1    | type            | 0x06 (polyline-like type for extended objects)
+1      | 1    | subtype         | 0xB3 (raster: subtype=0x13 | has_label=0x20 | has_class=0x80)
+2      | 2    | lon_delta       | int16 LE — offset from subdivision center (in level-shifted units)
+4      | 2    | lat_delta       | int16 LE — offset from subdivision center (in level-shifted units)
+6      | 1    | bitstream_len   | VUInt32 = 0x11 (encoded as single byte: 8<<1|1)
+7      | 8    | bitstream       | 8-byte coordinate bitstream (zeros for raster)
+15     | 3    | label_ptr       | uint24 (3 fixed bytes) — conditional on subtype & 0x20
+18     | 1    | class_flags     | 0xE0 (flags>>5 = 7, triggers readRasterInfo in GPXSee)
+19     | 1    | raster_size_enc | VUInt32 = 0x2D (encoded as single byte: 22<<1|1)
+20     | 2    | image_id        | uint16 LE — index into LBL28 offset array
+22     | 4    | top             | int32 LE — north bound in 32-bit Garmin units (deg × 2^31 / 180)
+26     | 4    | right           | int32 LE — east bound in 32-bit Garmin units
+30     | 4    | bottom          | int32 LE — south bound in 32-bit Garmin units
+34     | 4    | left            | int32 LE — west bound in 32-bit Garmin units
+38     | 4    | jpeg_size       | uint32 LE — JPEG file size in bytes
+Total: 42 bytes
 ```
 
-This matches GPXSee's `isRaster()` check (`type == 0x10613`). The subtype byte 0xB3 encodes:
+**Type decoding:** `0x10000 | (0x06 << 8) | (0xB3 & 0x1F) = 0x10613`, matching GPXSee's `isRaster()` check.
+
+**Subtype byte 0xB3 encoding:**
 
 | Bit(s) | Value | Meaning                                            |
 | ------ | ----- | -------------------------------------------------- |
 | 0-4    | 0x13  | Raster subtype identifier (19 decimal)             |
-| 5      | 0x20  | Has label pointer (required for image reference)   |
+| 5      | 0x20  | Has label pointer (3-byte uint24 follows bitstream) |
 | 6      | 0x00  | Unused                                             |
 | 7      | 0x80  | Has class fields (triggers `readRasterInfo` in GPXSee) |
 
-When bit 7 is set, GPXSee calls `readClassFields()` followed by `readRasterInfo()`, which reads the variable-length image ID and the four uint32 bounds from the subsequent data. This is the chain that leads to the E0 record parsing.
+**Lon/lat delta encoding:**
 
-**Single-map raster format (SwissTopo):** RGN2 consists of consecutive `0x06` preamble + `0xE0` tile record pairs, with no outline records (`0x0D`), boundary markers (`0xBC`), or level separators (`0xDE`). Each subdivision's tiles are simply concatenated.
+The lon_delta and lat_delta fields are int16 values in **level-shifted map units**. The shift is `max(0, 24 - level_number)` where level_number comes from TRE1 byte 1. The actual offset in 24-bit map units is `delta << shift`. GPXSee reconstructs the tile's boundingRect as a single point at `subdiv_center + (delta << shift)`.
 
-**Multi-map raster format (IOM):** May include `0x0D`, `0xBC`, and `0xDE` records for boundaries between subdivisions and zoom levels.
+**Warning:** The boundingRect is a single point used by GPXSee's `copyPolys()` for tile filtering. If the quantization step (2^shift × 360 / 2^24 degrees) exceeds tile size, tiles can be incorrectly filtered out. This is why level_number must be >= 20 for detailed zoom levels (see Section 5.2).
 
-#### 4.5.2 Type E0 Raster Tile Record
+**VUInt32 encoding:** Variable-length unsigned 32-bit integer. Single-byte encoding: `(value << 1) | 1`. Examples: 0→0x01, 8→0x11, 22→0x2D.
 
-Each Type E0 record describes one raster tile's geographic bounds, JPEG size, and reference to the image data in LBL29 via LBL28 index.
-
-**Type E0 Record Format (8-bit index, bits_field=0x2B, total 23 bytes):**
-
-```
-Offset | Size | Field           | Description
--------|------|-----------------|------------------------------------------
-0      | 1    | Marker          | 0xE0 (Type E0 marker byte)
-1      | 1    | bits_field      | 0x2B
-2      | 1    | image_index     | uint8 — zero-based index into LBL28 offset array
-3      | 16   | Coordinates     | 4 × int32 LE: lat_min, lon_min, lat_max, lon_max
-19     | 4    | block_size      | uint32 LE, JPEG file size in bytes
-```
-
-**Type E0 Record Format (16-bit index, bits_field=0x25 or 0x2D, total 24 bytes):**
-
-```
-Offset | Size | Field           | Description
--------|------|-----------------|------------------------------------------
-0      | 1    | Marker          | 0xE0 (Type E0 marker byte)
-1      | 1    | bits_field      | 0x25 or 0x2D
-2      | 2    | image_index     | uint16 LE — zero-based index into LBL28 offset array
-4      | 16   | Coordinates     | 4 × int32 LE: lat_min, lon_min, lat_max, lon_max
-20     | 4    | block_size      | uint32 LE, JPEG file size in bytes
-```
-
-**Field order is critical:** `image_index` must immediately follow `bits_field`, before the coordinates. Some implementations incorrectly place it at the end of the record, which causes GMT to report zero bitmaps.
-
-**bits_field encoding:**
-
-| Value  | Index size | Use case                            |
-| ------ | ---------- | ----------------------------------- |
-| `0x2B` | 1 byte     | < 256 tiles total                   |
-| `0x25` | 2 bytes    | >= 256 tiles (SwissTopo-like maps)  |
-| `0x2D` | 2 bytes    | >= 256 tiles (alternative encoding) |
-
-**image_index:** Zero-based index into the LBL28 offset array. LBL28[image_index] points to the JPEG for this tile in LBL29.
+**Label pointer:** Fixed 3-byte uint24 value (NOT VUInt32). Read when `subtype & 0x20` is set.
 
 **Coordinate encoding:** Uses 32-bit signed Garmin map units (degrees × 2^31 / 180), distinct from the 3-byte coords used in TRE header bounds.
 
-**RGN data section size:** N × record_size, where N = total tile count and record_size = 23 or 24 bytes depending on bits_field.
+**RGN data section size:** N × 42 bytes, where N = total tile count.
+
+**GPXSee parsing flow:**
+
+```
+extPolyObjects() reads compound record:
+  1. type(1) + subtype(1) → decode to 0x10613 → isRaster = true
+  2. lon_delta(2) + lat_delta(2) → compute boundingRect point
+  3. bitstream_len(VUInt32) + bitstream(8 bytes)
+  4. label_ptr(uint24, if subtype & 0x20)
+  5. class_flags(1) → readClassFields() → readRasterInfo()
+  6. raster_size_enc(VUInt32) + image_id(2) + bounds(16) + jpeg_size(4)
+
+copyPolys() filters: rect.intersects(boundingRect)
+  → boundingRect is single point at subdiv_center + delta<<shift
+  → tiles with boundingRect outside view rect are excluded
+
+drawPolygons() renders: uses poly.raster.rect()
+  → absolute 32-bit bounds from readRasterInfo
+```
 
 #### 4.5.3 RGN5 — Metadata Section
 
@@ -537,10 +525,21 @@ Per subdivision:
     → read type byte (0x06) + subtype (0xB3)
     → decode: type = 0x10000 | (0x06 << 8) | (0xB3 & 0x1F) = 0x10613
     → isRaster(0x10613) = true
+    → compute boundingRect: single point at subdiv_center + (delta << shift)
     → readClassFields() + readRasterInfo()
     → read image_id (variable size from LBL) + bounds (4×uint32)
-    → locate E0 record → fetch JPEG from LBL29 via LBL28 index
+    → fetch JPEG from LBL29 via LBL28 index
 ```
+
+**BoundingRect filtering (critical for tile display):**
+
+GPXSee uses a two-stage filtering process for raster tiles:
+1. **R-tree query:** Find subdivisions whose bounds (from TRE2 width/height) overlap the view rect
+2. **copyPolys() filter:** Check if each tile's boundingRect intersects the view rect
+
+The boundingRect is a **single-point rectangle** computed from `subdiv_center + (lon_delta << shift), subdiv_center + (lat_delta << shift)`. The absolute 32-bit tile bounds (from readRasterInfo) are used only for rendering, NOT for filtering.
+
+If the boundingRect point (quantized by the shift) falls outside the view, the tile is excluded even though the actual raster image would be visible. This is why level_number must be high enough for the quantization step to be smaller than tile size.
 
 **Implication for the writer:** The RGN2 data must be laid out so that each subdivision's records occupy a contiguous byte range, and the TRE7 offsets must correctly delimit these ranges. If TRE7 offsets are wrong or overlapping, the device will parse garbage data and fail to display tiles.
 
@@ -559,7 +558,7 @@ Offset from GMP start  | Section            | Size
 +125                   | LBL sub-header     | 596 bytes (includes LBL28/LBL29 descriptors)
 +596                   | NET sub-header     | 100 bytes
 +100                   | TRE data sections  | 6B copyright + subdiv + map_levels
-+tre_data              | RGN data section   | N × (23 or 24) bytes (Type E0 records)
++tre_data              | RGN data section   | N × 42 bytes (compound raster records)
 +rgn_data              | LBL labels         | N × ~6 bytes (tile filenames "0.jpg\0"...)
 +lbl_labels            | LBL28 section      | N × 4 bytes (image index offsets)
 +lbl28                 | LBL29 section      | Sum of JPEG sizes (image storage)
@@ -637,56 +636,107 @@ The TRE sub-header in raster maps uses an extended 273-byte format, significantl
 TRE1 contains the zoom level definitions as an array of 4-byte records:
 
 ```
-byte 0:   level_number
-byte 1:   zoom_code
+byte 0:   zoom_code — determines at which map scale this level is active
+byte 1:   level_number (bits) — coordinate precision (shift = 24 - level_number)
 bytes 2-3: number_of_subdivisions (uint16 LE)
 ```
 
-**Observed values from reference files:**
+**Critical:** Byte 0 is zoom_code, byte 1 is level_number. This is the OPPOSITE of what some documentation claims. Confirmed via SwissTopo reference binary and GPXSee source (`trefile.cpp:107-111`):
 
-| File               | Levels                                               | Zoom Codes                     | Subdivisions     |
-| ------------------ | ---------------------------------------------------- | ------------------------------ | ---------------- |
-| IOM subfile 355951 | 0x87(=135), 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0x00 | 17, 18, 19, 20, 21, 22, 23, 24 | 1 each (8 total) |
-| SwissTopo_West     | 0x84, 0x83, 0x02, 0x01, 0x00                         | 20, 21, 22, 23, 24             | 1 each (5 total) |
+```cpp
+_levels[i].level = *zoom;       // byte0 = zoom_code
+_levels[i].bits = *(zoom + 1);  // byte1 = level_number
+```
 
-**Zoom code interpretation:**
+**Level number (bits) and coordinate precision:**
+
+The `level_number` field determines coordinate precision for subdivision width/height and RGN2 delta encoding. The shift value is `max(0, 24 - level_number)`. Higher level_number = less shift = better precision.
+
+**Important:** For raster maps, the `level_number` must be high enough that the quantization step (2^shift × 360 / 2^24 degrees) is smaller than the tile size. Otherwise, GPXSee's `copyPolys()` boundingRect filtering will drop tiles because the single-point boundingRect (derived from delta << shift) can land outside the view rect.
+
+**Level number remapping:** The writer remaps level_numbers from the actual zoom levels to the range `24 - N + 1 .. 24` (where N = number of zoom levels), ensuring the most detailed level has level_number=24 (shift=0, no quantization error). This matches the SwissTopo pattern: 5 levels → level_numbers 20-24.
+
+Example with 12 zoom levels (zooms 6-17):
+- Config zoom levels: 6, 7, 8, ..., 17
+- Remapped level_numbers: 13, 14, 15, ..., 24
+- Shift values: 11, 10, 9, ..., 0
+
+**Zoom code computation:**
 
 - Zoom code 0 = most detailed (highest zoom level)
 - Higher zoom codes = less detailed (overview levels)
-- The level_number values (0x84, 0x87, etc.) may encode additional flags in their upper bits
+- First two levels get `0x80 + (N-1-i)` (inherited/overview flag in bit 7)
+- Remaining levels count down from `N-3` to `0`
 
-**Comparison with vector format:** Vector maps use a different 4-byte record format where byte 0 contains zoom/inherited flags (bits 0-3: zoom level, bit 7: inherited), byte 1 is bits_per_coord, and bytes 2-3 are subdivision count. Raster maps repurpose these fields.
+**Observed values from reference files:**
+
+| File               | Zoom Codes (byte 0)          | Level Numbers (byte 1) | Subdivisions     |
+| ------------------ | ---------------------------- | ---------------------- | ---------------- |
+| SwissTopo_West     | 0x84, 0x83, 0x02, 0x01, 0x00 | 20, 21, 22, 23, 24   | 1 each (5 total) |
+| IOM subfile 355951 | 0x87, 0x86, 0x05, ..., 0x00  | 17, 18, 19, ..., 24  | 1 each (8 total) |
+
+SwissTopo decoded level 0: code=0x84 (inherited, bit 7 set + value 4), bits=20. GPXSee skips inherited levels for data rendering.
 
 ### 5.3 TRE2 — Group/Subdivision Section
 
-TRE2 contains level group records that define the spatial subdivision hierarchy. In raster maps, these are **16-byte records** (not the 14-byte vector format).
+TRE2 contains subdivision records that define the spatial index for map data. The record size depends on the zoom level: **16 bytes for non-last levels** and **14 bytes for the last (most detailed) level**. After all subdivision records, there are **4 trailing bytes** containing the total RGN2 data extent as uint32 LE.
 
-**16-byte raster group record format:**
+**16-byte record (non-last zoom levels):**
 
 | Offset | Size | Field             | Description                                            |
 | ------ | ---- | ----------------- | ------------------------------------------------------ |
-| 0      | 3    | RGN offset        | 3-byte LE offset into RGN2 data for this group         |
+| 0      | 3    | RGN offset        | 3-byte LE offset into RGN2 data for this subdivision   |
 | 3      | 1    | Object types      | Flags indicating contained object types                |
 | 4      | 3    | Longitude center  | 3-byte signed LE, map units (degrees × 2^24 / 360)     |
 | 7      | 3    | Latitude center   | 3-byte signed LE, map units (degrees × 2^24 / 360)     |
-| 10     | 2    | Flags             | uint16 LE                                              |
-| 12     | 2    | Subdivision count | uint16 LE, number of child subdivisions                |
+| 10     | 2    | Width             | uint16 LE, bit 15 = has_children flag                  |
+| 12     | 2    | Height            | uint16 LE                                              |
 | 14     | 2    | Next level index  | uint16 LE, 1-based index into next zoom level's groups |
 
-**Example from IOM subfile 00355951:**
+**14-byte record (last zoom level — no next_level field):**
+
+| Offset | Size | Field             | Description                                            |
+| ------ | ---- | ----------------- | ------------------------------------------------------ |
+| 0      | 3    | RGN offset        | 3-byte LE offset into RGN2 data                        |
+| 3      | 1    | Object types      | Flags indicating contained object types                |
+| 4      | 3    | Longitude center  | 3-byte signed LE, map units                            |
+| 7      | 3    | Latitude center   | 3-byte signed LE, map units                            |
+| 10     | 2    | Width             | uint16 LE, no has_children bit                         |
+| 12     | 2    | Height            | uint16 LE                                              |
+
+**Trailing bytes:** 4 bytes (uint32 LE) containing total RGN2 data size. This is the sentinel value used by GPXSee to determine the end of the last subdivision's RGN2 segment.
+
+**Width/height encoding:**
+
+Width and height are encoded with a precision-reducing shift. The shift is `max(0, 24 - level_number)` where level_number comes from TRE1 byte 1 for this zoom level. The encoding formula:
 
 ```
-Group 0: rgn_off=46, obj=0x00, lon=-4.50°, lat=54.22°, subdivs=1, next=0
+shift = max(0, 24 - level_number)
+mask = (1 << shift) - 1
+
+width  = ((2 * (center_mu - west_mu) + 1) // 2 + mask) >> shift
+height = ((2 * (center_mu - south_mu) + 1) // 2 + mask) >> shift
+
+For non-last levels: width |= 0x8000  (bit 15 = has_children)
 ```
+
+Where `center_mu`, `west_mu`, `south_mu` are the subdivision bounds in 24-bit map units (degrees × 2^24 / 360). The `+1 // 2` rounding ensures the encoded value rounds up to cover the full subdivision area.
+
+**Decoding (in GPXSee):** The subdivision bounds are reconstructed from center + encoded width/height:
+- West = center_lon - (width << shift)
+- South = center_lat - (height << shift)
+
+**TRE2 section size:** Sum of all record sizes (16 × non-last subdivs + 14 × last-level subdivs + 4 trailing bytes).
 
 **Example from SwissTopo_West:**
 
 ```
-Group 0: rgn_off=0, obj=0x00, lon=7.47°, lat=46.83°, subdivs=560, next=0
-(560 groups covering Switzerland, ~45.8°N to ~47.6°N, ~5.9°E to ~8.4°E)
+Level 0 (overview): 1 subdiv, w=1, h=1, shift=4 → ~0.09° × 0.07° actual size
+Level 4 (detail): 300 subdivs, larger w/h values, shift=0 → precise bounds
+Total: 560 subdivisions across 5 levels
 ```
 
-**Note:** The 3-byte coordinate encoding in TRE2 uses the older map units format (degrees × 2^24 / 360), distinct from the 4-byte signed int32 coordinates (degrees × 2^31 / 180) used in Type E0 records within RGN2.
+**Note:** The 3-byte coordinate encoding in TRE2 uses the older map units format (degrees × 2^24 / 360), distinct from the 4-byte signed int32 coordinates (degrees × 2^31 / 180) used in RGN2 compound records.
 
 ### 5.4 TRE7 — Raster Layer Section
 
@@ -817,12 +867,18 @@ Actual area size = (width*2 + 1) × (height*2 + 1) map units around center.
 
 ### 6.3 Raster Subdivision Format (our implementation)
 
-**Raster maps use a different subdivision format** than vector maps. This was confirmed by analyzing SwissTopo reference files:
+**Raster maps use the same TRE2 subdivision record structure** as vector maps (16-byte for non-last levels, 14-byte for last level), but with different object type flags and a focus on raster tile assignment rather than vector elements.
 
-- The first subdivision in SwissTopo_West has `obj_types=0x0F` (bits 0-3 set), not the vector format's 0x10/0x20/0x40/0x80 bit flags.
-- This indicates raster-specific subdivision records that reference bitmap tiles rather than vector elements.
+Our implementation generates spatial subdivisions using a geographic grid:
 
-Our current implementation writes simplified subdivision records (8 bytes per zoom level, zero-filled). This passes GMT validation but may need refinement for actual Garmin device rendering.
+1. **Grid computation:** For each zoom level, `grid_side = max(2, int(n_tiles**0.25))` determines the grid dimensions
+2. **Tile assignment:** Each tile is assigned to a grid cell based on its center position
+3. **Subdivision bounds:** Set to the grid cell bounds (not individual tile bounds)
+4. **Empty cells:** Skipped (no subdivision created)
+5. **Width/height encoding:** Uses shift = `max(0, 24 - level_number)` with `((2*(center - bound) + 1)//2 + mask) >> shift`
+6. **has_children flag:** Bit 15 of width field set for all non-last levels
+
+The level_number values are remapped to `24-N+1..24` to ensure coordinate precision exceeds tile size (see Section 5.2).
 
 ### 6.4 Vector RGN Data Segment Layout (NOT used by raster)
 
@@ -1030,7 +1086,9 @@ Based on analysis of both reference files, there are two distinct raster IMG for
 | `src/cartoload/exporters/garmin_img_model.py`  | Data model (dataclasses for IMG structure)        |
 | `src/cartoload/exporters/garmin_img_writer.py` | Binary writer (header, FAT, GMP container, tiles) |
 | `src/cartoload/exporters/garmin_img.py`        | Exporter class (pipeline integration)             |
-| `tests/test_exporter_garmin_img.py`            | Test suite (63 tests, all passing)                |
+| `tests/test_exporter_garmin_img.py`            | Test suite (96 tests, all passing)                |
+| `src/cartoload/analysis/img_parser.py`        | IMG binary parser (FAT, GMP, TRE, RGN, LBL)      |
+| `src/cartoload/analysis/img_export.py`         | GeoTIFF export tool for visual validation          |
 
 ### Key Writer Classes
 
@@ -1308,4 +1366,4 @@ Official Garmin maps (like SwissTopo Pro) combine raster and vector data in a si
 - mkgmap source code (`/home/tobias/git/tmp/mkgmap-r4924`) — Java reference implementation for IMG writing (vector-focused but core format logic applies)
 - **Device tested:** Garmin Fenix 6 (confirmed working with reference files)
 
-**Last updated:** 2026-04-26
+**Last updated:** 2026-04-29

@@ -351,14 +351,24 @@ class LayoutComputer:
 
         # LBL29 section (image storage - JPEG tile data)
         lbl29_size = 0
-        for tiles in self.compressed_tiles.values():
-            for tile_entry in tiles:
-                jpeg_size = (
-                    len(tile_entry[0])
-                    if isinstance(tile_entry, tuple)
-                    else len(tile_entry)
-                )
-                lbl29_size += jpeg_size
+        if self.subdivisions:
+            # When using subdivisions, tiles are stored in subdivision objects
+            for sub in self.subdivisions:
+                for tile_entry in sub.tile_entries:
+                    jpeg_data = (
+                        tile_entry[0] if isinstance(tile_entry, tuple) else tile_entry
+                    )
+                    lbl29_size += len(jpeg_data)
+        else:
+            # Legacy: tiles are in compressed_tiles dict
+            for tiles in self.compressed_tiles.values():
+                for tile_entry in tiles:
+                    jpeg_size = (
+                        len(tile_entry[0])
+                        if isinstance(tile_entry, tuple)
+                        else len(tile_entry)
+                    )
+                    lbl29_size += jpeg_size
 
         size = (
             GMP_CONTAINER_HEADER_SIZE
@@ -784,14 +794,24 @@ class GMPWriter:
         # --- LBL29 section (image storage) ---
         lbl29_pos = pos  # GMP-relative
         lbl29_size = 0
-        for zoom in img_file.zoom_levels:
-            tiles = compressed_tiles.get(zoom.level_number, [])
-            for tile_entry in tiles:
-                lbl29_size += (
-                    len(tile_entry[0])
-                    if isinstance(tile_entry, tuple)
-                    else len(tile_entry)
-                )
+        if use_subdivisions:
+            # When using subdivisions, tiles are stored in subdivision objects
+            for sub in subdivisions:
+                for tile_entry in sub.tile_entries:
+                    jpeg_data = (
+                        tile_entry[0] if isinstance(tile_entry, tuple) else tile_entry
+                    )
+                    lbl29_size += len(jpeg_data)
+        else:
+            # Legacy: tiles are in compressed_tiles dict
+            for zoom in img_file.zoom_levels:
+                tiles = compressed_tiles.get(zoom.level_number, [])
+                for tile_entry in tiles:
+                    lbl29_size += (
+                        len(tile_entry[0])
+                        if isinstance(tile_entry, tuple)
+                        else len(tile_entry)
+                    )
         pos += lbl29_size
 
         # --- Fill TRE1 map levels data ---
@@ -1292,17 +1312,16 @@ def _build_lbl_subheader(
     struct.pack_into("<H", buf, 0xAA, 1252)
 
     # Raster table descriptor (LBL28 equivalent) at offset 0x184
-    # GPXSee/GMT reads: offset(4) + size(4) + recordSize(2) + flags(4)
-    # Layout verified from IOM reference LBL header at 0x184-0x191
+    # GPXSee reads at _gmpOffset + 0x184 (when hdrLen >= 0x19A):
+    #   offset(4) + size(4) + recordSize(2) + flags(4) + img_offset(4) + img_size(4)
     struct.pack_into("<I", buf, 0x184, lbl28_pos)
     struct.pack_into("<I", buf, 0x188, lbl28_size)
     struct.pack_into("<H", buf, 0x18C, 4)  # record size: uint32 offsets
 
-    # Flags (4 bytes at 0x18E) — 0 for raster maps (matches IOM reference)
+    # Flags (4 bytes at 0x18E) — 0 for raster maps
     # Already zero
 
     # Raster image data descriptor (LBL29 equivalent) at offset 0x192
-    # offset(4) + size(4)
     struct.pack_into("<I", buf, 0x192, lbl29_pos)
     struct.pack_into("<I", buf, 0x196, lbl29_size)
 
@@ -1339,6 +1358,7 @@ def _write_rgn2_raster_record(
     tile_center_lon: float,
     jpeg_size: int,
     image_index: int,
+    level_number: int,
 ) -> None:
     """Write a single 42-byte RGN2 compound raster record.
 
@@ -1389,18 +1409,22 @@ def _write_rgn2_raster_record(
         tile_center_lon: Tile center longitude (degrees)
         jpeg_size: JPEG file size in bytes
         image_index: Index into LBL28 array (0-based)
+        level_number: The TRE1 level_number (bits) for this tile's zoom level.
     """
     # Type 0x06 + subtype 0xB3
     f.write(bytes([0x06, 0xB3]))
 
-    # Lon/lat deltas from subdivision center (int16 LE, in 24-bit map units)
+    # Lon/lat deltas from subdivision center (int16 LE, in level-space)
+    # GPXSee computes: pos = subdiv_center_24bit + (delta_int16 << (24 - bits))
+    # So delta must be in level-space: delta_24bit >> (24 - level_number)
     center_lat_mu = _deg_to_map_units(subdiv_center_lat)
     center_lon_mu = _deg_to_map_units(subdiv_center_lon)
     tile_center_lat_mu = _deg_to_map_units(tile_center_lat)
     tile_center_lon_mu = _deg_to_map_units(tile_center_lon)
 
-    lon_delta = tile_center_lon_mu - center_lon_mu
-    lat_delta = tile_center_lat_mu - center_lat_mu
+    shift = max(0, 24 - level_number)
+    lon_delta = (tile_center_lon_mu - center_lon_mu) >> shift
+    lat_delta = (tile_center_lat_mu - center_lat_mu) >> shift
 
     # Clamp to int16 range
     lon_delta = max(-32768, min(32767, lon_delta))
@@ -1546,6 +1570,7 @@ def _write_rgn_data_section(
                 tile_center_lon=tile_center_lon,
                 jpeg_size=len(jpeg_data),
                 image_index=image_index,
+                level_number=zoom.level_number,
             )
             image_index += 1
 
@@ -1563,6 +1588,7 @@ def _write_rgn_data_section_subdivisions(
     """
     image_index = 0
     for sub in subdivisions:
+        level_number = img_file.zoom_levels[sub.zoom_level_index].level_number
         for tile_entry in sub.tile_entries:
             if isinstance(tile_entry, tuple):
                 jpeg_data, tile_bounds = tile_entry
@@ -1589,6 +1615,7 @@ def _write_rgn_data_section_subdivisions(
                 tile_center_lon=tile_center_lon,
                 jpeg_size=len(jpeg_data),
                 image_index=image_index,
+                level_number=level_number,
             )
             image_index += 1
 

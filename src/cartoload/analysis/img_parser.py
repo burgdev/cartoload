@@ -337,8 +337,8 @@ class IMGParser:
                 if i + 4 <= len(levels_data):
                     levels.append(
                         {
-                            "level_number": levels_data[i],
-                            "zoom_code": levels_data[i + 1],
+                            "zoom_code": levels_data[i],
+                            "level_number": levels_data[i + 1],
                             "subdivision_count": struct.unpack_from(
                                 "<H", levels_data, i + 2
                             )[0],
@@ -355,7 +355,55 @@ class IMGParser:
 
             result["subdivs_hex"] = subdivs_data.hex()
 
-            # Try parsing as 16-byte group records (raster format)
+            # Parse subdivisions using level information for correct record sizes.
+            # Non-last zoom levels: 16-byte records (with nextLevel field)
+            # Last zoom level: 14-byte records (no nextLevel field)
+            # + 4 trailing bytes for total RGN2 data extent
+            parsed_levels = result.get("levels", [])
+            subdivisions = []
+            offset = 0
+            for li, level in enumerate(parsed_levels):
+                is_last = li == len(parsed_levels) - 1
+                rec_size = 14 if is_last else 16
+                for si in range(level["subdivision_count"]):
+                    if offset + rec_size > len(subdivs_data):
+                        break
+                    rec = subdivs_data[offset : offset + rec_size]
+                    rgn_off = rec[0] | (rec[1] << 8) | (rec[2] << 16)
+                    obj_types = rec[3]
+                    lon = decode_3byte_signed(rec, 4)
+                    lat = decode_3byte_signed(rec, 7)
+                    entry = {
+                        "level_index": li,
+                        "subdiv_index": si,
+                        "zoom_code": level["zoom_code"],
+                        "level_number": level["level_number"],
+                        "rgn_offset": rgn_off,
+                        "obj_types": f"0x{obj_types:02X}",
+                        "lon_center": lon,
+                        "lat_center": lat,
+                        "lon_center_deg": map_units_to_degrees(lon),
+                        "lat_center_deg": map_units_to_degrees(lat),
+                        "raw_hex": rec.hex(),
+                    }
+                    if is_last:
+                        width = struct.unpack_from("<H", rec, 10)[0]
+                        height = struct.unpack_from("<H", rec, 12)[0]
+                        entry["width"] = width
+                        entry["height"] = height
+                    else:
+                        flags = struct.unpack_from("<H", rec, 10)[0]
+                        subdiv_count = struct.unpack_from("<H", rec, 12)[0]
+                        next_level = struct.unpack_from("<H", rec, 14)[0]
+                        entry["flags"] = flags
+                        entry["subdiv_count"] = subdiv_count
+                        entry["next_level_index"] = next_level
+                    subdivisions.append(entry)
+                    offset += rec_size
+
+            result["subdivisions"] = subdivisions
+
+            # Keep legacy 16-byte and 14-byte parsing for backward compatibility
             groups = []
             for i in range(0, len(subdivs_data), 16):
                 if i + 16 <= len(subdivs_data):
@@ -383,7 +431,6 @@ class IMGParser:
                     )
             result["groups_16byte"] = groups
 
-            # Also try 14-byte vector subdivision records
             vec_groups = []
             for i in range(0, len(subdivs_data) - 14, 14):
                 if i + 14 <= len(subdivs_data):
@@ -576,170 +623,179 @@ class IMGParser:
 
         return result
 
-    def _parse_rgn2_records(self, data):
-        """Parse RGN2 subdivision records (raster layer descriptions).
+    @staticmethod
+    def _read_vuint32(data, pos):
+        """Read a variable-length unsigned int (GPXSee encoding).
 
-        These contain a mix of record types:
-        - 0D xx: POI-like record (xx = length indicator)
-        - 06 xx: polyline-like record
-        - BC 00 00: boundary marker
-        - DE 00 00: extended boundary marker
-        - E0 xx yy: raster tile (Type E0) with bits_field and image index
-          followed by 4 x int32 coordinates and uint32 block_size
+        Returns (value, bytes_consumed).
+        Encoding based on low bits of first byte:
+          bit0=1 → 1 byte: val = byte >> 1
+          bit0=0, bit1=1 → 2 bytes: val = (b0>>2) | (b1 << 6)
+          bit0=0, bit1=0, bit2=1 → 3 bytes: val = (b0>>3) | (b1<<5) | (b2<<13)
+          bit0=0, bit1=0, bit2=0 → 4 bytes: val = (b0>>4) | (b1<<4) | (b2<<12) | (b3<<20)
+        """
+        if pos >= len(data):
+            return 0, 0
+        b = data[pos]
+        if b & 1:
+            return b >> 1, 1
+        if b & 2:
+            if pos + 1 >= len(data):
+                return 0, 0
+            val = (b >> 2) | (data[pos + 1] << 6)
+            return val, 2
+        if b & 4:
+            if pos + 2 >= len(data):
+                return 0, 0
+            val = (b >> 3) | (data[pos + 1] << 5) | (data[pos + 2] << 13)
+            return val, 3
+        if pos + 3 >= len(data):
+            return 0, 0
+        val = (
+            (b >> 4)
+            | (data[pos + 1] << 4)
+            | (data[pos + 2] << 12)
+            | (data[pos + 3] << 20)
+        )
+        return val, 4
+
+    def _parse_rgn2_records(self, data):
+        """Parse RGN2 compound records following GPXSee extPolyObjects flow.
+
+        Each compound record has:
+          type(1) + subtype(1) + lon_delta(2) + lat_delta(2)
+          + VUInt32(bitstream_len) + bitstream(len)
+          + VUInt32(label_ptr)
+          + class_flags(1)
+          + [if class_flags>>5==7: VUInt32(remaining_size) + raster_info]
+
+        Raster info contains: imgId(variable) + top(4) + right(4) + bottom(4) + left(4)
+        Remaining after bounds: jpeg_size(4)
         """
         records = []
         pos = 0
 
         while pos < len(data):
-            marker = data[pos]
+            rec_start = pos
+            if pos + 7 > len(data):
+                records.append(
+                    {"type": "truncated", "offset": pos, "raw_hex": data[pos:].hex()}
+                )
+                break
 
-            if marker == 0x0D:
-                # POI-like: 0D + length_byte + data
-                if pos + 8 <= len(data):
-                    length = data[pos + 1]
-                    rec_end = min(pos + 2 + length, len(data))
-                    records.append(
-                        {
-                            "type": "0D (POI-like)",
-                            "offset": pos,
-                            "raw_hex": data[pos:rec_end].hex(),
-                        }
-                    )
-                    pos = rec_end
-                else:
-                    records.append(
-                        {
-                            "type": "0D (truncated)",
-                            "offset": pos,
-                            "raw_hex": data[pos:].hex(),
-                        }
-                    )
-                    break
+            type_byte = data[pos]
+            subtype = data[pos + 1]
+            lon_delta = struct.unpack_from("<h", data, pos + 2)[0]
+            lat_delta = struct.unpack_from("<h", data, pos + 4)[0]
+            pos += 6
 
-            elif marker == 0x06:
-                # Polyline-like: 06 + type_byte + delta coordinates
-                if pos + 8 <= len(data):
-                    sub_type = data[pos + 1]
-                    # Fixed 8-byte record based on QMapShack analysis
-                    records.append(
-                        {
-                            "type": "06 (polyline-like)",
-                            "offset": pos,
-                            "sub_type": f"0x{sub_type:02X}",
-                            "raw_hex": data[pos : pos + 8].hex(),
-                        }
-                    )
-                    pos += 8
-                else:
-                    records.append(
-                        {
-                            "type": "06 (truncated)",
-                            "offset": pos,
-                            "raw_hex": data[pos:].hex(),
-                        }
-                    )
-                    break
+            # VUInt32: bitstream length
+            bs_len, bs_vuint_sz = self._read_vuint32(data, pos)
+            pos += bs_vuint_sz
 
-            elif marker == 0xBC:
-                # Boundary marker: BC 00 00
-                rec_end = min(pos + 3, len(data))
+            # Skip bitstream
+            pos += bs_len
+
+            # Label pointer: uint24 (3 bytes) if subtype & 0x20, else absent
+            if subtype & 0x20:
+                pos += 3  # readUInt24 — fixed 3 bytes
+
+            # Class flags
+            if pos >= len(data):
                 records.append(
                     {
-                        "type": "BC (boundary)",
-                        "offset": pos,
-                        "raw_hex": data[pos:rec_end].hex(),
+                        "type": f"0x{type_byte:02X} (truncated at class_flags)",
+                        "offset": rec_start,
+                        "raw_hex": data[rec_start:].hex(),
                     }
                 )
-                pos = rec_end
+                break
+            class_flags = data[pos]
+            pos += 1
 
-            elif marker == 0xDE:
-                # Extended boundary: DE 00 00
-                rec_end = min(pos + 3, len(data))
-                records.append(
-                    {
-                        "type": "DE (ext boundary)",
-                        "offset": pos,
-                        "raw_hex": data[pos:rec_end].hex(),
-                    }
-                )
-                pos = rec_end
+            # Check for raster info (class_flags >> 5 == 7)
+            is_raster = (class_flags >> 5) == 7
 
-            elif marker == 0xE0:
-                # Type E0 raster tile record
-                if pos + 3 <= len(data):
-                    bits_field = data[pos + 1]
+            if is_raster and pos + 21 <= len(data):
+                # VUInt32: remaining size
+                rs_val, rs_vuint_sz = self._read_vuint32(data, pos)
+                pos += rs_vuint_sz
 
-                    # Determine index size from bits_field:
-                    # 0x2B = 1-byte image index (few images, e.g. IOM)
-                    # 0x25 = 2-byte image index (many images, e.g. Lake District)
-                    # 0x2D = 2-byte image index (SwissTopo variant)
-                    if bits_field in (0x2B,):
-                        idx_size = 1
-                    elif bits_field in (0x25, 0x2D):
-                        idx_size = 2
-                    else:
-                        # Unknown - assume 2-byte as fallback for large maps
-                        idx_size = 2
+                # Remaining = imgId(variable) + top(4) + right(4) + bottom(4) + left(4) + jpeg_size(4)
+                # rs_val = imgId_size + 16 + 4
+                img_id_size = rs_val - 20
 
-                    rec_len = (
-                        2 + idx_size + 16 + 4
-                    )  # E0(1)+bits(1) + idx + coords(16) + blksize(4)
-                    if pos + rec_len <= len(data):
-                        if idx_size == 1:
-                            img_idx = data[pos + 2]
-                        else:
-                            img_idx = struct.unpack_from("<H", data, pos + 2)[0]
-
-                        coord_off = pos + 2 + idx_size
-                        lat_min = struct.unpack_from("<i", data, coord_off)[0]
-                        lon_min = struct.unpack_from("<i", data, coord_off + 4)[0]
-                        lat_max = struct.unpack_from("<i", data, coord_off + 8)[0]
-                        lon_max = struct.unpack_from("<i", data, coord_off + 12)[0]
-                        block_size = struct.unpack_from("<I", data, coord_off + 16)[0]
-
-                        records.append(
-                            {
-                                "type": "E0 (raster tile)",
-                                "offset": pos,
-                                "bits_field": f"0x{bits_field:02X}",
-                                "lat_min_deg": map_units_to_degrees_32(lat_min),
-                                "lon_min_deg": map_units_to_degrees_32(lon_min),
-                                "lat_max_deg": map_units_to_degrees_32(lat_max),
-                                "lon_max_deg": map_units_to_degrees_32(lon_max),
-                                "block_size": block_size,
-                                "image_index": img_idx,
-                                "raw_hex": data[pos : pos + rec_len].hex(),
-                            }
-                        )
-                        pos += rec_len
-                    else:
-                        records.append(
-                            {
-                                "type": "E0 (truncated)",
-                                "offset": pos,
-                                "raw_hex": data[pos:].hex(),
-                            }
-                        )
-                        break
-                else:
+                if img_id_size < 1 or pos + rs_val > len(data):
                     records.append(
                         {
-                            "type": "E0 (truncated)",
-                            "offset": pos,
-                            "raw_hex": data[pos:].hex(),
+                            "type": f"0x{type_byte:02X} (raster, invalid rs={rs_val})",
+                            "offset": rec_start,
+                            "raw_hex": data[rec_start:].hex(),
                         }
                     )
                     break
+
+                # Read imgId
+                if img_id_size == 1:
+                    img_idx = data[pos]
+                elif img_id_size == 2:
+                    img_idx = struct.unpack_from("<H", data, pos)[0]
+                else:
+                    img_idx = int.from_bytes(data[pos : pos + img_id_size], "little")
+                pos += img_id_size
+
+                # Read bounds
+                top = struct.unpack_from("<I", data, pos)[0]
+                right = struct.unpack_from("<I", data, pos + 4)[0]
+                bottom = struct.unpack_from("<I", data, pos + 8)[0]
+                left = struct.unpack_from("<I", data, pos + 12)[0]
+                pos += 16
+
+                # Read jpeg_size
+                jpeg_size = struct.unpack_from("<I", data, pos)[0]
+                pos += 4
+
+                rec_end = pos
+                records.append(
+                    {
+                        "type": "raster tile",
+                        "offset": rec_start,
+                        "type_byte": f"0x{type_byte:02X}",
+                        "subtype": f"0x{subtype:02X}",
+                        "lon_delta": lon_delta,
+                        "lat_delta": lat_delta,
+                        "class_flags": f"0x{class_flags:02X}",
+                        "image_index": img_idx,
+                        "top_deg": map_units_to_degrees_32(top),
+                        "right_deg": map_units_to_degrees_32(right),
+                        "bottom_deg": map_units_to_degrees_32(bottom),
+                        "left_deg": map_units_to_degrees_32(left),
+                        "jpeg_size": jpeg_size,
+                        "lat_min_deg": map_units_to_degrees_32(bottom),
+                        "lon_min_deg": map_units_to_degrees_32(left),
+                        "lat_max_deg": map_units_to_degrees_32(top),
+                        "lon_max_deg": map_units_to_degrees_32(right),
+                        "block_size": jpeg_size,
+                        "image_index_compat": img_idx,
+                        "raw_hex": data[rec_start:rec_end].hex(),
+                    }
+                )
             else:
-                # Unknown byte
+                # Non-raster compound record or invalid raster — can't determine
+                # exact record length without TRE7 segment boundaries.
+                # Record what we parsed and advance past the preamble.
+                pos = rec_start + 1  # fall back to byte scanning
                 records.append(
                     {
-                        "type": f"unknown (0x{marker:02X})",
-                        "offset": pos,
-                        "raw_hex": data[pos : min(pos + 16, len(data))].hex(),
+                        "type": f"0x{type_byte:02X} (compound, cf=0x{class_flags:02X})",
+                        "offset": rec_start,
+                        "subtype": f"0x{subtype:02X}",
+                        "lon_delta": lon_delta,
+                        "lat_delta": lat_delta,
+                        "class_flags": f"0x{class_flags:02X}",
+                        "raw_hex": data[rec_start:pos].hex(),
                     }
                 )
-                pos += 1
 
         return records
 
@@ -783,13 +839,21 @@ class IMGParser:
             result["offset_multiplier"] = offset_mult
             result["encoding"] = encoding
 
-        # LBL28 at LBL+0x108: pos(4), size(4)
-        if hdr_len >= 0x110:
+        # LBL28/LBL29 raster descriptors (GPXSee reads at 0x184/0x192 when hdrLen >= 0x19A)
+        # Layout at LBL+0x184: offset(4) + size(4) + recordSize(2) + flags(4)
+        # Layout at LBL+0x192: img_offset(4) + img_size(4)
+        if hdr_len >= 0x19A:
+            lbl28_pos, lbl28_size, _ = get_lbl_section(0x184, size_only=True)
+            result["lbl28"] = {"position": lbl28_pos, "size": lbl28_size}
+
+            lbl29_pos = struct.unpack_from("<I", lbl, 0x192)[0]
+            lbl29_size = struct.unpack_from("<I", lbl, 0x196)[0]
+            result["lbl29"] = {"position": lbl29_pos, "size": lbl29_size}
+        elif hdr_len >= 0x11E:
+            # Old format fallback
             pos, size, _ = get_lbl_section(0x108, size_only=True)
             result["lbl28"] = {"position": pos, "size": size}
 
-        # LBL29 at LBL+0x116: pos(4), size(4)
-        if hdr_len >= 0x11E:
             pos, size, _ = get_lbl_section(0x116, size_only=True)
             result["lbl29"] = {"position": pos, "size": size}
 
@@ -807,6 +871,188 @@ class IMGParser:
         result["lbl_header_hex"] = lbl[: min(hdr_len, 512)].hex()
 
         return result
+
+    def validate_coordinates(self, gmp):
+        """Validate coordinate encoding round-trips and consistency.
+
+        Returns a dict with validation results:
+          - garmin_32bit: round-trip validation of deg_to_garmin / map_units_to_degrees_32
+          - map_units_24bit: round-trip validation of deg_to_map_units / map_units_to_degrees
+          - tile_bounds: RGN2 raster tile bounds vs TRE map bounds
+          - subdivision_deltas: lon/lat delta consistency in RGN2 records
+          - tile_details: per-tile decoded coordinates
+        """
+        results = {
+            "garmin_32bit": [],
+            "map_units_24bit": [],
+            "tile_bounds": [],
+            "subdivision_deltas": [],
+            "tile_details": [],
+        }
+
+        # --- 1. Garmin 32-bit round-trip validation ---
+        test_values = [
+            0.0,
+            1.0,
+            -1.0,
+            45.0,
+            -45.0,
+            90.0,
+            -90.0,
+            180.0,
+            -180.0,
+            47.5,
+            7.5,
+            46.26,
+            5.87,
+        ]
+        for deg in test_values:
+            encoded = int(deg * (2**31) / 180)
+            decoded = encoded * 180.0 / (2**31)
+            err = abs(decoded - deg)
+            ok = err < 1e-6  # 32-bit quantization: ~8.4e-8 deg resolution
+            results["garmin_32bit"].append(
+                {
+                    "input_deg": deg,
+                    "encoded": encoded,
+                    "decoded_deg": decoded,
+                    "error": err,
+                    "pass": ok,
+                }
+            )
+
+        # --- 2. 24-bit map units round-trip validation ---
+        for deg in test_values:
+            encoded = int(deg * (2**24) / 360)
+            decoded = encoded * 360.0 / (2**24)
+            err = abs(decoded - deg)
+            # 24-bit has ~0.00002 degree resolution, tolerance should reflect that
+            ok = err < 2.2e-5
+            results["map_units_24bit"].append(
+                {
+                    "input_deg": deg,
+                    "encoded": encoded,
+                    "decoded_deg": decoded,
+                    "error": err,
+                    "pass": ok,
+                }
+            )
+
+        # --- 3 & 4. Validate against parsed data ---
+        tre = gmp.get("tre", {})
+        rgn = gmp.get("rgn", {})
+        if not tre or not rgn:
+            results["error"] = "TRE or RGN not parsed"
+            return results
+
+        map_n = tre.get("north_deg", 90.0)
+        map_s = tre.get("south_deg", -90.0)
+        map_e = tre.get("east_deg", 180.0)
+        map_w = tre.get("west_deg", -180.0)
+
+        # Get subdivision centers from properly parsed subdivisions
+        subdivisions = tre.get("subdivisions", [])
+        subdiv_centers = [
+            (
+                s.get("lon_center_deg", 0),
+                s.get("lat_center_deg", 0),
+                s.get("level_number", 0),
+            )
+            for s in subdivisions
+        ]
+
+        # Group subdivisions by level_number for per-level matching
+        subdiv_by_level: dict[int, list[tuple[float, float]]] = {}
+        for lon, lat, lvl in subdiv_centers:
+            subdiv_by_level.setdefault(lvl, []).append((lon, lat))
+
+        # Validate RGN2 raster tiles
+        rgn2_records = rgn.get("rgn2_records", [])
+        for i, rec in enumerate(rgn2_records):
+            if rec.get("type") != "raster tile":
+                continue
+
+            detail = {
+                "tile_index": i,
+                "image_index": rec.get("image_index_compat", rec.get("image_index")),
+                "top_deg": rec["top_deg"],
+                "right_deg": rec["right_deg"],
+                "bottom_deg": rec["bottom_deg"],
+                "left_deg": rec["left_deg"],
+                "lon_delta": rec["lon_delta"],
+                "lat_delta": rec["lat_delta"],
+                "jpeg_size": rec.get("jpeg_size", 0),
+            }
+
+            # Check bounds are within map extent
+            in_bounds = (
+                map_s - 0.01 <= rec["bottom_deg"] <= map_n + 0.01
+                and map_w - 0.01 <= rec["left_deg"] <= map_e + 0.01
+                and map_s - 0.01 <= rec["top_deg"] <= map_n + 0.01
+                and map_w - 0.01 <= rec["right_deg"] <= map_e + 0.01
+            )
+            detail["in_map_bounds"] = in_bounds
+
+            # Check top > bottom, right > left
+            detail["valid_orientation"] = (
+                rec["top_deg"] > rec["bottom_deg"]
+                and rec["right_deg"] > rec["left_deg"]
+            )
+
+            # Validate lon_delta / lat_delta against subdivision centers
+            lon_delta_mu = rec["lon_delta"]
+            lat_delta_mu = rec["lat_delta"]
+            tile_center_lon = (rec["left_deg"] + rec["right_deg"]) / 2
+            tile_center_lat = (rec["bottom_deg"] + rec["top_deg"]) / 2
+
+            detail["tile_center_lon"] = tile_center_lon
+            detail["tile_center_lat"] = tile_center_lat
+
+            # Find nearest subdivision center across all levels
+            if subdiv_centers:
+                best_sc = min(
+                    subdiv_centers,
+                    key=lambda c: (
+                        (c[0] - tile_center_lon) ** 2 + (c[1] - tile_center_lat) ** 2
+                    ),
+                )
+                sc_lon_mu = int(best_sc[0] * (2**24) / 360)
+                sc_lat_mu = int(best_sc[1] * (2**24) / 360)
+                tc_lon_mu = int(tile_center_lon * (2**24) / 360)
+                tc_lat_mu = int(tile_center_lat * (2**24) / 360)
+                expected_lon_delta = max(-32768, min(32767, tc_lon_mu - sc_lon_mu))
+                expected_lat_delta = max(-32768, min(32767, tc_lat_mu - sc_lat_mu))
+                delta_match = (
+                    lon_delta_mu == expected_lon_delta
+                    and lat_delta_mu == expected_lat_delta
+                )
+                detail["nearest_subdiv_center"] = best_sc
+                detail["expected_lon_delta"] = expected_lon_delta
+                detail["expected_lat_delta"] = expected_lat_delta
+                detail["delta_match"] = delta_match
+
+            results["tile_details"].append(detail)
+
+            # Tile bounds summary
+            results["tile_bounds"].append(
+                {
+                    "tile": i,
+                    "in_bounds": in_bounds,
+                    "valid_orientation": detail["valid_orientation"],
+                }
+            )
+
+            # Delta summary
+            results["subdivision_deltas"].append(
+                {
+                    "tile": i,
+                    "lon_delta": lon_delta_mu,
+                    "lat_delta": lat_delta_mu,
+                    "delta_match": detail.get("delta_match"),
+                }
+            )
+
+        return results
 
     def dump_section_hex(self, gmp, section):
         """Dump hex of a section for analysis. Uses GMP-relative offsets."""

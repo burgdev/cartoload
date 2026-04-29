@@ -1,23 +1,472 @@
 """
 Side-by-side comparison of Garmin IMG files.
 
-Compares RGN headers and RGN2 data between two IMG files,
-useful for validating output against reference files.
+Compares TRE/RGN/LBL headers and RGN2 data between two IMG files,
+with normalization of variable fields (dates, map IDs, UUIDs) so
+comparison focuses on structural differences.
 """
 
 import struct
 
-from .img_parser import IMGParser, map_units_to_degrees_32, format_hex_dump
+from .img_parser import (
+    IMGParser,
+    decode_3byte_signed,
+    map_units_to_degrees,
+    map_units_to_degrees_32,
+    format_hex_dump,
+)
+
+# Fields to mask during normalization (offset, size, description)
+# These are fields that vary per-build and are not structurally meaningful
+_NORMALIZE_TRE = [
+    (0x0E, 7, "date"),
+    (0x74, 4, "map_id"),
+    (0x9A, 16, "map_id_hash/UUID"),
+    (0xCF, 4, "matching_number"),
+]
+
+_NORMALIZE_RGN = [
+    (0x0E, 7, "date"),
+]
+
+_NORMALIZE_LBL = [
+    (0x0E, 7, "date"),
+]
+
+# Named fields for TRE header (offset, size, field_name)
+_TRE_FIELDS = [
+    (0x00, 2, "header_length"),
+    (0x02, 10, "signature"),
+    (0x0C, 1, "version"),
+    (0x0D, 1, "lock"),
+    (0x0E, 7, "date"),
+    (0x15, 3, "north_bound"),
+    (0x18, 3, "east_bound"),
+    (0x1B, 3, "south_bound"),
+    (0x1E, 3, "west_bound"),
+    (0x21, 4, "TRE1_position"),
+    (0x25, 4, "TRE1_size"),
+    (0x29, 4, "TRE2_position"),
+    (0x2D, 4, "TRE2_size"),
+    (0x31, 4, "TRE3_position"),
+    (0x35, 4, "TRE3_size"),
+    (0x39, 2, "TRE3_item_size"),
+    (0x3B, 4, "padding_0x3B"),
+    (0x3F, 1, "flags"),
+    (0x40, 2, "display_priority"),
+    (0x42, 8, "more_flags"),
+    (0x4A, 4, "TRE4_position"),
+    (0x4E, 4, "TRE4_size"),
+    (0x52, 2, "TRE4_rec_size"),
+    (0x54, 4, "TRE4_padding"),
+    (0x58, 4, "TRE5_position"),
+    (0x5C, 4, "TRE5_size"),
+    (0x60, 2, "TRE5_rec_size"),
+    (0x62, 4, "TRE5_padding"),
+    (0x66, 4, "TRE6_position"),
+    (0x6A, 4, "TRE6_size"),
+    (0x6E, 2, "TRE6_rec_size"),
+    (0x70, 4, "TRE6_padding"),
+    (0x74, 4, "map_id"),
+    (0x78, 4, "padding_0x78"),
+    (0x7C, 4, "TRE7_position"),
+    (0x80, 4, "TRE7_size"),
+    (0x84, 2, "TRE7_rec_size"),
+    (0x86, 4, "TRE7_padding"),
+    (0x8A, 4, "TRE8_position"),
+    (0x8E, 4, "TRE8_size"),
+    (0x92, 2, "TRE8_rec_size"),
+    (0x94, 6, "TRE8_padding"),
+    (0x9A, 16, "map_id_hash"),
+    (0xAA, 4, "padding_0xAA"),
+    (0xAE, 4, "TRE9_position"),
+    (0xB2, 4, "TRE9_size"),
+    (0xB6, 2, "TRE9_rec_size"),
+    (0xB8, 4, "TRE9_padding"),
+    (0xBC, 4, "TRE10_position"),
+    (0xC0, 4, "TRE10_size"),
+    (0xC4, 2, "TRE10_rec_size"),
+    (0xC6, 4, "TRE10_padding"),
+    (0xCA, 5, "padding_0xCA"),
+    (0xCF, 4, "matching_number"),
+]
+
+# Named fields for RGN header
+_RGN_FIELDS = [
+    (0x00, 2, "header_length"),
+    (0x02, 10, "signature"),
+    (0x0C, 1, "version"),
+    (0x0D, 1, "lock"),
+    (0x0E, 7, "date"),
+    (0x15, 4, "RGN1_position"),
+    (0x19, 4, "RGN1_size"),
+    (0x1D, 4, "RGN2_position"),
+    (0x21, 4, "RGN2_size"),
+    (0x25, 4, "flags_0x25"),
+    (0x29, 4, "polygonsGblFlags"),
+    (0x2D, 4, "padding_0x2D"),
+    (0x31, 4, "padding_0x31"),
+    (0x35, 4, "padding_0x35"),
+    (0x39, 4, "RGN3_position"),
+    (0x3D, 4, "RGN3_size"),
+    (0x41, 4, "linesGblFlags"),
+    (0x45, 4, "padding_0x45"),
+    (0x49, 4, "padding_0x49"),
+    (0x4D, 4, "padding_0x4D"),
+    (0x51, 4, "padding_0x51"),
+    (0x55, 4, "RGN4_position"),
+    (0x59, 4, "RGN4_size"),
+    (0x5D, 4, "pointsGblFlags"),
+    (0x61, 4, "padding_0x61"),
+    (0x65, 4, "padding_0x65"),
+    (0x69, 4, "padding_0x69"),
+    (0x6D, 4, "padding_0x6D"),
+    (0x71, 4, "RGN5_position"),
+    (0x75, 4, "RGN5_size"),
+    (0x79, 4, "RGNEXT"),
+]
+
+# Named fields for LBL header (key ones only)
+_LBL_FIELDS = [
+    (0x00, 2, "header_length"),
+    (0x02, 10, "signature"),
+    (0x0C, 1, "version"),
+    (0x0D, 1, "lock"),
+    (0x0E, 7, "date"),
+    (0x15, 4, "LBL1_position"),
+    (0x19, 4, "LBL1_size"),
+    (0x1D, 1, "offset_multiplier"),
+    (0x1E, 1, "encoding"),
+    (0x184, 4, "LBL28_position"),
+    (0x188, 4, "LBL28_size"),
+    (0x18C, 2, "LBL28_rec_size"),
+    (0x18E, 4, "LBL28_flags"),
+    (0x192, 4, "LBL29_position"),
+    (0x196, 4, "LBL29_size"),
+]
 
 
-def _extract_rgn_header(img_parser, gmp_key):
-    """Extract RGN header bytes and GMP data from a parsed IMG file."""
-    gmp = img_parser.parse_gmp_container(gmp_key)
-    data = gmp["data"]
-    rgn_off = gmp["sections"]["RGN"]
-    rgn = data[rgn_off:]
-    hdr_len = struct.unpack_from("<H", rgn, 0)[0]
-    return rgn[:hdr_len], data, gmp
+def _normalize_header(header_bytes, normalize_fields):
+    """Mask variable fields in a header for comparison.
+
+    Returns a copy with specified fields zeroed out.
+    """
+    result = bytearray(header_bytes)
+    for off, size, _desc in normalize_fields:
+        for i in range(off, min(off + size, len(result))):
+            result[i] = 0x00
+    return bytes(result)
+
+
+def _parse_full(path):
+    """Parse an IMG file and return (parser, gmp_key, gmp, tre, rgn_parsed, lbl)."""
+    img = IMGParser(path)
+    img.parse_header()
+    img.parse_fat()
+
+    gmp_key = None
+    for key in img.subfiles:
+        if img.subfiles[key]["type"] == "GMP":
+            gmp_key = key
+            break
+
+    if not gmp_key:
+        img.close()
+        return None
+
+    gmp = img.parse_gmp_container(gmp_key)
+    tre = img.parse_tre(gmp)
+    rgn_parsed = img.parse_rgn(gmp)
+    lbl = img.parse_lbl(gmp)
+
+    return img, gmp_key, gmp, tre, rgn_parsed, lbl
+
+
+def _get_header_bytes(data, section_offset):
+    """Extract header bytes for a section."""
+    hdr_len = struct.unpack_from("<H", data, section_offset)[0]
+    return data[section_offset : section_offset + hdr_len]
+
+
+def compare_structure(
+    echo, gmp1, tre1, rgn1_parsed, lbl1, gmp2, tre2, rgn2_parsed, lbl2
+):
+    """Compare structural properties: section positions, sizes, counts."""
+    data1 = gmp1["data"]
+    data2 = gmp2["data"]
+
+    echo("\n" + "=" * 80)
+    echo("  STRUCTURAL COMPARISON")
+    echo("=" * 80)
+
+    # GMP data sizes
+    echo(
+        f"\n  GMP data size:  File1={len(data1):,}  File2={len(data2):,}  "
+        f"{'OK' if len(data1) == len(data2) else 'DIFF'}"
+    )
+
+    # Section offsets
+    for name in sorted(set(gmp1["sections"]) | set(gmp2["sections"])):
+        off1 = gmp1["sections"].get(name, 0)
+        off2 = gmp2["sections"].get(name, 0)
+        match = "OK" if off1 == off2 else "DIFF"
+        echo(f"  {name} offset:  File1=0x{off1:X}  File2=0x{off2:X}  {match}")
+
+    # TRE1 levels
+    levels1 = tre1.get("levels", [])
+    levels2 = tre2.get("levels", [])
+    echo(
+        f"\n  TRE1 levels:  File1={len(levels1)}  File2={len(levels2)}  "
+        f"{'OK' if len(levels1) == len(levels2) else 'DIFF'}"
+    )
+
+    for i in range(max(len(levels1), len(levels2))):
+        l1 = levels1[i] if i < len(levels1) else None
+        l2 = levels2[i] if i < len(levels2) else None
+        if l1 and l2:
+            match = (
+                "OK"
+                if (
+                    l1["zoom_code"] == l2["zoom_code"]
+                    and l1["level_number"] == l2["level_number"]
+                )
+                else "DIFF"
+            )
+            echo(
+                f"    Level[{i}]: File1(zoom={l1['zoom_code']:3d}, lvl={l1['level_number']:3d}, "
+                f"subdivs={l1['subdivision_count']:5d})  "
+                f"File2(zoom={l2['zoom_code']:3d}, lvl={l2['level_number']:3d}, "
+                f"subdivs={l2['subdivision_count']:5d})  {match}"
+            )
+        elif l1:
+            echo(
+                f"    Level[{i}]: File1 only (zoom={l1['zoom_code']}, lvl={l1['level_number']})"
+            )
+        else:
+            echo(
+                f"    Level[{i}]: File2 only (zoom={l2['zoom_code']}, lvl={l2['level_number']})"
+            )
+
+    # TRE2 subdivisions
+    groups1 = tre1.get("groups_16byte", [])
+    groups2 = tre2.get("groups_16byte", [])
+    echo(
+        f"\n  TRE2 subdivisions:  File1={len(groups1)}  File2={len(groups2)}  "
+        f"{'OK' if len(groups1) == len(groups2) else 'DIFF'}"
+    )
+
+    # TRE7
+    tre7_1 = tre1.get("tre7", {})
+    tre7_2 = tre2.get("tre7", {})
+    echo(
+        f"\n  TRE7:  File1(pos={tre7_1.get('position', 0)}, size={tre7_1.get('size', 0)}, "
+        f"rec={tre7_1.get('record_size', 0)})  "
+        f"File2(pos={tre7_2.get('position', 0)}, size={tre7_2.get('size', 0)}, "
+        f"rec={tre7_2.get('record_size', 0)})  "
+        f"{'OK' if tre7_1.get('record_size') == tre7_2.get('record_size') else 'DIFF'}"
+    )
+
+    tre7_offsets1 = tre1.get("tre7_offsets", [])
+    tre7_offsets2 = tre2.get("tre7_offsets", [])
+    echo(
+        f"  TRE7 entries:  File1={len(tre7_offsets1)}  File2={len(tre7_offsets2)}  "
+        f"{'OK' if len(tre7_offsets1) == len(tre7_offsets2) else 'DIFF'}"
+    )
+
+    # RGN sections
+    echo("\n  RGN sections:")
+    for sec in ["rgn1", "rgn2", "rgn3", "rgn4", "rgn5"]:
+        s1 = rgn1_parsed.get(sec, {})
+        s2 = rgn2_parsed.get(sec, {})
+        p1, sz1 = s1.get("position", 0), s1.get("size", 0)
+        p2, sz2 = s2.get("position", 0), s2.get("size", 0)
+        if p1 or p2:
+            match = "OK" if p1 == p2 and sz1 == sz2 else "DIFF"
+            echo(
+                f"    {sec.upper()}:  File1(pos={p1}, size={sz1})  "
+                f"File2(pos={p2}, size={sz2})  {match}"
+            )
+
+    # LBL sections
+    echo("\n  LBL sections:")
+    if lbl1 and lbl2:
+        for sec in ["lbl1", "lbl28", "lbl29"]:
+            s1 = lbl1.get(sec, {})
+            s2 = lbl2.get(sec, {})
+            p1, sz1 = s1.get("position", 0), s1.get("size", 0)
+            p2, sz2 = s2.get("position", 0), s2.get("size", 0)
+            if p1 or p2:
+                match = "OK" if p1 == p2 and sz1 == sz2 else "DIFF"
+                echo(
+                    f"    {sec.upper()}:  File1(pos={p1}, size={sz1})  "
+                    f"File2(pos={p2}, size={sz2})  {match}"
+                )
+
+    # RGN2 record counts
+    recs1 = rgn1_parsed.get("rgn2_records", [])
+    recs2 = rgn2_parsed.get("rgn2_records", [])
+    e0_1 = [r for r in recs1 if r["type"] == "raster tile"]
+    e0_2 = [r for r in recs2 if r["type"] == "raster tile"]
+    echo(
+        f"\n  RGN2 records:  File1={len(recs1)} ({len(e0_1)} E0)  "
+        f"File2={len(recs2)} ({len(e0_2)} E0)  "
+        f"{'OK' if len(recs1) == len(recs2) else 'DIFF'}"
+    )
+
+
+def compare_headers(echo, data1, data2, gmp1, gmp2):
+    """Compare headers field-by-field with normalization."""
+    echo("\n" + "=" * 80)
+    echo("  HEADER FIELD COMPARISON (normalized)")
+    echo("=" * 80)
+
+    for section_name, fields, norm_fields, color in [
+        ("TRE", _TRE_FIELDS, _NORMALIZE_TRE, "cyan"),
+        ("RGN", _RGN_FIELDS, _NORMALIZE_RGN, "green"),
+        ("LBL", _LBL_FIELDS, _NORMALIZE_LBL, "yellow"),
+    ]:
+        off1 = gmp1["sections"].get(section_name)
+        off2 = gmp2["sections"].get(section_name)
+
+        if off1 is None or off2 is None:
+            echo(f"\n  {section_name}: not present in both files")
+            continue
+
+        hdr1 = _get_header_bytes(data1, off1)
+        hdr2 = _get_header_bytes(data2, off2)
+        hdr1_norm = _normalize_header(hdr1, norm_fields)
+        hdr2_norm = _normalize_header(hdr2, norm_fields)
+
+        echo(
+            f"\n  --- {section_name} Header (length: File1={len(hdr1)}, File2={len(hdr2)}) ---"
+        )
+        echo(f"  {'Offset':<12} {'Field':<22} {'File 1':<20} {'File 2':<20} {'Status'}")
+        echo(f"  {'-' * 12} {'-' * 22} {'-' * 20} {'-' * 20} {'-' * 8}")
+
+        diff_count = 0
+        norm_offsets = set()
+        for noff, nsize, _ in norm_fields:
+            for b in range(nsize):
+                norm_offsets.add(noff + b)
+
+        for off, size, name in fields:
+            if off + size > len(hdr1_norm) or off + size > len(hdr2_norm):
+                continue
+
+            raw1 = hdr1[off : off + size]
+            raw2 = hdr2[off : off + size]
+            norm1 = hdr1_norm[off : off + size]
+            norm2 = hdr2_norm[off : off + size]
+
+            # Format value based on type
+            if size == 1:
+                v1 = f"0x{raw1[0]:02X}"
+                v2 = f"0x{raw2[0]:02X}"
+            elif size == 2:
+                v1 = f"0x{struct.unpack_from('<H', raw1)[0]:04X}"
+                v2 = f"0x{struct.unpack_from('<H', raw2)[0]:04X}"
+            elif size == 3:
+                v1 = f"{map_units_to_degrees(decode_3byte_signed(raw1)):.4f}"
+                v2 = f"{map_units_to_degrees(decode_3byte_signed(raw2)):.4f}"
+            elif size == 4:
+                v1_int = struct.unpack_from("<I", raw1)[0]
+                v2_int = struct.unpack_from("<I", raw2)[0]
+                v1 = f"0x{v1_int:X}"
+                v2 = f"0x{v2_int:X}"
+            elif size == 7:
+                v1 = "date"
+                v2 = "date"
+            elif size == 10:
+                v1 = raw1.decode("ascii", errors="replace").rstrip("\x00")
+                v2 = raw2.decode("ascii", errors="replace").rstrip("\x00")
+            elif size == 16:
+                v1 = raw1.hex()[:16] + "..."
+                v2 = raw2.hex()[:16] + "..."
+            else:
+                v1 = raw1.hex()
+                v2 = raw2.hex()
+
+            is_normalized = all((off + b) in norm_offsets for b in range(size))
+            if is_normalized:
+                status = "(normalized)"
+            elif norm1 == norm2:
+                status = "OK"
+            else:
+                status = "DIFF"
+                diff_count += 1
+
+            end_off = off + size - 1
+            echo(
+                f"  0x{off:02X}-0x{end_off:02X}  {name:<22} {v1:<20} {v2:<20} {status}"
+            )
+
+        echo(f"  {section_name}: {diff_count} difference(s) after normalization")
+
+
+def compare_rgn2_samples(echo, rgn1_parsed, rgn2_parsed, sample_size=10):
+    """Compare first N RGN2 raster tile records."""
+    recs1 = [
+        r for r in rgn1_parsed.get("rgn2_records", []) if r["type"] == "raster tile"
+    ]
+    recs2 = [
+        r for r in rgn2_parsed.get("rgn2_records", []) if r["type"] == "raster tile"
+    ]
+
+    echo("\n" + "=" * 80)
+    echo(f"  RGN2 SAMPLE COMPARISON (first {sample_size} raster tile records)")
+    echo("=" * 80)
+
+    echo(f"\n  Total E0 records:  File1={len(recs1)}  File2={len(recs2)}")
+
+    n = min(sample_size, len(recs1), len(recs2))
+    if n == 0:
+        echo("  No E0 records to compare in one or both files.")
+        return
+
+    echo(f"\n  {'#':<4} {'Field':<18} {'File 1':<22} {'File 2':<22} {'Status'}")
+    echo(f"  {'-' * 4} {'-' * 18} {'-' * 22} {'-' * 22} {'-' * 8}")
+
+    for i in range(n):
+        r1 = recs1[i]
+        r2 = recs2[i]
+
+        for field in [
+            "image_index",
+            "lat_min_deg",
+            "lon_min_deg",
+            "lat_max_deg",
+            "lon_max_deg",
+            "jpeg_size",
+        ]:
+            v1 = r1.get(field)
+            v2 = r2.get(field)
+            if v1 is None or v2 is None:
+                status = "MISSING"
+            elif isinstance(v1, float):
+                match = abs(v1 - v2) < 1e-6
+                status = "OK" if match else "DIFF"
+                v1 = f"{v1:.6f}"
+                v2 = f"{v2:.6f}"
+            elif isinstance(v1, str):
+                status = "OK" if v1 == v2 else "DIFF"
+            else:
+                status = "OK" if v1 == v2 else "DIFF"
+                v1 = str(v1)
+                v2 = str(v2)
+
+            echo(f"  {i:<4} {field:<18} {str(v1):<22} {str(v2):<22} {status}")
+
+        # Raw hex comparison
+        hex1 = r1.get("raw_hex", "")
+        hex2 = r2.get("raw_hex", "")
+        if hex1 and hex2:
+            hex_match = "OK" if hex1 == hex2 else "DIFF"
+            echo(
+                f"  {i:<4} {'raw_hex':<18} {hex1[:20]:<22} {hex2[:20]:<22} {hex_match}"
+            )
+
+
+# --- Legacy analysis functions (used by the compare command in raw mode) ---
 
 
 def _analyze_rgn_header_bytes(data, rgn_off, label, echo):
@@ -75,21 +524,6 @@ def _analyze_rgn_header_bytes(data, rgn_off, label, echo):
             val = struct.unpack_from("<I", rgn, off)[0]
             echo(f"    [0x{off:02X}-0x{off + 3:02X}] {desc}: 0x{val:X} ({val})")
 
-    # Show raw bytes between known fields
-    gaps = [
-        (0x25, 0x39, "between RGN2 and RGN3"),
-        (0x41, 0x55, "between RGN3 and RGN4"),
-        (0x5D, 0x71, "between RGN4 and RGN5"),
-    ]
-    for start, end, desc in gaps:
-        if end <= hdr_len:
-            echo(f"\n  Raw bytes 0x{start:02X}-0x{end - 1:02X} ({desc}):")
-            echo(format_hex_dump(rgn[start:end]))
-
-    if hdr_len > 0x79:
-        echo(f"\n  Raw bytes 0x79-0x{hdr_len - 1:X} (after RGN5):")
-        echo(format_hex_dump(rgn[0x79:hdr_len]))
-
     return hdr_len
 
 
@@ -141,7 +575,6 @@ def _analyze_rgn2_data(data, rgn2_pos, rgn2_size, label, echo, max_dump=500):
             if subtype is not None:
                 echo(f"    Subtype: 0x{subtype:02X}")
             echo(f"    Raw bytes: {next_bytes.hex()}")
-            # Try to determine length by looking ahead
             for try_len in [16, 18, 20, 22, 24]:
                 if pos + try_len < len(rgn2_data):
                     peek = rgn2_data[pos + try_len]
@@ -241,13 +674,18 @@ def _analyze_rgn2_data(data, rgn2_pos, rgn2_size, label, echo, max_dump=500):
         echo(format_hex_dump(rgn2_data[pos : pos + min(200, len(rgn2_data) - pos)]))
 
 
-def compare_files(path1, path2, echo):
+def compare_files(
+    path1, path2, echo, *, headers_only=False, sample_size=10, full=False
+):
     """Compare two IMG files side by side.
 
     Args:
         path1: Path to the first (reference) IMG file.
         path2: Path to the second (output) IMG file.
         echo: Callable for output (e.g. click.echo).
+        headers_only: Only compare headers, skip RGN2 sample.
+        sample_size: Number of RGN2 records to compare.
+        full: Full raw dump mode (legacy behavior).
     """
     label1 = "File 1 (reference)"
     label2 = "File 2 (output)"
@@ -259,38 +697,37 @@ def compare_files(path1, path2, echo):
         echo(f"#  {label}: {path}")
         echo(f"{'#' * 80}")
 
-        with IMGParser(path) as img:
-            img.parse_header()
-            img.parse_fat()
+        parsed = _parse_full(path)
+        if parsed is None:
+            echo(f"  ERROR: No GMP subfile found in {path}")
+            results[label] = None
+            continue
 
-            gmp_key = None
-            for key in img.subfiles:
-                if img.subfiles[key]["type"] == "GMP":
-                    gmp_key = key
-                    break
+        img, gmp_key, gmp, tre, rgn_parsed, lbl = parsed
+        data = gmp["data"]
 
-            if not gmp_key:
-                echo(f"  ERROR: No GMP subfile found in {path}")
-                results[label] = None
-                continue
+        echo(f"  GMP subfile: {gmp_key}")
+        echo(f"  GMP data size: {len(data)} bytes")
 
-            echo(f"  GMP subfile: {gmp_key}")
-            gmp = img.parse_gmp_container(gmp_key)
-            data = gmp["data"]
-            echo(f"  GMP data size: {len(data)} bytes")
+        results[label] = {
+            "img": img,
+            "gmp": gmp,
+            "tre": tre,
+            "rgn_parsed": rgn_parsed,
+            "lbl": lbl,
+        }
 
+        if full:
             rgn_off = gmp["sections"]["RGN"]
             rgn = data[rgn_off:]
             rgn2_pos = struct.unpack_from("<I", rgn, 0x1D)[0]
             rgn2_size = struct.unpack_from("<I", rgn, 0x21)[0]
 
-            # Show TRE7/8 cross-reference
             tre_off = gmp["sections"]["TRE"]
-            tre = data[tre_off:]
-
-            tre7_pos = struct.unpack_from("<I", tre, 0x7C)[0]
-            tre7_size = struct.unpack_from("<I", tre, 0x80)[0]
-            tre7_rec_size = struct.unpack_from("<H", tre, 0x84)[0]
+            tre_hdr = data[tre_off:]
+            tre7_pos = struct.unpack_from("<I", tre_hdr, 0x7C)[0]
+            tre7_size = struct.unpack_from("<I", tre_hdr, 0x80)[0]
+            tre7_rec_size = struct.unpack_from("<H", tre_hdr, 0x84)[0]
             echo(
                 f"\n  TRE7 (raster layer): pos=0x{tre7_pos:X}, size={tre7_size}, rec_size={tre7_rec_size}"
             )
@@ -305,77 +742,42 @@ def compare_files(path1, path2, echo):
                         off = struct.unpack_from("<I", tre7_data, i)[0]
                         echo(f"    Entry {i // rec_size}: offset 0x{off:X} ({off})")
 
-            tre8_pos = struct.unpack_from("<I", tre, 0x8A)[0]
-            tre8_size = struct.unpack_from("<I", tre, 0x8E)[0]
-            if tre8_pos > 0 and tre8_size > 0:
-                tre8_data = data[tre8_pos : tre8_pos + tre8_size]
-                echo(f"\n  TRE8 (object types): pos=0x{tre8_pos:X}, size={tre8_size}")
-                echo(f"  TRE8 raw data: {tre8_data.hex()}")
-                for i in range(0, len(tre8_data), 3):
-                    if i + 3 <= len(tre8_data):
-                        echo(
-                            f"    Entry {i // 3}: type=0x{tre8_data[i]:02X} param1=0x{tre8_data[i + 1]:02X} param2=0x{tre8_data[i + 2]:02X}"
-                        )
-
-            for name, off in [("TRE4", 0x4A), ("TRE5", 0x58), ("TRE6", 0x66)]:
-                p = struct.unpack_from("<I", tre, off)[0]
-                s = struct.unpack_from("<I", tre, off + 4)[0]
-                echo(f"  {name}: pos=0x{p:X}, size={s}")
-
-            # RGN header analysis
             _analyze_rgn_header_bytes(data, rgn_off, label, echo)
 
-            # RGN2 data analysis
             if rgn2_size > 0:
                 _analyze_rgn2_data(data, rgn2_pos, rgn2_size, label, echo, max_dump=500)
             else:
                 echo("\n  RGN2 size is 0 - no data to analyze!")
 
-            results[label] = (rgn_off, gmp, data)
+    r1 = results.get(label1)
+    r2 = results.get(label2)
 
-    # Side-by-side header comparison
-    echo(f"\n\n{'=' * 80}")
-    echo("  KEY COMPARISON - RGN Header Bytes 0x15-0x7C")
-    echo(f"{'=' * 80}")
+    if r1 is None or r2 is None:
+        echo("\n  Cannot compare: one or both files failed to parse.")
+        return
 
-    hdr1, _, _ = results.get(label1, (None, None, None))
-    hdr2, _, _ = (
-        results.get(label2, (None, None, None))
-        if results.get(label2)
-        else (None, None, None)
+    # Close parsers
+    for r in [r1, r2]:
+        r["img"].close()
+
+    # Structural comparison
+    compare_structure(
+        echo,
+        r1["gmp"],
+        r1["tre"],
+        r1["rgn_parsed"],
+        r1["lbl"],
+        r2["gmp"],
+        r2["tre"],
+        r2["rgn_parsed"],
+        r2["lbl"],
     )
 
-    # Re-extract headers for comparison
-    def _get_header(path):
-        with IMGParser(path) as img:
-            img.parse_header()
-            img.parse_fat()
-            gmp_key = None
-            for key in img.subfiles:
-                if img.subfiles[key]["type"] == "GMP":
-                    gmp_key = key
-                    break
-            if not gmp_key:
-                return None
-            gmp = img.parse_gmp_container(gmp_key)
-            data = gmp["data"]
-            rgn_off = gmp["sections"]["RGN"]
-            rgn = data[rgn_off:]
-            hdr_len = struct.unpack_from("<H", rgn, 0)[0]
-            return rgn[:hdr_len]
+    # Header field comparison
+    compare_headers(echo, r1["gmp"]["data"], r2["gmp"]["data"], r1["gmp"], r2["gmp"])
 
-    iom_hdr = _get_header(path1)
-    our_hdr = _get_header(path2)
-
-    if iom_hdr is not None and our_hdr is not None:
-        echo(f"\n  {'Offset':<10} {'File 1 Bytes':<40} {'File 2 Bytes':<40} {'Match'}")
-        echo(f"  {'-' * 10} {'-' * 40} {'-' * 40} {'-' * 6}")
-
-        max_len = max(len(iom_hdr), len(our_hdr))
-        for off in range(0x15, min(max_len, 0x7D), 4):
-            chunk1 = iom_hdr[off : off + 4]
-            chunk2 = our_hdr[off : off + 4]
-            hex1 = chunk1.hex() if len(chunk1) == 4 else "(short)"
-            hex2 = chunk2.hex() if len(chunk2) == 4 else "(short)"
-            match = "OK" if chunk1 == chunk2 else "DIFF"
-            echo(f"  0x{off:02X}-0x{off + 3:02X}  {hex1:<40} {hex2:<40} {match}")
+    # RGN2 sample comparison
+    if not headers_only:
+        compare_rgn2_samples(
+            echo, r1["rgn_parsed"], r2["rgn_parsed"], sample_size=sample_size
+        )

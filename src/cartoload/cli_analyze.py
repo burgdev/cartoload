@@ -109,10 +109,10 @@ def _styled_path(*parts: str) -> str:
 def _print_bitmap_stats(rgn_parsed: dict, console: Console) -> None:
     """Print bitmap tile statistics from RGN2 E0 records."""
     recs = rgn_parsed.get("rgn2_records", [])
-    e0_recs = [r for r in recs if r["type"] == "E0 (raster tile)"]
+    e0_recs = [r for r in recs if r["type"] == "raster tile"]
     if not e0_recs:
         return
-    img_indices = set(r["image_index"] for r in e0_recs)
+    img_indices = set(r["image_index_compat"] for r in e0_recs)
     console.print(
         f"  Bitmaps: [cyan]{len(e0_recs):,}[/] tiles, [cyan]{len(img_indices):,}[/] images"
     )
@@ -336,12 +336,12 @@ def _print_rgn(
         show_count = total if limit == 0 else min(total, limit)
         console.print(f"  RGN2 records ([cyan]{total}[/]):")
         for rec in recs[:show_count]:
-            if rec["type"] == "E0 (raster tile)":
+            if rec["type"] == "raster tile":
                 console.print(
                     f"      {rec['type']} @{rec['offset']}: "
                     f"bounds=({rec['lat_min_deg']:.6f},{rec['lon_min_deg']:.6f})-"
                     f"({rec['lat_max_deg']:.6f},{rec['lon_max_deg']:.6f}) "
-                    f"blk_sz={rec['block_size']} img_idx=[cyan]{rec['image_index']}[/]"
+                    f"jpg_sz={rec['jpeg_size']} img_idx=[cyan]{rec['image_index_compat']}[/]"
                 )
             else:
                 console.print(
@@ -568,12 +568,12 @@ def _print_subsection(
                 show_count = total if limit == 0 else min(total, limit)
                 console.print(f"  Records ([cyan]{total}[/]):")
                 for rec in recs[:show_count]:
-                    if rec["type"] == "E0 (raster tile)":
+                    if rec["type"] == "raster tile":
                         console.print(
                             f"    {rec['type']} @{rec['offset']}: "
                             f"bounds=({rec['lat_min_deg']:.6f},{rec['lon_min_deg']:.6f})-"
                             f"({rec['lat_max_deg']:.6f},{rec['lon_max_deg']:.6f}) "
-                            f"blk_sz={rec['block_size']} img_idx=[cyan]{rec['image_index']}[/]"
+                            f"jpg_sz={rec['jpeg_size']} img_idx=[cyan]{rec['image_index_compat']}[/]"
                         )
                     else:
                         console.print(
@@ -688,6 +688,11 @@ def img() -> None:
     is_flag=True,
     help="Hide section descriptions",
 )
+@click.option(
+    "--tile-details",
+    is_flag=True,
+    help="Validate coordinate encoding and show per-tile decoded coordinates",
+)
 @click.option("--no-color", is_flag=True, help="Disable colored output")
 def info(
     img_file: str,
@@ -704,6 +709,7 @@ def info(
     segments: bool,
     show_summary: bool,
     no_descriptions: bool,
+    tile_details: bool,
     no_color: bool,
 ) -> None:
     """Analyze a Garmin IMG file."""
@@ -832,6 +838,94 @@ def info(
                 console.print(hex_str)
             return
 
+        # --tile-details: coordinate validation
+        if tile_details:
+            gmp["tre"] = tre
+            gmp["rgn"] = rgn_parsed
+            validation = parser.validate_coordinates(gmp)
+
+            console.print(
+                Rule(
+                    _styled_path("Coordinate Validation"),
+                    style="bold cyan",
+                    align="left",
+                )
+            )
+
+            # 32-bit round-trip
+            console.print("  [bold]Garmin 32-bit encoding (deg → int32 → deg)[/]")
+            all_32_ok = all(v["pass"] for v in validation["garmin_32bit"])
+            status = "[green]PASS[/]" if all_32_ok else "[red]FAIL[/]"
+            console.print(
+                f"    Round-trip: {status} ({len(validation['garmin_32bit'])} values tested)"
+            )
+
+            # 24-bit round-trip
+            console.print("  [bold]24-bit map units (deg → int24 → deg)[/]")
+            all_24_ok = all(v["pass"] for v in validation["map_units_24bit"])
+            status = "[green]PASS[/]" if all_24_ok else "[red]FAIL[/]"
+            console.print(
+                f"    Round-trip: {status} ({len(validation['map_units_24bit'])} values tested)"
+            )
+
+            # Tile bounds validation
+            tile_details_list = validation["tile_details"]
+            if tile_details_list:
+                console.print(
+                    f"  [bold]Tile bounds ({len(tile_details_list)} raster tiles)[/]"
+                )
+                in_bounds_count = sum(
+                    1 for t in tile_details_list if t["in_map_bounds"]
+                )
+                valid_orient = sum(
+                    1 for t in tile_details_list if t["valid_orientation"]
+                )
+                delta_match = sum(
+                    1 for t in tile_details_list if t.get("delta_match", True)
+                )
+
+                console.print(
+                    f"    In map bounds: {in_bounds_count}/{len(tile_details_list)}"
+                )
+                console.print(
+                    f"    Valid orientation (top>bottom, right>left): {valid_orient}/{len(tile_details_list)}"
+                )
+                if any("delta_match" in t for t in tile_details_list):
+                    console.print(
+                        f"    Delta matches subdivision center: {delta_match}/{len(tile_details_list)}"
+                    )
+
+                # Show first N tiles in detail
+                show_count = min(
+                    limit if limit > 0 else len(tile_details_list),
+                    len(tile_details_list),
+                )
+                for t in tile_details_list[:show_count]:
+                    idx = t["tile_index"]
+                    img_idx = t["image_index"]
+                    flags = []
+                    if not t["in_map_bounds"]:
+                        flags.append("[red]OUT_OF_BOUNDS[/]")
+                    if not t["valid_orientation"]:
+                        flags.append("[red]BAD_ORIENTATION[/]")
+                    if "delta_match" in t and not t["delta_match"]:
+                        flags.append("[yellow]DELTA_MISMATCH[/]")
+                    flag_str = " ".join(flags)
+                    extra = f" {flag_str}" if flag_str else ""
+                    console.print(
+                        f"    tile {idx}: img#{img_idx} "
+                        f"({t['left_deg']:.6f},{t['bottom_deg']:.6f})-"
+                        f"({t['right_deg']:.6f},{t['top_deg']:.6f}) "
+                        f"Δlon={t['lon_delta']} Δlat={t['lat_delta']} "
+                        f"jpg={t['jpeg_size']}{extra}"
+                    )
+                if show_count < len(tile_details_list):
+                    _truncated(console, len(tile_details_list) - show_count, "tiles")
+            else:
+                console.print("  [dim]No raster tiles found in RGN2[/]")
+
+            return
+
         # --rgn2: annotated RGN2 analysis
         if rgn2:
             analyze_rgn2(parser, gmp_key, console.print)
@@ -934,7 +1028,113 @@ def info(
 @click.argument("file1", type=click.Path(exists=True))
 @click.argument("file2", type=click.Path(exists=True))
 @click.option("--no-color", is_flag=True, help="Disable colored output")
-def compare(file1: str, file2: str, no_color: bool) -> None:
-    """Compare two IMG files side by side (RGN headers and RGN2 data)."""
+@click.option(
+    "--headers-only", is_flag=True, help="Only compare headers, skip RGN2 samples"
+)
+@click.option(
+    "--sample-size",
+    type=int,
+    default=10,
+    help="Number of RGN2 records to compare (default: 10)",
+)
+@click.option("--full", is_flag=True, help="Full raw dump mode (legacy verbose output)")
+def compare(
+    file1: str,
+    file2: str,
+    no_color: bool,
+    headers_only: bool,
+    sample_size: int,
+    full: bool,
+) -> None:
+    """Compare two IMG files: structure, headers, and RGN2 raster tiles."""
     console = Console(force_terminal=False if no_color else None, no_color=no_color)
-    compare_files(file1, file2, console.print)
+    compare_files(
+        file1,
+        file2,
+        console.print,
+        headers_only=headers_only,
+        sample_size=sample_size,
+        full=full,
+    )
+
+
+@img.command()
+@click.argument("img_file", type=click.Path(exists=True))
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(),
+    required=True,
+    help="Output GeoTIFF file path",
+)
+@click.option(
+    "--bbox",
+    type=str,
+    help="Bounding box filter: west,south,east,north (e.g., '7.0,46.0,8.0,47.0')",
+)
+@click.option(
+    "--zoom",
+    type=str,
+    help="Zoom level filter: single level or range (e.g., '14' or '12-16')",
+)
+@click.option(
+    "--max-tiles",
+    type=int,
+    default=0,
+    help="Maximum tiles to export (0 = all, useful for testing)",
+)
+def export(
+    img_file: str, output: str, bbox: str | None, zoom: str | None, max_tiles: int
+) -> None:
+    """Export IMG raster tiles to GeoTIFF format."""
+    from pathlib import Path
+
+    from cartoload.analysis.img_export import export_img_to_geotiff
+
+    # Parse bbox
+    bbox_tuple = None
+    if bbox:
+        try:
+            parts = [float(x.strip()) for x in bbox.split(",")]
+            if len(parts) != 4:
+                raise ValueError("bbox must have exactly 4 values")
+            bbox_tuple = tuple(parts)
+        except Exception as e:
+            click.echo(f"Error: Invalid bbox format: {e}", err=True)
+            raise click.Abort()
+
+    # Parse zoom
+    zoom_filter = None
+    if zoom:
+        try:
+            if "-" in zoom:
+                min_z, max_z = zoom.split("-")
+                zoom_filter = (int(min_z), int(max_z))
+            else:
+                zoom_filter = int(zoom)
+        except Exception as e:
+            click.echo(f"Error: Invalid zoom format: {e}", err=True)
+            raise click.Abort()
+
+    # Run export
+    try:
+        result = export_img_to_geotiff(
+            Path(img_file),
+            Path(output),
+            bbox=bbox_tuple,
+            zoom_filter=zoom_filter,
+            max_tiles=max_tiles if max_tiles > 0 else 999999,
+        )
+
+        click.echo("Export complete:")
+        click.echo(f"  Tiles exported: {result['tiles_exported']}")
+        if "bounds" in result:
+            bounds = result["bounds"]
+            click.echo(
+                f"  Bounds: ({bounds['west']:.4f}, {bounds['south']:.4f}) to ({bounds['east']:.4f}, {bounds['north']:.4f})"
+            )
+        click.echo(f"  Output: {result['output_path']}")
+
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        raise click.Abort()

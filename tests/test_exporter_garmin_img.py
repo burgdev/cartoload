@@ -1208,8 +1208,10 @@ class TestLBL28LBL29TypeE0:
 
         assert result.returncode == 0, f"GMT validation failed: {result.stderr}"
 
-        # Check for "Bitmaps" line in output
-        assert "Bitmaps" in result.stdout, "GMT output should contain 'Bitmaps' line"
+        # Check for "Raster Map" or "Bitmaps" line in output
+        assert "Raster Map" in result.stdout or "Bitmaps" in result.stdout, (
+            "GMT output should contain 'Raster Map' or 'Bitmaps'"
+        )
 
         # Verify tile count appears in output
         assert "3" in result.stdout or "size" in result.stdout.lower(), (
@@ -1780,6 +1782,7 @@ class TestRgn2RasterRecord:
             tile_center_lon=8.5,
             jpeg_size=5000,
             image_index=0,
+            level_number=17,
         )
         assert len(buf.getvalue()) == 42
 
@@ -1800,6 +1803,7 @@ class TestRgn2RasterRecord:
             tile_center_lon=8.5,
             jpeg_size=5000,
             image_index=0,
+            level_number=17,
         )
         data = buf.getvalue()
         assert data[0] == 0x06
@@ -1822,6 +1826,7 @@ class TestRgn2RasterRecord:
             tile_center_lon=8.5,
             jpeg_size=5000,
             image_index=0,
+            level_number=17,
         )
         data = buf.getvalue()
         # byte 6: VUInt32(8) = 0x11
@@ -1850,6 +1855,7 @@ class TestRgn2RasterRecord:
             tile_center_lon=8.5,
             jpeg_size=12345,
             image_index=42,
+            level_number=17,
         )
         data = buf.getvalue()
         # image_id at bytes 20-21
@@ -1878,6 +1884,7 @@ class TestRgn2RasterRecord:
             tile_center_lon=8.5,
             jpeg_size=5000,
             image_index=0,
+            level_number=17,
         )
         data = buf.getvalue()
         lon_delta = struct.unpack_from("<h", data, 2)[0]
@@ -1904,9 +1911,58 @@ class TestRgn2RasterRecord:
             tile_center_lon=8.4,
             jpeg_size=5000,
             image_index=0,
+            level_number=17,
         )
         data = buf.getvalue()
         lon_delta = struct.unpack_from("<h", data, 2)[0]
         lat_delta = struct.unpack_from("<h", data, 4)[0]
         assert lon_delta != 0
         assert lat_delta != 0
+
+    def test_record_delta_shift_matches_gpxsee(self):
+        """Delta should be in level-space so GPXSee's left-shift recovers the 24-bit delta.
+
+        GPXSee computes: pos = subdiv_center + (delta << (24 - bits))
+        So delta = (tile_center_mu - subdiv_center_mu) >> (24 - level_number)
+        """
+        import struct
+        from cartoload.exporters.garmin_img_writer import _deg_to_map_units
+
+        buf = io.BytesIO()
+        from cartoload.exporters.garmin_img_writer import _write_rgn2_raster_record
+
+        # Use level_number=17 (shift=7) with a known offset
+        subdiv_lat, subdiv_lon = 47.0, 8.5
+        tile_lat, tile_lon = 46.9, 8.4
+        _write_rgn2_raster_record(
+            buf,
+            subdiv_center_lat=subdiv_lat,
+            subdiv_center_lon=subdiv_lon,
+            tile_lat_min=46.85,
+            tile_lon_min=8.35,
+            tile_lat_max=46.95,
+            tile_lon_max=8.45,
+            tile_center_lat=tile_lat,
+            tile_center_lon=tile_lon,
+            jpeg_size=5000,
+            image_index=0,
+            level_number=17,
+        )
+        data = buf.getvalue()
+        lon_delta = struct.unpack_from("<h", data, 2)[0]
+        lat_delta = struct.unpack_from("<h", data, 4)[0]
+
+        # Verify: GPXSee would compute pos = subdiv_mu + (delta << (24-17))
+        # This should equal tile_center_mu
+        shift = 24 - 17  # = 7
+        subdiv_lon_mu = _deg_to_map_units(subdiv_lon)
+        subdiv_lat_mu = _deg_to_map_units(subdiv_lat)
+        tile_lon_mu = _deg_to_map_units(tile_lon)
+        tile_lat_mu = _deg_to_map_units(tile_lat)
+
+        recovered_lon_mu = subdiv_lon_mu + (lon_delta << shift)
+        recovered_lat_mu = subdiv_lat_mu + (lat_delta << shift)
+
+        # The recovery should be exact (within rounding from the >> shift)
+        assert abs(recovered_lon_mu - tile_lon_mu) <= 1 << shift
+        assert abs(recovered_lat_mu - tile_lat_mu) <= 1 << shift

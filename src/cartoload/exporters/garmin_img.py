@@ -483,11 +483,15 @@ class GarminImgExporter(BaseExporter):
             layer_type="Raster Map",
         )
 
-        # Build zoom levels with dynamically computed codes
+        # Build zoom levels with dynamically computed codes.
+        # Level numbers use actual zoom levels directly (e.g. 6-17).
+        # Note: GPXSee uses level_number (bits) for zoom selection in
+        # MapData::zoom(int bits), so changing these values affects which
+        # map level is selected at each display zoom.
         sorted_zooms = sorted(layer_config.zoom_levels)
         zoom_code_map = dict(_compute_zoom_codes(sorted_zooms))
         zoom_levels = []
-        for zl in sorted_zooms:
+        for z_idx, zl in enumerate(sorted_zooms):
             zoom_levels.append(
                 ZoomLevel(
                     level_number=zl,
