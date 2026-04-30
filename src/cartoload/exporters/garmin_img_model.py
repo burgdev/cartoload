@@ -226,8 +226,11 @@ class ZoomLevel:
     referencing a subset of tiles at a specific resolution.
     """
 
-    level_number: int  # Garmin zoom level number (e.g., 20, 21, 22, 23, 24)
+    level_number: int  # Garmin bits/precision (remapped to 24-N+1..24)
     zoom_code: int  # Garmin internal zoom code (e.g., 84, 83, 2, 1, 0)
+    source_zoom: int | None = (
+        None  # Original WMTS zoom level (key into compressed_tiles)
+    )
 
     # Resolution metadata
     resolution_meters_per_pixel: Optional[float] = (
@@ -417,23 +420,27 @@ class Subdivision:
         Returns width with bit 15 set if this subdivision has children
         (i.e., is not at the last zoom level — caller must set bit 15).
         The encoded value represents (extent_in_map_units >> shift).
+        Clamped to 0x7FFF to fit in 15-bit TRE2 width field.
         """
         center_mu = int(self.center_lon * (2**24) / 360)
         west_mu = int(self.bounds_west * (2**24) / 360)
         w = 2 * (center_mu - west_mu)
         mask = (1 << shift) - 1
-        return ((w + 1) // 2 + mask) >> shift
+        encoded = ((w + 1) // 2 + mask) >> shift
+        return min(encoded, 0x7FFF)
 
     def encode_tre2_height(self, shift: int) -> int:
         """Encode the vertical extent for TRE2 height field.
 
         Returns signed height value in encoded map units.
+        Clamped to 0x7FFF to fit in 15-bit TRE2 height field.
         """
         center_mu = int(self.center_lat * (2**24) / 360)
         south_mu = int(self.bounds_south * (2**24) / 360)
         h = 2 * (center_mu - south_mu)
         mask = (1 << shift) - 1
-        return ((h + 1) // 2 + mask) >> shift
+        encoded = ((h + 1) // 2 + mask) >> shift
+        return min(encoded, 0x7FFF)
 
 
 @dataclass

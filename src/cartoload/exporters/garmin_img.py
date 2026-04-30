@@ -484,18 +484,30 @@ class GarminImgExporter(BaseExporter):
         )
 
         # Build zoom levels with dynamically computed codes.
-        # Level numbers use actual zoom levels directly (e.g. 6-17).
-        # Note: GPXSee uses level_number (bits) for zoom selection in
-        # MapData::zoom(int bits), so changing these values affects which
-        # map level is selected at each display zoom.
+        # Level numbers are remapped to 24-N+1..24 (where N = number of levels)
+        # so the most detailed level has level_number=24 (shift=0, zero
+        # quantization error in boundingRect). GPXSee uses level_number for
+        # zoom selection and coordinate precision, NOT for rendering (tiles
+        # are rendered at absolute 32-bit geographic bounds).
+        # Example: 12 levels → level_numbers 13-24, 5 levels → 20-24.
         sorted_zooms = sorted(layer_config.zoom_levels)
+        n_zoom = len(sorted_zooms)
         zoom_code_map = dict(_compute_zoom_codes(sorted_zooms))
         zoom_levels = []
         for z_idx, zl in enumerate(sorted_zooms):
+            remapped_level = 24 - (n_zoom - 1 - z_idx)
+            logger.info(
+                "Zoom %d → level_number=%d (shift=%d, zoom_code=0x%02X)",
+                zl,
+                remapped_level,
+                max(0, 24 - remapped_level),
+                zoom_code_map[zl],
+            )
             zoom_levels.append(
                 ZoomLevel(
-                    level_number=zl,
+                    level_number=remapped_level,
                     zoom_code=zoom_code_map[zl],
+                    source_zoom=zl,
                     lat_north=bounds.get("north"),
                     lat_south=bounds.get("south"),
                     lon_west=bounds.get("west"),
@@ -589,7 +601,10 @@ class GarminImgExporter(BaseExporter):
             "west": img_file.bounds_west,
             "east": img_file.bounds_east,
         }
-        sorted_zooms = [z.level_number for z in img_file.zoom_levels]
+        # Use actual zoom levels (keys of compressed_tiles), NOT remapped level_numbers.
+        # compressed_tiles is keyed by source zoom level, while zoom_levels may have
+        # remapped level_numbers for Garmin coordinate encoding.
+        sorted_zooms = sorted(compressed_tiles.keys())
         subdivisions = generate_subdivisions(compressed_tiles, sorted_zooms, bounds)
 
         # Compute total estimated size
@@ -661,7 +676,9 @@ class GarminImgExporter(BaseExporter):
                 description=img_file.description,
                 copyright_string=img_file.copyright_string,
                 zoom_levels=[
-                    z for z in img_file.zoom_levels if z.level_number in zooms
+                    z
+                    for z in img_file.zoom_levels
+                    if (z.source_zoom or z.level_number) in zooms
                 ],
             )
 
@@ -698,7 +715,7 @@ class GarminImgExporter(BaseExporter):
                 zoom_levels=[
                     z
                     for z in img_file.zoom_levels
-                    if z.level_number in list(current_zooms) + [zoom]
+                    if (z.source_zoom or z.level_number) in list(current_zooms) + [zoom]
                 ],
             )
             computer = LayoutComputer(trial_img, trial_tiles)

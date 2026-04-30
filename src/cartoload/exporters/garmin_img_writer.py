@@ -281,6 +281,15 @@ class LayoutComputer:
         """
         total_tiles = sum(len(tiles) for tiles in self.compressed_tiles.values())
 
+        # Validate subdivision tile count matches compressed_tiles count
+        if self.subdivisions is not None and len(self.subdivisions) > 0:
+            subdiv_tile_count = sum(len(sub.tile_entries) for sub in self.subdivisions)
+            if subdiv_tile_count != total_tiles:
+                raise ValueError(
+                    f"Subdivision tile count ({subdiv_tile_count}) != "
+                    f"compressed_tiles count ({total_tiles})"
+                )
+
         # Container header + copyright strings
         copyright_str = self.img_file.copyright_string or "Copyright GARMIN."
         copyright_bytes = copyright_str.encode("cp1252") + b"\x00"
@@ -805,7 +814,7 @@ class GMPWriter:
         else:
             # Legacy: tiles are in compressed_tiles dict
             for zoom in img_file.zoom_levels:
-                tiles = compressed_tiles.get(zoom.level_number, [])
+                tiles = compressed_tiles.get(zoom.source_zoom or zoom.level_number, [])
                 for tile_entry in tiles:
                     lbl29_size += (
                         len(tile_entry[0])
@@ -921,7 +930,9 @@ class GMPWriter:
             rgn_tile_offset = 0
             off = 0
             for z_idx, zoom in enumerate(img_file.zoom_levels):
-                tile_count = len(compressed_tiles.get(zoom.level_number, []))
+                tile_count = len(
+                    compressed_tiles.get(zoom.source_zoom or zoom.level_number, [])
+                )
                 is_last_level = z_idx == n_zoom - 1
                 rec_size = 14 if is_last_level else 16
                 shift = max(0, 24 - zoom.level_number)
@@ -1044,7 +1055,9 @@ class GMPWriter:
             # Legacy: one uint32 per zoom level
             rgn2_offset = 0
             for z_idx, zoom in enumerate(img_file.zoom_levels):
-                tile_count = len(compressed_tiles.get(zoom.level_number, []))
+                tile_count = len(
+                    compressed_tiles.get(zoom.source_zoom or zoom.level_number, [])
+                )
                 f.write(struct.pack("<I", rgn2_offset))
                 rgn2_offset += tile_count * RGN2_RASTER_RECORD_SIZE
             # Sentinel entry: total RGN2 data extent as the end offset
@@ -1480,7 +1493,7 @@ def _write_lbl28_section(
     """
     offset = 0
     for zoom in zoom_levels:
-        tiles = compressed_tiles.get(zoom.level_number, [])
+        tiles = compressed_tiles.get(zoom.source_zoom or zoom.level_number, [])
         for tile_entry in tiles:
             # Write offset to this JPEG (relative to LBL29 start)
             f.write(struct.pack("<I", offset))
@@ -1503,7 +1516,7 @@ def _write_lbl29_section(
         zoom_levels: List of ZoomLevel objects defining zoom order
     """
     for zoom in zoom_levels:
-        tiles = compressed_tiles.get(zoom.level_number, [])
+        tiles = compressed_tiles.get(zoom.source_zoom or zoom.level_number, [])
         for tile_entry in tiles:
             tile_data = tile_entry[0] if isinstance(tile_entry, tuple) else tile_entry
             # Verify JPEG marker
@@ -1542,7 +1555,7 @@ def _write_rgn_data_section(
 
     image_index = 0
     for zoom in zoom_levels:
-        tiles = compressed_tiles.get(zoom.level_number, [])
+        tiles = compressed_tiles.get(zoom.source_zoom or zoom.level_number, [])
 
         for tile_entry in tiles:
             if isinstance(tile_entry, tuple):
