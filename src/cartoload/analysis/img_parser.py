@@ -950,24 +950,41 @@ class IMGParser:
         map_e = tre.get("east_deg", 180.0)
         map_w = tre.get("west_deg", -180.0)
 
-        # Get subdivision centers from properly parsed subdivisions
+        # Get subdivision info for delta validation
         subdivisions = tre.get("subdivisions", [])
-        subdiv_centers = [
-            (
-                s.get("lon_center_deg", 0),
-                s.get("lat_center_deg", 0),
-                s.get("level_number", 0),
-            )
-            for s in subdivisions
-        ]
 
-        # Group subdivisions by level_number for per-level matching
-        subdiv_by_level: dict[int, list[tuple[float, float]]] = {}
-        for lon, lat, lvl in subdiv_centers:
-            subdiv_by_level.setdefault(lvl, []).append((lon, lat))
+        # Build tile-to-subdivision mapping using TRE7 offsets and RGN2 record count
+        # Each TRE7 entry corresponds to a subdivision; RGN2 records are ordered by subdivision
+        tre7_offsets = tre.get("tre7_offsets", [])
+        rgn2_total_size = rgn.get("rgn2_size", 0)
+        rgn2_record_size = 42  # RGN2_RASTER_RECORD_SIZE
+        rgn2_records = rgn.get("rgn2_records", [])
+
+        # Compute per-subdivision tile ranges
+        subdiv_tile_ranges: list[
+            tuple[int, int, dict]
+        ] = []  # (start, end, subdiv_info)
+        if tre7_offsets and subdivisions and len(tre7_offsets) > len(subdivisions):
+            # TRE7 has entries for each subdivision + sentinel
+            tile_idx = 0
+            for si, sub in enumerate(subdivisions):
+                rgn_off = sub.get("rgn_offset", 0)
+                # Compute tile count from RGN2 offset span
+                if si + 1 < len(subdivisions):
+                    next_off = subdivisions[si + 1].get("rgn_offset", rgn_off)
+                else:
+                    # Last subdivision: use sentinel offset from TRE7
+                    sentinel = tre7_offsets[-1] if tre7_offsets else rgn2_total_size
+                    next_off = (
+                        sentinel.get("offset", rgn2_total_size)
+                        if isinstance(sentinel, dict)
+                        else sentinel
+                    )
+                tile_count = (next_off - rgn_off) // rgn2_record_size
+                subdiv_tile_ranges.append((tile_idx, tile_idx + tile_count, sub))
+                tile_idx += tile_count
 
         # Validate RGN2 raster tiles
-        rgn2_records = rgn.get("rgn2_records", [])
         for i, rec in enumerate(rgn2_records):
             if rec.get("type") != "raster tile":
                 continue
@@ -999,7 +1016,7 @@ class IMGParser:
                 and rec["right_deg"] > rec["left_deg"]
             )
 
-            # Validate lon_delta / lat_delta against subdivision centers
+            # Validate lon_delta / lat_delta against subdivision center
             lon_delta_mu = rec["lon_delta"]
             lat_delta_mu = rec["lat_delta"]
             tile_center_lon = (rec["left_deg"] + rec["right_deg"]) / 2
@@ -1008,28 +1025,67 @@ class IMGParser:
             detail["tile_center_lon"] = tile_center_lon
             detail["tile_center_lat"] = tile_center_lat
 
-            # Find nearest subdivision center across all levels
-            if subdiv_centers:
-                best_sc = min(
-                    subdiv_centers,
-                    key=lambda c: (
-                        (c[0] - tile_center_lon) ** 2 + (c[1] - tile_center_lat) ** 2
-                    ),
-                )
-                sc_lon_mu = int(best_sc[0] * (2**24) / 360)
-                sc_lat_mu = int(best_sc[1] * (2**24) / 360)
+            # Match tile to its subdivision and compute expected delta with correct shift
+            sub_info = None
+            for start, end, sub in subdiv_tile_ranges:
+                if start <= i < end:
+                    sub_info = sub
+                    break
+
+            if sub_info is not None:
+                sc_lon = sub_info.get("lon_center_deg", 0)
+                sc_lat = sub_info.get("lat_center_deg", 0)
+                level_number = sub_info.get("level_number", 24)
+                shift = max(0, 24 - level_number)
+
+                sc_lon_mu = int(sc_lon * (2**24) / 360)
+                sc_lat_mu = int(sc_lat * (2**24) / 360)
                 tc_lon_mu = int(tile_center_lon * (2**24) / 360)
                 tc_lat_mu = int(tile_center_lat * (2**24) / 360)
-                expected_lon_delta = max(-32768, min(32767, tc_lon_mu - sc_lon_mu))
-                expected_lat_delta = max(-32768, min(32767, tc_lat_mu - sc_lat_mu))
+
+                expected_lon_delta = max(
+                    -32768, min(32767, (tc_lon_mu - sc_lon_mu) >> shift)
+                )
+                expected_lat_delta = max(
+                    -32768, min(32767, (tc_lat_mu - sc_lat_mu) >> shift)
+                )
                 delta_match = (
                     lon_delta_mu == expected_lon_delta
                     and lat_delta_mu == expected_lat_delta
                 )
-                detail["nearest_subdiv_center"] = best_sc
+                detail["subdiv_center"] = (sc_lon, sc_lat)
+                detail["subdiv_level_number"] = level_number
+                detail["subdiv_shift"] = shift
                 detail["expected_lon_delta"] = expected_lon_delta
                 detail["expected_lat_delta"] = expected_lat_delta
                 detail["delta_match"] = delta_match
+            elif subdivisions:
+                # Fallback: find nearest subdivision center (old behavior)
+                subdiv_centers_fb = [
+                    (s.get("lon_center_deg", 0), s.get("lat_center_deg", 0))
+                    for s in subdivisions
+                ]
+                if subdiv_centers_fb:
+                    best_sc = min(
+                        subdiv_centers_fb,
+                        key=lambda c: (
+                            (c[0] - tile_center_lon) ** 2
+                            + (c[1] - tile_center_lat) ** 2
+                        ),
+                    )
+                    sc_lon_mu = int(best_sc[0] * (2**24) / 360)
+                    sc_lat_mu = int(best_sc[1] * (2**24) / 360)
+                    tc_lon_mu = int(tile_center_lon * (2**24) / 360)
+                    tc_lat_mu = int(tile_center_lat * (2**24) / 360)
+                    expected_lon_delta = max(-32768, min(32767, tc_lon_mu - sc_lon_mu))
+                    expected_lat_delta = max(-32768, min(32767, tc_lat_mu - sc_lat_mu))
+                    detail["nearest_subdiv_center"] = best_sc
+                    detail["expected_lon_delta"] = expected_lon_delta
+                    detail["expected_lat_delta"] = expected_lat_delta
+                    detail["delta_match"] = (
+                        lon_delta_mu == expected_lon_delta
+                        and lat_delta_mu == expected_lat_delta
+                    )
 
             results["tile_details"].append(detail)
 

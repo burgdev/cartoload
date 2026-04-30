@@ -421,26 +421,28 @@ class Subdivision:
         (i.e., is not at the last zoom level — caller must set bit 15).
         The encoded value represents (extent_in_map_units >> shift).
         Clamped to 0x7FFF to fit in 15-bit TRE2 width field.
+        +1 is added to ensure adjacent subdivision bounds overlap (not gap).
         """
         center_mu = int(self.center_lon * (2**24) / 360)
         west_mu = int(self.bounds_west * (2**24) / 360)
         w = 2 * (center_mu - west_mu)
         mask = (1 << shift) - 1
         encoded = ((w + 1) // 2 + mask) >> shift
-        return min(encoded, 0x7FFF)
+        return min(encoded + 1, 0x7FFF)
 
     def encode_tre2_height(self, shift: int) -> int:
         """Encode the vertical extent for TRE2 height field.
 
         Returns signed height value in encoded map units.
         Clamped to 0x7FFF to fit in 15-bit TRE2 height field.
+        +1 is added to ensure adjacent subdivision bounds overlap (not gap).
         """
         center_mu = int(self.center_lat * (2**24) / 360)
         south_mu = int(self.bounds_south * (2**24) / 360)
         h = 2 * (center_mu - south_mu)
         mask = (1 << shift) - 1
         encoded = ((h + 1) // 2 + mask) >> shift
-        return min(encoded, 0x7FFF)
+        return min(encoded + 1, 0x7FFF)
 
 
 @dataclass

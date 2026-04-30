@@ -1359,6 +1359,131 @@ def _build_net_subheader(now: datetime) -> bytes:
     return bytes(buf)
 
 
+def _encode_tile_bitstream(
+    tile_center_lat: float,
+    tile_center_lon: float,
+    tile_lat_min: float,
+    tile_lon_min: float,
+    tile_lat_max: float,
+    tile_lon_max: float,
+    level_number: int,
+) -> bytes:
+    """Encode 8-byte bitstream with tile corner deltas.
+
+    Generates a DeltaStream that GPXSee decodes as polygon points expanding
+    the boundingRect to cover the full tile area. Without this, the boundingRect
+    is a single point (the tile center), causing GPXSee's copyPolys filter to
+    exclude tiles whose center falls outside the RasterTile view rect.
+
+    Format (matches GPXSee DeltaStream in deltastream.cpp):
+      byte 0: info byte — low nibble = lon baseSize, high nibble = lat baseSize
+      bytes 1-7: sign bits + delta-encoded coordinate pairs (LSB-first bit packing)
+
+    The encoding uses variable-sign mode for both axes and encodes 2 delta pairs:
+      delta 1: center → top-left corner
+      delta 2: top-left → bottom-right corner
+    This produces a boundingRect covering [left, bottom] to [right, top].
+
+    Args:
+        tile_center_lat/lon: Tile center in degrees
+        tile_lat_min/max, tile_lon_min/max: Tile geographic bounds in degrees
+        level_number: TRE1 bits value (determines coordinate shift)
+
+    Returns:
+        8 bytes of bitstream data
+    """
+    shift = max(0, 24 - level_number)
+
+    # Compute tile half-extents in level-space (24-bit map units >> shift)
+    center_lat_mu = _deg_to_map_units(tile_center_lat)
+    center_lon_mu = _deg_to_map_units(tile_center_lon)
+    top_mu = _deg_to_map_units(tile_lat_max)
+    _deg_to_map_units(tile_lon_min)
+    right_mu = _deg_to_map_units(tile_lon_max)
+    _deg_to_map_units(tile_lat_min)
+
+    # Half-widths in level-space
+    half_w = (right_mu - center_lon_mu) >> shift
+    half_h = (top_mu - center_lat_mu) >> shift
+
+    # Determine info byte based on max delta magnitude
+    # We need to encode: (-half_w, +half_h) and (+2*half_w, -2*half_h)
+    max_delta = max(half_w, half_h, 2 * half_w, 2 * half_h)
+    # Clamp base_size to fit in 8-byte bitstream (56 data bits = 7 bytes):
+    # total bits = 2 (signs) + 4 * bits_per_delta, max bits_per_delta = 13
+    base_size = min(_bitstream_base_size(max_delta), 10)
+    info = (base_size << 4) | base_size  # same base for lon and lat
+
+    # Bit sizes for each axis (variable-sign mode)
+    lon_bits = 2 + base_size + 1  # +1 for variable sign
+    lat_bits = 2 + base_size + 1
+    max_pos = (1 << (lon_bits - 1)) - 1  # max positive with variable sign
+
+    # Build bit stream for DeltaStream (bytes 1-7 of the 8-byte bitstream)
+    # Byte 0 is the info byte; bytes 1-7 contain sign bits + delta pairs
+    bits: list[int] = []
+
+    # Sign bits: 0 = variable sign for both axes (each: 1 bit = 0)
+    bits.append(0)  # lonSign = 0
+    bits.append(0)  # latSign = 0
+
+    # Delta pair 1: center → top-left = (-half_w, +half_h)
+    bits.extend(_encode_delta(max(-max_pos, -half_w), lon_bits))
+    bits.extend(_encode_delta(min(max_pos, half_h), lat_bits))
+
+    # Delta pair 2: top-left → bottom-right = (+2*half_w, -2*half_h)
+    bits.extend(_encode_delta(min(max_pos, 2 * half_w), lon_bits))
+    bits.extend(_encode_delta(max(-max_pos, -2 * half_h), lat_bits))
+
+    # Pack: byte 0 = info, bytes 1-7 = bit-packed sign+deltas
+    data = bytearray(8)
+    data[0] = info
+    for i, bit in enumerate(bits):
+        if bit:
+            data[1 + i // 8] |= 1 << (i % 8)
+
+    return bytes(data)
+
+
+def _bitstream_base_size(max_val: int) -> int:
+    """Determine the DeltaStream baseSize for a given max delta magnitude.
+
+    bitSize(baseSize, variableSign=True, extraBit=False) = baseSize + 3
+    We need baseSize + 3 >= bits to represent max_val with sign.
+    """
+    import math as _math
+
+    # With variable sign, max positive = (1 << (bits-1)) - 1
+    # bits = baseSize + 3
+    # Need: (1 << (bits-1)) - 1 >= max_val
+    # So: bits-1 >= ceil(log2(max_val + 1))
+    if max_val <= 0:
+        return 1
+    needed_bits = _math.ceil(_math.log2(max_val + 1)) + 1
+    base = max(1, needed_bits - 3)
+    return min(base, 15)  # max baseSize = 15
+
+
+def _encode_delta(val: int, bits: int) -> list[int]:
+    """Encode a signed delta value as a list of bits (LSB-first) for DeltaStream.
+
+    Variable-sign encoding (sign=0 mode in GPXSee):
+      - Positive v (v >= 0): raw value v, sign bit (MSB) = 0
+      - Negative v (v < 0): value = (-v) | signMask, where signMask = 1 << (bits-1)
+    """
+    sign_mask = 1 << (bits - 1)
+    if val >= 0:
+        raw = val
+    else:
+        raw = (sign_mask + val) | sign_mask
+
+    # Convert to LSB-first bit list
+    result = []
+    for i in range(bits):
+        result.append((raw >> i) & 1)
+    return result
+
+
 def _write_rgn2_raster_record(
     f: io.BufferedWriter,
     subdiv_center_lat: float,
@@ -1449,10 +1574,20 @@ def _write_rgn2_raster_record(
     # VUInt32(bitstream_len=8) → 0x11
     f.write(_encode_vuint32(8))
 
-    # Bitstream (8 bytes): degenerate 1-point polyline
-    # byte 0: bitstreamInfo — 0x00 means: no special flags, single address point
-    # bytes 1-7: zeros (no coordinate deltas for a degenerate single-point line)
-    f.write(b"\x00" + b"\x00" * 7)
+    # Bitstream (8 bytes): 2-point polyline encoding tile corners
+    # Expands the polygon boundingRect to cover the full tile area,
+    # ensuring GPXSee's copyPolys filter includes tiles at view edges.
+    bitstream = _encode_tile_bitstream(
+        tile_center_lat,
+        tile_center_lon,
+        tile_lat_min,
+        tile_lon_min,
+        tile_lat_max,
+        tile_lon_max,
+        level_number,
+    )
+    assert len(bitstream) == 8
+    f.write(bitstream)
 
     # Label pointer (uint24 LE) — 0 for raster tiles (no label)
     f.write(b"\x00\x00\x00")
