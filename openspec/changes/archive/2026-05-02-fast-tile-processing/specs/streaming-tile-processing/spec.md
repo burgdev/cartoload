@@ -1,4 +1,4 @@
-## ADDED Requirements
+## MODIFIED Requirements
 
 ### Requirement: Tiles processed in batches, not all at once
 
@@ -48,18 +48,3 @@ When the source CRS matches the target CRS (EPSG:4326), the system SHALL read ti
 - **THEN** the system SHALL warp the tile in-process using rasterio and output JPEG bytes
 - **AND** no TIFF file SHALL be written to disk at any point
 - **AND** no `gdalwarp` subprocess SHALL be spawned
-
-### Requirement: IMG writer accepts JPEG bytes, not numpy arrays
-
-The `TileExtractor` / `TileEncoder` interface SHALL be updated so that the fast pipeline passes pre-encoded JPEG bytes directly to the IMG writer. The writer SHALL NOT require decompressed pixel data.
-
-#### Scenario: Pre-encoded tiles bypass encoding step
-
-- **WHEN** the pipeline has JPEG bytes ready (from cache pass-through or in-process warp)
-- **THEN** those bytes SHALL be written to the IMG file as-is
-- **AND** the `TileEncoder.encode_tile()` step SHALL be skipped for that tile
-
-#### Scenario: Mixed pre-encoded and raw tiles
-
-- **WHEN** some tiles are available as JPEG bytes and others need encoding
-- **THEN** the system SHALL handle both in the same batch without issue

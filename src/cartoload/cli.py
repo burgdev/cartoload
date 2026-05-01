@@ -358,6 +358,19 @@ def build(
                     if encode_task is None:
                         encode_task = progress.add_task("Encoding tiles", total=total)
                     progress.update(encode_task, completed=current)
+                elif stage.startswith("processing"):
+                    # Per-zoom processing progress: "processing" or "processing:18"
+                    parts = stage.split(":", 1)
+                    zoom_label = f" (zoom {parts[1]})" if len(parts) > 1 else ""
+                    task_key = f"process_{parts[1] if len(parts) > 1 else 'default'}"
+                    if not hasattr(on_export_progress, "_tasks"):
+                        on_export_progress._tasks = {}  # type: ignore[attr-defined]
+                    tasks_dict = on_export_progress._tasks  # type: ignore[attr-defined]
+                    if task_key not in tasks_dict:
+                        tasks_dict[task_key] = progress.add_task(
+                            f"Processing tiles{zoom_label}", total=total
+                        )
+                    progress.update(tasks_dict[task_key], completed=current)
 
             # Run pipeline
             output_paths = asyncio.run(
@@ -680,7 +693,7 @@ def cache(ctx: click.Context, cache_dir: str) -> None:
 @cache.command("status")
 @click.pass_context
 def cache_status(ctx: click.Context) -> None:
-    """Report cache size, tile counts per source, download vs reprojection."""
+    """Report cache size and tile counts per source."""
     cache_dir: Path = ctx.obj["cache_dir"]
 
     if not cache_dir.exists():
@@ -701,12 +714,6 @@ def cache_status(ctx: click.Context) -> None:
 
     for source_dir in source_dirs:
         name = source_dir.name
-        # Reprojection caches end with _epsg_NNNN (lowercase crs code)
-        is_reprojection = (
-            name.endswith("_epsg_4326")
-            or name.endswith("_epsg_3857")
-            or "_epsg_" in name
-        )
 
         # Count tiles and size
         tile_count = 0
@@ -720,8 +727,7 @@ def cache_status(ctx: click.Context) -> None:
         total_size += tile_size
         total_tiles += tile_count
 
-        tier = "reprojection" if is_reprojection else "download"
-        click.echo(f"  {name} ({tier})")
+        click.echo(f"  {name}")
         click.echo(f"    Tiles: {tile_count}")
         click.echo(f"    Size:  {_human_size(tile_size)}")
         click.echo()
@@ -731,17 +737,10 @@ def cache_status(ctx: click.Context) -> None:
 
 @cache.command("clean")
 @click.option("--source", help="Clean only a specific source's cache")
-@click.option(
-    "--reprojection-only",
-    is_flag=True,
-    help="Clean only reprojection cache directories",
-)
 @click.option("-f", "--force", is_flag=True, help="Skip confirmation prompt")
 @click.pass_context
-def cache_clean(
-    ctx: click.Context, source: str | None, reprojection_only: bool, force: bool
-) -> None:
-    """Remove cached tiles (download and/or reprojection)."""
+def cache_clean(ctx: click.Context, source: str | None, force: bool) -> None:
+    """Remove cached tiles."""
     cache_dir: Path = ctx.obj["cache_dir"]
 
     if not cache_dir.exists():
@@ -752,23 +751,10 @@ def cache_clean(
     dirs_to_remove: list[Path] = []
 
     if source:
-        # Clean specific source
         source_dir = cache_dir / source
         if source_dir.exists():
             dirs_to_remove.append(source_dir)
-        # Also clean reprojection cache for this source
-        for d in cache_dir.iterdir():
-            if d.is_dir() and d.name.startswith(f"{source}_"):
-                dirs_to_remove.append(d)
-    elif reprojection_only:
-        # Clean only reprojection cache dirs (those with _epsg_ suffix)
-        for d in cache_dir.iterdir():
-            if d.is_dir() and "_epsg_" in d.name:
-                parts = d.name.rsplit("_", 2)
-                if len(parts) >= 2:
-                    dirs_to_remove.append(d)
     else:
-        # Clean everything
         dirs_to_remove = sorted(
             d for d in cache_dir.iterdir() if d.is_dir() and not d.name.startswith(".")
         )

@@ -91,8 +91,32 @@ RGN_HEADER_LENGTH = 125  # RGN sub-header length
 LBL_HEADER_LENGTH = 596  # LBL sub-header length
 NET_HEADER_LENGTH = 100  # NET sub-header length
 TILE_INDEX_ENTRY_SIZE = 4  # Tile index: one uint32 per tile
-RGN2_RASTER_RECORD_SIZE = 42  # Compound raster record: type+subtype+deltas+len+bitstream+label+class+rs+imgid+coords+tail
 MPS_SUBFILE_SIZE = 98
+
+
+def _img_id_size(total_tiles: int) -> int:
+    """Compute the byte size needed for image IDs (matches GPXSee's byteSize).
+
+    GPXSee computes _imgIdSize = byteSize(imgCount - 1) where byteSize
+    returns the minimum number of bytes needed to represent the value.
+    """
+    if total_tiles <= 1:
+        return 1
+    val = total_tiles - 1
+    size = 0
+    while val > 0:
+        size += 1
+        val >>= 8
+    return size
+
+
+def _rgn2_record_size(img_id_bytes: int) -> int:
+    """Compute RGN2 compound raster record size based on image ID byte width.
+
+    Fixed fields: type(1)+subtype(1)+lon(2)+lat(2)+len(1)+bitstream(8)+label(3)+class(1)+rs(1)+bounds(16)+jpgSz(4) = 40
+    Variable: image ID (img_id_bytes)
+    """
+    return 40 + img_id_bytes
 
 
 def _deg_to_garmin(deg: float) -> int:
@@ -349,8 +373,8 @@ class LayoutComputer:
         # RGN data sections:
         # RGN1: minimal (empty or near-empty for raster maps)
         rgn1_data = 0
-        # RGN2: Compound raster record per tile (42 bytes each)
-        rgn2_data = total_tiles * RGN2_RASTER_RECORD_SIZE
+        # RGN2: Compound raster record per tile (size varies with imgIdSize)
+        rgn2_data = total_tiles * _rgn2_record_size(_img_id_size(total_tiles))
 
         # LBL labels (tile filenames)
         lbl_labels = sum(len(f"{i}.jpg\0".encode("ascii")) for i in range(total_tiles))
@@ -783,9 +807,9 @@ class GMPWriter:
         rgn1_pos = pos  # GMP-relative
         rgn1_size = 0
 
-        # RGN2: Polyline preamble + Type E0 records per tile
+        # RGN2: Compound raster records per tile (size varies with imgIdSize)
         rgn2_pos = pos  # GMP-relative
-        rgn2_size = total_tiles * RGN2_RASTER_RECORD_SIZE
+        rgn2_size = total_tiles * _rgn2_record_size(_img_id_size(total_tiles))
         pos += rgn2_size
 
         # --- LBL labels (tile filenames) ---
@@ -857,6 +881,7 @@ class GMPWriter:
             # and set TRE7 flags (0x01 for empty subdivisions, 0x00 for those with tiles)
             rgn2_running_offset = 0
             rgn2_total_extent = 0
+            record_size = _rgn2_record_size(_img_id_size(total_tiles))
             for sub in subdivisions:
                 tile_count = sub.get_tile_count()
                 if tile_count == 0:
@@ -866,7 +891,7 @@ class GMPWriter:
                 else:
                     sub.rgn2_offset = rgn2_running_offset
                     sub.tre7_flag = 0x00
-                    chunk_size = tile_count * RGN2_RASTER_RECORD_SIZE
+                    chunk_size = tile_count * record_size
                     rgn2_running_offset += chunk_size
                     rgn2_total_extent = rgn2_running_offset
 
@@ -929,6 +954,7 @@ class GMPWriter:
             )
             rgn_tile_offset = 0
             off = 0
+            legacy_record_size = _rgn2_record_size(_img_id_size(total_tiles))
             for z_idx, zoom in enumerate(img_file.zoom_levels):
                 tile_count = len(
                     compressed_tiles.get(zoom.source_zoom or zoom.level_number, [])
@@ -955,7 +981,7 @@ class GMPWriter:
                 struct.pack_into("<H", subdiv_data, off + 12, h)
                 if not is_last_level:
                     struct.pack_into("<H", subdiv_data, off + 14, z_idx + 1)
-                rgn_tile_offset += tile_count * RGN2_RASTER_RECORD_SIZE
+                rgn_tile_offset += tile_count * legacy_record_size
                 off += rec_size
 
             # Trailing 4 bytes: total RGN2 data extent
@@ -1049,17 +1075,22 @@ class GMPWriter:
             # Sentinel entry: contains the total RGN2 data size as the end offset
             # for the last real subdivision (NOT all zeros — that would make
             # extPolygonsEnd == extPolygonsOffset == 0, preventing segment creation)
-            f.write(struct.pack("<I", total_tiles * RGN2_RASTER_RECORD_SIZE))
+            f.write(
+                struct.pack(
+                    "<I", total_tiles * _rgn2_record_size(_img_id_size(total_tiles))
+                )
+            )
             f.write(b"\x00")  # flag byte = 0
         else:
             # Legacy: one uint32 per zoom level
             rgn2_offset = 0
+            legacy_rs = _rgn2_record_size(_img_id_size(total_tiles))
             for z_idx, zoom in enumerate(img_file.zoom_levels):
                 tile_count = len(
                     compressed_tiles.get(zoom.source_zoom or zoom.level_number, [])
                 )
                 f.write(struct.pack("<I", rgn2_offset))
-                rgn2_offset += tile_count * RGN2_RASTER_RECORD_SIZE
+                rgn2_offset += tile_count * legacy_rs
             # Sentinel entry: total RGN2 data extent as the end offset
             f.write(struct.pack("<I", rgn2_offset))
 
@@ -1500,8 +1531,12 @@ def _write_rgn2_raster_record(
     jpeg_size: int,
     image_index: int,
     level_number: int,
+    img_id_size: int = 2,
 ) -> None:
-    """Write a single 42-byte RGN2 compound raster record.
+    """Write a single RGN2 compound raster record.
+
+    Record size is dynamic: 40 + img_id_size bytes.
+    img_id_size is determined by total tile count via _img_id_size().
 
     This is a single extended polyline object parsed by GPXSee's extPolyObjects().
     The record combines what was previously a separate preamble + E0 record into
@@ -1595,11 +1630,19 @@ def _write_rgn2_raster_record(
     # Class flags byte: 0xE0 → flags>>5 = 7, triggers readRasterInfo
     f.write(bytes([0xE0]))
 
-    # VUInt32(remaining_size=22) → 0x2D
-    f.write(_encode_vuint32(22))
+    # VUInt32(remaining_size) — rs = imgIdSize + 20 (image ID + 4 bounds + jpeg_size)
+    rs = img_id_size + 20
+    f.write(_encode_vuint32(rs))
 
-    # Image ID (uint16 LE) — index into LBL28 offset array
-    f.write(struct.pack("<H", image_index))
+    # Image ID (raw little-endian, img_id_size bytes) — index into LBL28 offset array
+    if img_id_size == 1:
+        f.write(struct.pack("<B", image_index))
+    elif img_id_size == 2:
+        f.write(struct.pack("<H", image_index))
+    elif img_id_size == 3:
+        f.write(struct.pack("<I", image_index)[:3])
+    else:
+        f.write(struct.pack("<I", image_index))
 
     # Tile bounds in Garmin 32-bit map units (int32 LE)
     # Order: top(max_lat), right(max_lon), bottom(min_lat), left(min_lon)
@@ -1672,7 +1715,7 @@ def _write_rgn_data_section(
 ) -> None:
     """Write RGN2 data section (compound raster records).
 
-    For each raster tile, writes a single 42-byte compound record combining
+    For each raster tile, writes a single compound record combining
     the polyline header and raster info into one record parsed by extPolyObjects().
 
     Uses per-tile geographic bounds when available (from tile extraction),
@@ -1687,6 +1730,12 @@ def _write_rgn_data_section(
     # Use map center as subdivision center (for non-subdivision path)
     center_lat = (img_file.bounds_north + img_file.bounds_south) / 2
     center_lon = (img_file.bounds_east + img_file.bounds_west) / 2
+
+    total_tiles = sum(
+        len(compressed_tiles.get(zoom.source_zoom or zoom.level_number, []))
+        for zoom in zoom_levels
+    )
+    iid_size = _img_id_size(total_tiles)
 
     image_index = 0
     for zoom in zoom_levels:
@@ -1719,6 +1768,7 @@ def _write_rgn_data_section(
                 jpeg_size=len(jpeg_data),
                 image_index=image_index,
                 level_number=zoom.level_number,
+                img_id_size=iid_size,
             )
             image_index += 1
 
@@ -1734,6 +1784,7 @@ def _write_rgn_data_section_subdivisions(
     For each subdivision, writes compound raster records for all its tiles.
     Each record encodes the tile's position relative to the subdivision center.
     """
+    iid_size = _img_id_size(total_tiles)
     image_index = 0
     for sub in subdivisions:
         level_number = img_file.zoom_levels[sub.zoom_level_index].level_number
@@ -1764,6 +1815,7 @@ def _write_rgn_data_section_subdivisions(
                 jpeg_size=len(jpeg_data),
                 image_index=image_index,
                 level_number=level_number,
+                img_id_size=iid_size,
             )
             image_index += 1
 

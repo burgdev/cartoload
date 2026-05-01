@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import logging
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable
 
 from cartoload.downloader.base import BaseDownloader
 from cartoload.downloader.wmts import WMTSDownloader
-from cartoload.processor.reproject import reproject_tile_cached
-from cartoload.processor.tile_reader import TileCacheReader
+from cartoload.processor.rasterio_warp import warp_tile_to_jpeg
 
 logger = logging.getLogger(__name__)
 
@@ -22,12 +21,28 @@ ProcessedTile = tuple[bytes, tuple[float, float, float, float]]
 ProgressCallback = Callable[[str, int, int], None]
 
 
+def _process_tile_worker(
+    source_path: Path,
+    x: int,
+    y: int,
+    zoom: int,
+    source_crs: str,
+    target_crs: str,
+    quality: int,
+) -> ProcessedTile | None:
+    """Top-level worker function for ProcessPoolExecutor.
+
+    Must be a top-level function (not a method) to be picklable.
+    """
+    return warp_tile_to_jpeg(source_path, x, y, zoom, source_crs, target_crs, quality)
+
+
 class BatchTileProcessor:
     """Process tiles from cache in batches with optional reprojection.
 
-    Reads tiles from the download cache, optionally reprojects them, encodes
-    to JPEG, and yields batches for the IMG writer. This avoids loading all
-    tiles into memory at once.
+    Reads tiles from the download cache, reprojects via rasterio in-process,
+    and yields batches for the IMG writer. Uses ProcessPoolExecutor for
+    true parallelism (rasterio holds the GIL, so threads give no speedup).
     """
 
     def __init__(
@@ -44,10 +59,9 @@ class BatchTileProcessor:
         self._batch_size = batch_size
         if max_workers is None:
             cpu_count = os.cpu_count() or 4
-            self._max_workers = min(32, cpu_count * 4)
+            self._max_workers = min(8, cpu_count)
         else:
             self._max_workers = max_workers
-        self._reader = TileCacheReader(target_quality=quality)
 
     def process_zoom_level(
         self,
@@ -141,24 +155,34 @@ class BatchTileProcessor:
         tile_coords: list[tuple[int, int]],
         zoom: int,
     ) -> list[ProcessedTile]:
-        """Process a batch of tiles in parallel."""
-        needs_reproj = BaseDownloader.needs_reprojection(
-            self._source_crs, self._target_crs
-        )
+        """Process a batch of tiles in parallel using ProcessPoolExecutor."""
+        # Resolve source paths for all tiles in the batch
+        path_coords: list[tuple[Path, int, int]] = []
+        for x, y in tile_coords:
+            source_path = self._get_source_tile_path(downloader, x, y, zoom)
+            if source_path is not None and source_path.exists():
+                path_coords.append((source_path, x, y))
 
-        results: list[ProcessedTile] = [None] * len(tile_coords)
+        if not path_coords:
+            return []
 
-        with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
+        results: list[ProcessedTile] = [None] * len(path_coords)  # type: ignore[list-item]
+
+        # Use ProcessPoolExecutor for true parallelism (rasterio holds the GIL)
+        source_crs = self._source_crs or "EPSG:3857"
+        with ProcessPoolExecutor(max_workers=self._max_workers) as executor:
             future_to_idx = {
                 executor.submit(
-                    self._process_single_tile,
-                    downloader,
+                    _process_tile_worker,
+                    source_path,
                     x,
                     y,
                     zoom,
-                    needs_reproj,
+                    source_crs,
+                    self._target_crs,
+                    self._quality,
                 ): idx
-                for idx, (x, y) in enumerate(tile_coords)
+                for idx, (source_path, x, y) in enumerate(path_coords)
             }
 
             for future in as_completed(future_to_idx):
@@ -168,54 +192,12 @@ class BatchTileProcessor:
                     if result is not None:
                         results[idx] = result
                 except Exception as e:
-                    x, y = tile_coords[idx]
+                    source_path, x, y = path_coords[idx]
                     logger.warning(
                         "Failed to process tile (%d, %d, z=%d): %s", x, y, zoom, e
                     )
 
         return [r for r in results if r is not None]
-
-    def _process_single_tile(
-        self,
-        downloader: BaseDownloader,
-        x: int,
-        y: int,
-        zoom: int,
-        needs_reproj: bool,
-    ) -> ProcessedTile | None:
-        """Process a single tile: find in cache, optionally reproject, read."""
-        # Get source tile path from cache
-        source_path = self._get_source_tile_path(downloader, x, y, zoom)
-        if source_path is None or not source_path.exists():
-            return None
-
-        # Optionally reproject
-        if needs_reproj:
-            try:
-                tile_path = reproject_tile_cached(
-                    source_path,
-                    x,
-                    y,
-                    zoom,
-                    self._source_crs or "EPSG:3857",
-                    self._target_crs,
-                    "tif",
-                    downloader,
-                )
-            except Exception as e:
-                logger.warning(
-                    "Reprojection failed for (%d, %d, z=%d): %s", x, y, zoom, e
-                )
-                return None
-        else:
-            tile_path = source_path
-
-        # Read and encode
-        try:
-            return self._reader.read_tile(tile_path, x=x, y=y, zoom=zoom)
-        except Exception as e:
-            logger.warning("Failed to read tile (%d, %d, z=%d): %s", x, y, zoom, e)
-            return None
 
     def _get_source_tile_path(
         self, downloader: BaseDownloader, x: int, y: int, zoom: int

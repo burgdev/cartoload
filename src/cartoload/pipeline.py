@@ -344,12 +344,28 @@ async def build_layer(
 
         for zoom in remaining_zooms:
             tile_coords = _compute_tile_coords(effective_layer, zoom)
+
+            # Wrap progress callback to include zoom level in stage name
+            zoom_progress_cb: ExportProgressCallback | None = None
+            if export_progress_callback is not None:
+
+                def _make_zoom_cb(z: int) -> ExportProgressCallback:
+                    def _cb(stage: str, current: int, total: int) -> None:
+                        if stage == "processing":
+                            export_progress_callback(f"processing:{z}", current, total)
+                        else:
+                            export_progress_callback(stage, current, total)
+
+                    return _cb
+
+                zoom_progress_cb = _make_zoom_cb(zoom)
+
             if tile_coords:
                 tiles = processor.process_zoom_level(
                     downloader,
                     tile_coords,
                     zoom,
-                    progress_callback=export_progress_callback,
+                    progress_callback=zoom_progress_cb,
                 )
                 compressed_tiles[zoom] = tiles
             else:

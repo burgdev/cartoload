@@ -1111,10 +1111,10 @@ class TestLBL28LBL29TypeE0:
         writer.write(img_file, compressed_tiles)
 
         data = output.read_bytes()
-        # RGN sub-header at offset determined by layout (after GMP header)
-        # For simplicity, search for Type E0 marker (0xE0) followed by bits_field 0x2D
-        assert b"\xe0\x2d" in data, (
-            "Should contain Type E0 record (0xE0 + bits_field 0x2D)"
+        # Class flags 0xE0 followed by VUInt32(rs). With 1 tile, imgIdSize=1,
+        # rs=1+20=21, VUInt32(21)=0x2B.
+        assert b"\xe0\x2b" in data, (
+            "Should contain Type E0 record (0xE0 + VUInt32(21)=0x2B)"
         )
 
     def test_type_e0_record_count_matches_tile_count(self, tmp_path):
@@ -1132,12 +1132,13 @@ class TestLBL28LBL29TypeE0:
         writer.write(img_file, compressed_tiles)
 
         data = output.read_bytes()
-        # Count Type E0 markers (0xE0 followed by bits_field 0x2D)
-        e0_count = data.count(b"\xe0\x2d")
+        # Count Type E0 markers (0xE0 followed by VUInt32(rs)).
+        # With 5 tiles, imgIdSize=1, rs=21, VUInt32(21)=0x2B
+        e0_count = data.count(b"\xe0\x2b")
         assert e0_count == 5, f"Expected 5 Type E0 records, found {e0_count}"
 
     def test_type_e0_bits_field_under_256_tiles(self, tmp_path):
-        """Verify Type E0 bits_field is always 0x2D (2-byte index, SwissTopo format)."""
+        """Verify VUInt32(rs) is correct for small tile counts (< 256 -> imgIdSize=1)."""
         output = tmp_path / "test_bits_field_2d.img"
         zoom_levels = [ZoomLevel(level_number=12, zoom_code=0x80)]
         # Create 10 tiles (< 256)
@@ -1149,8 +1150,8 @@ class TestLBL28LBL29TypeE0:
         writer.write(img_file, compressed_tiles)
 
         data = output.read_bytes()
-        # Should always use 0x2D (SwissTopo format, 2-byte image index)
-        assert b"\xe0\x2d" in data, "Should use bits_field 0x2D"
+        # With 10 tiles, imgIdSize=1, rs=1+20=21, VUInt32(21)=0x2B
+        assert b"\xe0\x2b" in data, "Should contain class_flags + VUInt32(21)"
 
     def test_tile_index_table_not_present(self, tmp_path):
         """Verify tile index table is NOT present (replaced by LBL28/LBL29)."""
@@ -1705,7 +1706,11 @@ class TestSubdivisionBinaryWriting:
         # Sentinel offset = total RGN2 data size = n_tiles × 42
         if isinstance(tiles[0], tuple) and len(tiles[0]) == 2:
             pass  # tiles are (jpeg, bounds) tuples
-        expected_extent = len(tiles) * 42  # RGN2_RASTER_RECORD_SIZE
+        # Record size is dynamic: 40 + imgIdSize where imgIdSize = byteSize(n-1)
+        # byteSize(val): 1 for 0-255, 2 for 256-65535, 3 for 65536-16777215
+        n = len(tiles)
+        iid = 1 if n <= 256 else 2 if n <= 65536 else 3
+        expected_extent = n * (40 + iid)
         assert sentinel_offset == expected_extent, (
             f"Sentinel offset should be {expected_extent}, got {sentinel_offset}"
         )
@@ -1757,8 +1762,8 @@ class TestSubdivisionBinaryWriting:
         writer.write(img_file, compressed, subdivisions=subdivisions)
 
         data = output.read_bytes()
-        # Count Type E0 markers (bits_field 0x2D)
-        e0_count = data.count(b"\xe0\x2d")
+        # With 9 tiles, imgIdSize=1, rs=21, VUInt32(21)=0x2B
+        e0_count = data.count(b"\xe0\x2b")
         assert e0_count == 9, f"Expected 9 Type E0 records, found {e0_count}"
 
 

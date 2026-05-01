@@ -107,7 +107,7 @@ class TestBatchTileProcessorInit:
         import os
 
         proc = BatchTileProcessor()
-        expected = min(32, (os.cpu_count() or 4) * 4)
+        expected = min(8, os.cpu_count() or 4)
         assert proc._max_workers == expected
 
 
@@ -254,21 +254,21 @@ class TestProcessBatchParallel:
 
 class TestProcessSingleTile:
     def test_existing_tile(self, tmp_path: Path) -> None:
-        proc = BatchTileProcessor(max_workers=2)
+        proc = BatchTileProcessor(max_workers=1)
         dl = _make_downloader(tmp_path)
         _write_cached_tiles(dl, [(541, 362)], 10)
 
-        result = proc._process_single_tile(dl, 541, 362, 10, False)
-        assert result is not None
-        jpeg_bytes, bounds = result
+        results = proc.process_zoom_level(dl, [(541, 362)], 10)
+        assert len(results) == 1
+        jpeg_bytes, bounds = results[0]
         assert jpeg_bytes[:2] == b"\xff\xd8"
 
     def test_missing_tile(self, tmp_path: Path) -> None:
-        proc = BatchTileProcessor(max_workers=2)
+        proc = BatchTileProcessor(max_workers=1)
         dl = _make_downloader(tmp_path)
 
-        result = proc._process_single_tile(dl, 999, 999, 10, False)
-        assert result is None
+        results = proc.process_zoom_level(dl, [(999, 999)], 10)
+        assert len(results) == 0
 
 
 class TestGetSourceTilePath:
