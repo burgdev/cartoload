@@ -1,52 +1,52 @@
-## MODIFIED Requirements
+## ADDED Requirements
 
-### Requirement: TRE5 extended section format
-The TRE5 descriptor at TRE header offset 0x58 SHALL have size=3, rec_size=3. The TRE5 data section SHALL contain exactly 3 bytes: `0x4B, 0x02, 0x01`. The TRE5 pad at offset 0x60-0x63 SHALL be `01 00 00 00`.
+### Requirement: Validate coordinate encoding matches reference files
+The system SHALL validate that tile coordinate encoding in RGN2 E0 records produces byte-identical results to reference files for the same geographic tiles.
 
-#### Scenario: TRE5 descriptor matches SwissTopo reference
-- **WHEN** a GMP subfile with subdivisions is written
-- **THEN** the TRE5 descriptor position at offset 0x58 points to a separate 3-byte section (not sharing position with TRE8)
-- **AND** the TRE5 size field at offset 0x5C is 3
-- **AND** the TRE5 rec_size field at offset 0x60 is 3
-- **AND** the TRE5 pad bytes at offsets 0x62-0x65 are `01 00 00 00`
-- **AND** the TRE5 data bytes are `4B 02 01`
+#### Scenario: Coordinate encoding matches SwissTopo for same tile
+- **WHEN** generating a tile at the same lat/lon bounds as a SwissTopo tile
+- **THEN** the RGN2 E0 record coordinate bytes SHALL match SwissTopo's encoding
 
-### Requirement: TRE8 object types section
-The TRE8 descriptor at TRE header offset 0x8A SHALL have size=3 with a single 3-byte entry `0x06, 0x02, 0x13` (type=0x06, param1=0x02, param2=0x13). The TRE8 pad at offset 0x94 SHALL be `00 00 01 00`.
+### Requirement: Validate Web Mercator to WGS84 conversion
+The system SHALL validate that Web Mercator tile bounds are correctly converted to WGS84 before encoding as Garmin coordinates.
 
-#### Scenario: TRE8 matches SwissTopo reference format
-- **WHEN** a GMP subfile is written
-- **THEN** the TRE8 size field at offset 0x8E is 3
-- **AND** the TRE8 data section contains exactly 3 bytes: `06 02 13`
-- **AND** the TRE8 pad bytes at offsets 0x94-0x97 are `00 00 01 00`
+#### Scenario: Web Mercator tile bounds converted correctly
+- **WHEN** extracting a tile at Web Mercator zoom 10, x=512, y=350
+- **THEN** WGS84 bounds SHALL use the standard Web Mercator inverse projection formula
 
-### Requirement: TRE7 pad bytes
-The TRE7 pad field at TRE header offset 0x86 SHALL be `0x81, 0x04, 0x00, 0x00` (4 bytes, LE uint32 value 0x0481).
+#### Scenario: Tile bounds match WMTS specification
+- **WHEN** downloading tiles from WMTS source
+- **THEN** computed WGS84 bounds SHALL match the WMTS TileMatrixSet definition for that zoom/x/y
 
-#### Scenario: TRE7 pad matches SwissTopo reference
-- **WHEN** a GMP subfile with subdivisions is written
-- **THEN** the bytes at TRE header offsets 0x86-0x89 are `81 04 00 00`
+### Requirement: Validate zoom level encoding
+The system SHALL investigate and potentially fix zoom level encoding to match reference files (which use level_number 16+ instead of 6-17).
 
-### Requirement: TRE name area at offset 0xD3
-The TRE header area at offset 0xD3 through 0x110 (end of 273-byte header) SHALL contain binary zeros, not ASCII text.
+#### Scenario: Zoom level encoding investigation
+- **WHEN** comparing zoom level encoding with SwissTopo
+- **THEN** determine if level_number affects coordinate scaling or display
 
-#### Scenario: Name area contains binary zeros
-- **WHEN** a GMP subfile is written with map_name "TestMap"
-- **THEN** the bytes at TRE header offset 0xD3 through 0x110 are all `00`
-- **AND** no ASCII text from the map name appears at offset 0xD3
+#### Scenario: Zoom code computation validated
+- **WHEN** generating zoom codes
+- **THEN** codes SHALL match the pattern used by working reference files
 
-### Requirement: TRE9 and TRE10 descriptors
-The TRE9 descriptor at TRE header offset 0xAE and TRE10 descriptor at offset 0xBC SHALL point to the RGN1 section position. TRE10 rec_size SHALL be 1.
+### Requirement: Validate JPEG-coordinate linkage
+The system SHALL validate that JPEG images in LBL29 are correctly linked to their RGN2 coordinate records via LBL28 indices.
 
-#### Scenario: TRE9 points to RGN1 position
-- **WHEN** a GMP subfile is written
-- **THEN** the TRE9 position field at offset 0xAE equals the RGN1 section position
-- **AND** the TRE10 position field at offset 0xBC equals the RGN1 section position
-- **AND** the TRE10 rec_size field at offset 0xC4 is 1
+#### Scenario: LBL28 index points to correct JPEG
+- **WHEN** RGN2 record N references image_id M
+- **THEN** LBL28 entry M SHALL point to the JPEG data for tile N in LBL29
 
-### Requirement: TRE3 copyright data
-The TRE3 copyright data section SHALL contain exactly 6 bytes: `0x0C, 0x00, 0x00, 0x32, 0x00, 0x00`.
+#### Scenario: JPEG boundaries in LBL29 are correct
+- **WHEN** LBL28 has offsets [0, 5230, 10450, ...]
+- **THEN** JPEG N spans bytes LBL28[N] to LBL28[N+1] in LBL29
 
-#### Scenario: TRE3 copyright matches SwissTopo reference
-- **WHEN** a GMP subfile is written
-- **THEN** the TRE3 copyright data section bytes are `0C 00 00 32 00 00`
+### Requirement: Fix coordinate bugs identified by comparison
+Based on comparison findings, the system SHALL fix any coordinate encoding bugs in:
+- WGS84 to Garmin 32-bit map unit conversion
+- Subdivision center delta encoding (lon_delta, lat_delta)
+- E0 record coordinate byte order or field positions
+- Zoom level to coordinate scaling factor
+
+#### Scenario: Fix applied and validated
+- **WHEN** a coordinate bug is identified and fixed
+- **THEN** regenerated IMG file SHALL pass coordinate validation against reference

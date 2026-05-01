@@ -234,10 +234,13 @@ All automated validation complete. Sections 0-5 and 8-9 of the debug plan are do
 3. TRE1 field order confirmed correct (byte0=zoom_code, byte1=level_number)
 4. RGN2 delta encoding in level-space (right-shifted by 24-level_number)
 5. Level_number remapping (24-N+1..24) to fix boundingRect quantization error
+6. DeltaStream bitstream encoding (three bugs fixed, 104 tests pass):
+   - Missing extended bit in bitstream (1-bit shift misaligning all delta data)
+   - Wrong bitSize formula for baseSize > 9 (GPXSee uses 2+2*baseSize-9, not 2+baseSize+1)
+   - Redesigned from 2-pair center-based to 1 delta pair from tile bottom-left to top-right
 
 **Remaining manual tasks**:
-- 6.2: Visual comparison of GeoTIFF exports in QGIS
-- 6.5: Visual testing in GPXSee with remapped level_numbers
-- 6.6: Testing on Garmin device with remapped level_numbers
+- Visual testing in GPXSee: verify white grid lines at subdivision boundaries are resolved
+- Testing on Garmin device with remapped level_numbers
 
 **Remaining open question**: SwissTopo uses flag=0x01 for empty overview subdivisions in TRE7, while our file uses flag=0x00 for all entries. This may or may not affect display — our overview levels have tiles assigned rather than being truly empty.

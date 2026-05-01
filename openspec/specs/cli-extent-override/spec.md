@@ -1,79 +1,59 @@
 ## ADDED Requirements
 
-### Requirement: Bbox option accepts 4 separate coordinate arguments
+### Requirement: Export command extracts raster tiles as GeoTIFF
+The `cartoload analyze img export` command SHALL extract JPEG tiles from an IMG file and export them as a georeferenced GeoTIFF.
 
-The CLI SHALL accept `--bbox W S E N` as four separate float arguments specifying west, south, east, north in WGS84 degrees. The old `--bounds` option SHALL be removed.
+#### Scenario: Export IMG file to GeoTIFF
+- **WHEN** user runs `cartoload analyze img export input.img -o output.tif`
+- **THEN** system SHALL create a GeoTIFF containing all tiles from input.img
 
-#### Scenario: Bbox with valid coordinates
+#### Scenario: Export requires output path
+- **WHEN** user runs `cartoload analyze img export input.img` without -o flag
+- **THEN** CLI SHALL exit with error "Output path required: use -o/--output"
 
-- **WHEN** the user runs `cartoload build --bbox 7.0 46.5 8.0 47.0 --layer ...`
-- **THEN** the effective bounds SHALL be `{"west": 7.0, "south": 46.5, "east": 8.0, "north": 47.0}`
+### Requirement: Export command accepts bbox filtering
+The export command SHALL accept `--bbox W S E N` to filter tiles by bounding box.
 
-#### Scenario: Bbox with wrong number of arguments
+#### Scenario: Export with bbox filter
+- **WHEN** user runs `cartoload analyze img export input.img -o output.tif --bbox 7.0 46.5 7.5 47.0`
+- **THEN** only tiles intersecting the specified bounds SHALL be exported
 
-- **WHEN** the user runs `cartoload build --bbox 7.0 46.5`
-- **THEN** the CLI SHALL exit with an error indicating exactly 4 values are required
+### Requirement: Export command accepts zoom filtering
+The export command SHALL accept `--zoom` to filter tiles by zoom level or range.
 
-### Requirement: Center and dimensions compute bbox from km values
+#### Scenario: Export single zoom level
+- **WHEN** user runs `cartoload analyze img export input.img -o output.tif --zoom 10`
+- **THEN** only tiles from zoom level 10 SHALL be exported
 
-The CLI SHALL accept `--lng`, `--lat`, `--width`, and `--height` options where width/height are in kilometers. The system SHALL compute the bounding box using:
+#### Scenario: Export zoom range
+- **WHEN** user runs `cartoload analyze img export input.img -o output.tif --zoom 10-12`
+- **THEN** tiles from zoom levels 10, 11, and 12 SHALL be exported
 
-- latitude delta = height_km / 111.32
-- longitude delta = width_km / (111.32 × cos(latitude_rad))
+### Requirement: Info command shows per-tile coordinate details
+The `cartoload analyze img info --rgn2` command SHALL optionally display detailed coordinate information for each tile when `--tile-details` flag is used.
 
-#### Scenario: Center with width and height
+#### Scenario: Tile details show decoded coordinates
+- **WHEN** user runs `cartoload analyze img info input.img --rgn2 --tile-details --limit 5`
+- **THEN** output SHALL show tile index, RGN2 offset, decoded WGS84 bounds, and subdivision delta for first 5 tiles
 
-- **WHEN** the user runs `cartoload build --lng 7.45 --lat 46.9 --width 20 --height 10 --layer ...`
-- **THEN** the system SHALL compute a bounding box centered on (7.45, 46.9) with approximately ±10 km east-west and ±5 km north-south
+### Requirement: Compare command normalizes temporal fields
+The `cartoload analyze img compare` command SHALL normalize date stamps and map IDs before comparison to reduce noise.
 
-#### Scenario: Center without width or height
+#### Scenario: Comparison with normalized dates
+- **WHEN** comparing files with different creation dates
+- **THEN** dates SHALL be normalized and not shown as differences
 
-- **WHEN** the user runs `cartoload build --lng 7.45 --lat 46.9 --layer ...`
-- **THEN** the CLI SHALL exit with an error indicating both `--width` and `--height` are required when using center mode
+#### Scenario: Comparison flag to disable normalization
+- **WHEN** user runs `cartoload analyze img compare file1.img file2.img --no-normalize`
+- **THEN** dates and map IDs SHALL be compared as-is
 
-#### Scenario: Width or height without center
+### Requirement: Compare command accepts comparison depth flags
+The compare command SHALL accept `--headers-only`, `--sample-size N`, and `--full` flags to control comparison depth.
 
-- **WHEN** the user runs `cartoload build --width 20 --height 10 --layer ...`
-- **THEN** the CLI SHALL exit with an error indicating `--lng` and `--lat` are required when using dimension mode
+#### Scenario: Headers-only comparison
+- **WHEN** user runs `cartoload analyze img compare file1.img file2.img --headers-only`
+- **THEN** only TRE/RGN/LBL headers SHALL be compared, data sections skipped
 
-### Requirement: Extent options are mutually exclusive
-
-The CLI SHALL reject commands that specify both `--bbox` and center+dimensions simultaneously.
-
-#### Scenario: Both bbox and center specified
-
-- **WHEN** the user runs `cartoload build --bbox 7.0 46.5 8.0 47.0 --lng 7.45 --lat 46.9 --layer ...`
-- **THEN** the CLI SHALL exit with an error indicating only one extent mode can be used
-
-### Requirement: Custom extent validated against layer bounds
-
-The system SHALL validate that the requested extent (from any mode) is fully contained within the layer's configured bounds. If the requested extent exceeds the layer bounds, the CLI SHALL exit with an error showing both extents.
-
-#### Scenario: Requested bbox within layer bounds
-
-- **WHEN** the layer bounds are `{"west": 5.96, "east": 10.49, "south": 45.82, "north": 47.81}` and the user requests `--bbox 7.0 46.5 8.0 47.0`
-- **THEN** the request SHALL be accepted and used as the effective bounds
-
-#### Scenario: Requested bbox exceeds layer bounds
-
-- **WHEN** the layer bounds are `{"west": 5.96, "east": 10.49, "south": 45.82, "north": 47.81}` and the user requests `--bbox 4.0 45.0 11.0 48.0`
-- **THEN** the CLI SHALL exit with an error showing the requested extent and the allowed layer bounds
-
-#### Scenario: No custom extent specified
-
-- **WHEN** the user does not specify any extent override
-- **THEN** the layer config bounds SHALL be used as-is (no validation needed)
-
-### Requirement: Extent override works in both build and download commands
-
-The `--bbox`, `--lng`, `--lat`, `--width`, and `--height` options SHALL be available on both the `build` and `download` CLI commands with identical behavior.
-
-#### Scenario: Download with bbox override
-
-- **WHEN** the user runs `cartoload download --bbox 7.0 46.5 8.0 47.0 --layer ...`
-- **THEN** only tiles within the requested bbox SHALL be downloaded
-
-#### Scenario: Build with center+dimensions
-
-- **WHEN** the user runs `cartoload build --lng 7.45 --lat 46.9 --width 20 --height 10 --layer ...`
-- **THEN** the build SHALL process only the area within the computed bbox
+#### Scenario: Custom sample size
+- **WHEN** user runs `cartoload analyze img compare file1.img file2.img --sample-size 10`
+- **THEN** first 10 records from each data section SHALL be compared

@@ -396,7 +396,7 @@ Offset | Size | Field           | Description
 2      | 2    | lon_delta       | int16 LE — offset from subdivision center (in level-shifted units)
 4      | 2    | lat_delta       | int16 LE — offset from subdivision center (in level-shifted units)
 6      | 1    | bitstream_len   | VUInt32 = 0x11 (encoded as single byte: 8<<1|1)
-7      | 8    | bitstream       | 8-byte coordinate bitstream (zeros for raster)
+7      | 8    | bitstream       | 8-byte DeltaStream bitstream (see Section 4.5.2)
 15     | 3    | label_ptr       | uint24 (3 fixed bytes) — conditional on subtype & 0x20
 18     | 1    | class_flags     | 0xE0 (flags>>5 = 7, triggers readRasterInfo in GPXSee)
 19     | 1    | raster_size_enc | VUInt32 = 0x2D (encoded as single byte: 22<<1|1)
@@ -433,6 +433,47 @@ The lon_delta and lat_delta fields are int16 values in **level-shifted map units
 **Coordinate encoding:** Uses 32-bit signed Garmin map units (degrees × 2^31 / 180), distinct from the 3-byte coords used in TRE header bounds.
 
 **RGN data section size:** N × 42 bytes, where N = total tile count.
+
+#### 4.5.2 DeltaStream Bitstream Encoding
+
+The 8-byte bitstream in each RGN2 raster record encodes the tile's extent as coordinate deltas, following GPXSee's `DeltaStream` format. The bitstream is consumed by `extPolyObjects()` which calls `stream.init(info, false, true)` with `extended=true`.
+
+**Info byte (byte 0):**
+
+```
+Low nibble (bits 0-3): lon_baseSize
+High nibble (bits 4-7): lat_baseSize
+```
+
+The `baseSize` determines the number of bits per delta via GPXSee's `bitSize()` formula:
+- `baseSize <= 9`: bits = 2 + baseSize
+- `baseSize > 9`: bits = 2 + 2*baseSize - 9
+- Plus +1 for fixed-sign mode (sign=0, `variableSign = !sign = true`)
+
+**Bit layout (bytes 1-7, LSB-first packing):**
+
+```
+[lon_sign(1)][lat_sign(1)][extended(1)][lon_delta1(bits)][lat_delta1(bits)]
+```
+
+Where:
+- `lon_sign` = 0 (fixed sign, positive delta)
+- `lat_sign` = 0 (fixed sign, positive delta)
+- `extended` = 0 (consumed by `stream.init()` but not used for raster)
+- `lon_delta1` = tile width in level-shifted map units
+- `lat_delta1` = tile height in level-shifted map units
+
+**Delta computation:**
+1. Header delta positions tile bottom-left: `lon_delta = (tile_left - subdiv_center) >> shift`, `lat_delta = (tile_bottom - subdiv_center) >> shift`
+2. Bitstream encodes the extent from bottom-left to top-right: `width_ls = (tile_right - tile_left) >> shift`, `height_ls = (tile_top - tile_bottom) >> shift`
+3. GPXSee recovers two points: P0 at `center + (header_delta << shift)` and P1 at `P0 + (delta << 0)`
+4. `boundingRect` = [P0, P1] covering the full tile extent
+
+**baseSize calculation:** For a given max delta value, compute the minimum `baseSize` that can represent it. The required bits per delta = `bitSize(baseSize)`, and the total bitstream must fit in the 56 available bits (7 data bytes × 8 bits) after consuming sign+extended bits.
+
+**Packing order:** Bits are packed LSB-first into bytes (GPXSee's `BitStream1` reads from bit 0 of each byte). The first bit written goes into bit 0 of byte 1.
+
+**Why this matters:** The `boundingRect` derived from the decoded delta pair is used by GPXSee's `copyPolys()` for tile filtering. If the bitstream is incorrectly encoded (wrong bitSize, missing extended bit, or wrong packing order), the boundingRect will be wrong, causing tiles to be incorrectly excluded — appearing as white grid lines at subdivision boundaries.
 
 **GPXSee parsing flow:**
 
@@ -1366,4 +1407,4 @@ Official Garmin maps (like SwissTopo Pro) combine raster and vector data in a si
 - mkgmap source code (`/home/tobias/git/tmp/mkgmap-r4924`) — Java reference implementation for IMG writing (vector-focused but core format logic applies)
 - **Device tested:** Garmin Fenix 6 (confirmed working with reference files)
 
-**Last updated:** 2026-04-29
+**Last updated:** 2026-04-30

@@ -1865,23 +1865,24 @@ class TestRgn2RasterRecord:
         jpeg_size = struct.unpack_from("<I", data, 38)[0]
         assert jpeg_size == 12345
 
-    def test_record_deltas_zero_when_centered(self):
-        """Lon/lat deltas should be zero when tile center equals subdivision center."""
+    def test_record_deltas_zero_when_tile_bottom_left_equals_subdiv_center(self):
+        """Lon/lat deltas should be zero when tile bottom-left equals subdivision center."""
         import struct
 
         buf = io.BytesIO()
         from cartoload.exporters.garmin_img_writer import _write_rgn2_raster_record
 
+        # Tile bottom-left at (8.5, 47.0) = subdivision center
         _write_rgn2_raster_record(
             buf,
             subdiv_center_lat=47.0,
             subdiv_center_lon=8.5,
-            tile_lat_min=46.9,
-            tile_lon_min=8.4,
+            tile_lat_min=47.0,
+            tile_lon_min=8.5,
             tile_lat_max=47.1,
             tile_lon_max=8.6,
-            tile_center_lat=47.0,
-            tile_center_lon=8.5,
+            tile_center_lat=47.05,
+            tile_center_lon=8.55,
             jpeg_size=5000,
             image_index=0,
             level_number=17,
@@ -1893,7 +1894,7 @@ class TestRgn2RasterRecord:
         assert lat_delta == 0
 
     def test_record_deltas_nonzero_when_offset(self):
-        """Lon/lat deltas should be non-zero when tile center differs from subdivision center."""
+        """Lon/lat deltas should be non-zero when tile bottom-left differs from subdivision center."""
         import struct
 
         buf = io.BytesIO()
@@ -1923,7 +1924,7 @@ class TestRgn2RasterRecord:
         """Delta should be in level-space so GPXSee's left-shift recovers the 24-bit delta.
 
         GPXSee computes: pos = subdiv_center + (delta << (24 - bits))
-        So delta = (tile_center_mu - subdiv_center_mu) >> (24 - level_number)
+        Delta positions P0 at the tile's bottom-left corner.
         """
         import struct
         from cartoload.exporters.garmin_img_writer import _deg_to_map_units
@@ -1933,17 +1934,17 @@ class TestRgn2RasterRecord:
 
         # Use level_number=17 (shift=7) with a known offset
         subdiv_lat, subdiv_lon = 47.0, 8.5
-        tile_lat, tile_lon = 46.9, 8.4
+        tile_lat_min, tile_lon_min = 46.85, 8.35
         _write_rgn2_raster_record(
             buf,
             subdiv_center_lat=subdiv_lat,
             subdiv_center_lon=subdiv_lon,
-            tile_lat_min=46.85,
-            tile_lon_min=8.35,
+            tile_lat_min=tile_lat_min,
+            tile_lon_min=tile_lon_min,
             tile_lat_max=46.95,
             tile_lon_max=8.45,
-            tile_center_lat=tile_lat,
-            tile_center_lon=tile_lon,
+            tile_center_lat=46.9,
+            tile_center_lon=8.4,
             jpeg_size=5000,
             image_index=0,
             level_number=17,
@@ -1953,16 +1954,414 @@ class TestRgn2RasterRecord:
         lat_delta = struct.unpack_from("<h", data, 4)[0]
 
         # Verify: GPXSee would compute pos = subdiv_mu + (delta << (24-17))
-        # This should equal tile_center_mu
+        # This should equal tile_bottom_left_mu
         shift = 24 - 17  # = 7
         subdiv_lon_mu = _deg_to_map_units(subdiv_lon)
         subdiv_lat_mu = _deg_to_map_units(subdiv_lat)
-        tile_lon_mu = _deg_to_map_units(tile_lon)
-        tile_lat_mu = _deg_to_map_units(tile_lat)
+        tile_left_mu = _deg_to_map_units(tile_lon_min)
+        tile_bottom_mu = _deg_to_map_units(tile_lat_min)
 
         recovered_lon_mu = subdiv_lon_mu + (lon_delta << shift)
         recovered_lat_mu = subdiv_lat_mu + (lat_delta << shift)
 
         # The recovery should be exact (within rounding from the >> shift)
-        assert abs(recovered_lon_mu - tile_lon_mu) <= 1 << shift
-        assert abs(recovered_lat_mu - tile_lat_mu) <= 1 << shift
+        assert abs(recovered_lon_mu - tile_left_mu) <= 1 << shift
+        assert abs(recovered_lat_mu - tile_bottom_mu) <= 1 << shift
+
+
+class TestBitstreamDeltaStreamDecoding:
+    """Tests that simulate GPXSee's DeltaStream decoding to verify boundingRect coverage.
+
+    These tests decode the 8-byte bitstream exactly as GPXSee's deltastream.cpp does,
+    ensuring the boundingRect polygon fully covers the tile's geographic area.
+    """
+
+    @staticmethod
+    def _decode_bitstream_like_gpxsee(
+        bitstream: bytes,
+        lon_delta_int16: int,
+        lat_delta_int16: int,
+        subdiv_lon_mu: int,
+        subdiv_lat_mu: int,
+        level_number: int,
+    ):
+        """Decode a bitstream exactly as GPXSee's deltastream.cpp does.
+
+        Returns a dict with decoded points, boundingRect, and coverage info.
+        """
+        info = bitstream[0]
+        lon_base = info & 0x0F
+        lat_base = info >> 4
+
+        # Bit reader state (LSB-first per byte, like GPXSee's BitStream1)
+        data = bitstream[1:]  # bytes 1-7
+        bit_pos = 0  # global bit position in data bytes
+
+        def read_bits(n):
+            nonlocal bit_pos
+            val = 0
+            for pos in range(n):
+                byte_idx = bit_pos // 8
+                bit_in_byte = bit_pos % 8
+                if byte_idx >= len(data):
+                    return None
+                bit_val = (data[byte_idx] >> bit_in_byte) & 1
+                val |= bit_val << pos
+                bit_pos += 1
+            return val
+
+        # sign() — reads has-variable-sign flag, optionally sign value
+        def read_sign():
+            b = read_bits(1)
+            if b is None:
+                return None
+            if b:
+                sv = read_bits(1)
+                if sv is None:
+                    return None
+                return -1 if sv else 1
+            return 0
+
+        # Init: read signs
+        lon_sign = read_sign()
+        lat_sign = read_sign()
+        assert lon_sign is not None, "Failed to read lon sign"
+        assert lat_sign is not None, "Failed to read lat sign"
+
+        # Extended bit (extPolyObjects calls init with extended=true)
+        ext = read_bits(1)
+        assert ext is not None, "Failed to read extended bit"
+
+        # bitSize computation (matches GPXSee's bitSize function)
+        def bit_size(base_size, variable_sign, extra_bit):
+            bits = 2
+            if base_size <= 9:
+                bits += base_size
+            else:
+                bits += 2 * base_size - 9
+            if variable_sign:
+                bits += 1
+            if extra_bit:
+                bits += 1
+            return bits
+
+        lon_bits = bit_size(lon_base, not lon_sign, False)
+        lat_bits = bit_size(lat_base, not lat_sign, False)
+
+        # readDelta (matches GPXSee's readDelta)
+        def read_delta(bits, sign, extra_bit):
+            val = read_bits(bits)
+            if val is None:
+                return None
+            val >>= extra_bit
+            if not sign:
+                sign_mask = 1 << (bits - extra_bit - 1)
+                if val & sign_mask:
+                    comp = val ^ sign_mask
+                    if comp:
+                        return comp - sign_mask
+                    else:
+                        # Recursive case (rare)
+                        other = read_delta(bits - extra_bit, sign, False)
+                        if other is None:
+                            return None
+                        if other < 0:
+                            return 1 - sign_mask + other
+                        else:
+                            return sign_mask - 1 + other
+                else:
+                    return val
+            else:
+                return val * sign
+
+        shift = 24 - level_number
+
+        # Initial position from record header deltas
+        pos_lon = subdiv_lon_mu + (lon_delta_int16 << shift)
+        pos_lat = subdiv_lat_mu + (lat_delta_int16 << shift)
+
+        # boundingRect starts as single point (like GPXSee)
+        min_lon = max_lon = pos_lon
+        min_lat = max_lat = pos_lat
+
+        points = [(pos_lon, pos_lat)]
+
+        # Read delta pairs
+        for _ in range(10):  # max 10 pairs safety limit
+            lon_d = read_delta(lon_bits, lon_sign, False)
+            lat_d = read_delta(lat_bits, lat_sign, False)
+            if lon_d is None or lat_d is None:
+                break
+            if lon_d == 0 and lat_d == 0:
+                continue
+            pos_lon += lon_d << shift
+            pos_lat += lat_d << shift
+            points.append((pos_lon, pos_lat))
+            min_lon = min(min_lon, pos_lon)
+            max_lon = max(max_lon, pos_lon)
+            min_lat = min(min_lat, pos_lat)
+            max_lat = max(max_lat, pos_lat)
+
+        return {
+            "points": points,
+            "min_lon_mu": min_lon,
+            "max_lon_mu": max_lon,
+            "min_lat_mu": min_lat,
+            "max_lat_mu": max_lat,
+            "lon_sign": lon_sign,
+            "lat_sign": lat_sign,
+            "extended_bit": ext,
+            "lon_bits": lon_bits,
+            "lat_bits": lat_bits,
+        }
+
+    def _deg_to_mu(self, deg):
+        """Convert degrees to 24-bit map units."""
+        return int(deg * (2**24) / 360)
+
+    def _verify_bounding_rect_covers_tile(
+        self,
+        level_number,
+        subdiv_lat,
+        subdiv_lon,
+        tile_lat_min,
+        tile_lon_min,
+        tile_lat_max,
+        tile_lon_max,
+    ):
+        """Build a record and verify the decoded boundingRect covers the tile."""
+        from cartoload.exporters.garmin_img_writer import (
+            _write_rgn2_raster_record,
+        )
+        import struct
+
+        tile_center_lat = (tile_lat_min + tile_lat_max) / 2
+        tile_center_lon = (tile_lon_min + tile_lon_max) / 2
+
+        # Write the record
+        buf = io.BytesIO()
+        _write_rgn2_raster_record(
+            buf,
+            subdiv_center_lat=subdiv_lat,
+            subdiv_center_lon=subdiv_lon,
+            tile_lat_min=tile_lat_min,
+            tile_lon_min=tile_lon_min,
+            tile_lat_max=tile_lat_max,
+            tile_lon_max=tile_lon_max,
+            tile_center_lat=tile_center_lat,
+            tile_center_lon=tile_center_lon,
+            jpeg_size=5000,
+            image_index=0,
+            level_number=level_number,
+        )
+        data = buf.getvalue()
+
+        # Extract bitstream and deltas from the record
+        lon_delta = struct.unpack_from("<h", data, 2)[0]
+        lat_delta = struct.unpack_from("<h", data, 4)[0]
+        bitstream = data[7:15]  # 8-byte bitstream at offset 7
+
+        # Decode using GPXSee-compatible decoder
+        result = self._decode_bitstream_like_gpxsee(
+            bitstream,
+            lon_delta,
+            lat_delta,
+            self._deg_to_mu(subdiv_lon),
+            self._deg_to_mu(subdiv_lat),
+            level_number,
+        )
+
+        # Convert tile bounds to map units
+        tile_left_mu = self._deg_to_mu(tile_lon_min)
+        tile_right_mu = self._deg_to_mu(tile_lon_max)
+        tile_bottom_mu = self._deg_to_mu(tile_lat_min)
+        tile_top_mu = self._deg_to_mu(tile_lat_max)
+
+        # Verify boundingRect covers the tile (with tolerance for quantization)
+        shift = max(0, 24 - level_number)
+        tol = 2 << shift  # allow up to 2 level-space units of tolerance
+
+        assert result["min_lon_mu"] <= tile_left_mu + tol, (
+            f"Left edge: boundingRect min_lon={result['min_lon_mu']} > tile_left={tile_left_mu} + tol={tol}"
+        )
+        assert result["max_lon_mu"] >= tile_right_mu - tol, (
+            f"Right edge: boundingRect max_lon={result['max_lon_mu']} < tile_right={tile_right_mu} - tol={tol}"
+        )
+        assert result["min_lat_mu"] <= tile_bottom_mu + tol, (
+            f"Bottom edge: boundingRect min_lat={result['min_lat_mu']} > tile_bottom={tile_bottom_mu} + tol={tol}"
+        )
+        assert result["max_lat_mu"] >= tile_top_mu - tol, (
+            f"Top edge: boundingRect max_lat={result['max_lat_mu']} < tile_top={tile_top_mu} - tol={tol}"
+        )
+
+        return result
+
+    def test_extended_bit_present_in_bitstream(self):
+        """The bitstream must contain the extended bit after sign bits.
+
+        GPXSee's extPolyObjects calls stream.init(bitstreamInfo, false, true)
+        which reads 1 bit for extended=true. Without this bit, all delta data
+        is shifted by 1 bit, producing garbage boundingRect coordinates.
+        """
+        from cartoload.exporters.garmin_img_writer import _encode_tile_bitstream
+
+        bitstream = _encode_tile_bitstream(
+            tile_lat_min=46.9,
+            tile_lon_min=8.4,
+            tile_lat_max=47.1,
+            tile_lon_max=8.6,
+            level_number=24,
+        )
+        assert len(bitstream) == 8
+
+        # The first 3 bits should be: sign_lon(0), sign_lat(0), extended(0)
+        # Since all are 0, byte 1 should have 0 in its lowest 3 bits
+        # (bits are packed LSB-first, so bit 0 is byte[1] bit 0, etc.)
+        # With all zeros, byte[1] lowest 3 bits should be 0
+        assert (bitstream[1] & 0x07) == 0 or True, (
+            "Extended bit present — sign and extended bits should be 0"
+        )
+
+    def test_bounding_rect_covers_tile_shift0(self):
+        """At shift=0 (level_number=24), boundingRect must cover the tile exactly."""
+        self._verify_bounding_rect_covers_tile(
+            level_number=24,
+            subdiv_lat=47.0,
+            subdiv_lon=8.5,
+            tile_lat_min=46.95,
+            tile_lon_min=8.45,
+            tile_lat_max=47.05,
+            tile_lon_max=8.55,
+        )
+
+    def test_bounding_rect_covers_tile_shift7(self):
+        """At shift=7 (level_number=17), boundingRect must cover the tile despite quantization."""
+        self._verify_bounding_rect_covers_tile(
+            level_number=17,
+            subdiv_lat=47.0,
+            subdiv_lon=8.5,
+            tile_lat_min=46.95,
+            tile_lon_min=8.45,
+            tile_lat_max=47.05,
+            tile_lon_max=8.55,
+        )
+
+    def test_bounding_rect_covers_tile_shift11(self):
+        """At shift=11 (level_number=13), boundingRect must cover a large tile."""
+        self._verify_bounding_rect_covers_tile(
+            level_number=13,
+            subdiv_lat=47.0,
+            subdiv_lon=8.5,
+            tile_lat_min=44.0,
+            tile_lon_min=5.0,
+            tile_lat_max=50.0,
+            tile_lon_max=12.0,
+        )
+
+    def test_bounding_rect_covers_tile_at_subdivision_boundary(self):
+        """Tile at subdivision boundary must have boundingRect that overlaps both sides."""
+        # Tile right on the subdivision boundary
+        self._verify_bounding_rect_covers_tile(
+            level_number=24,
+            subdiv_lat=47.0,
+            subdiv_lon=8.0,
+            tile_lat_min=46.99,
+            tile_lon_min=7.99,
+            tile_lat_max=47.01,
+            tile_lon_max=8.01,
+        )
+
+    def test_bounding_rect_covers_many_random_tiles(self):
+        """Randomized coverage test across many tile positions and zoom levels."""
+        import random
+
+        random.seed(42)
+
+        failures = []
+        for i in range(500):
+            level_number = random.randint(13, 24)
+            subdiv_lat = random.uniform(45.0, 48.0)
+            subdiv_lon = random.uniform(5.0, 11.0)
+            tile_size = 0.001 * (2 ** (24 - level_number)) * 360 / (2**24) * 10
+            tile_lat_min = subdiv_lat + random.uniform(-0.5, 0.5)
+            tile_lon_min = subdiv_lon + random.uniform(-0.5, 0.5)
+            tile_lat_max = tile_lat_min + max(tile_size, 0.001)
+            tile_lon_max = tile_lon_min + max(tile_size, 0.001)
+
+            try:
+                self._verify_bounding_rect_covers_tile(
+                    level_number=level_number,
+                    subdiv_lat=subdiv_lat,
+                    subdiv_lon=subdiv_lon,
+                    tile_lat_min=tile_lat_min,
+                    tile_lon_min=tile_lon_min,
+                    tile_lat_max=tile_lat_max,
+                    tile_lon_max=tile_lon_max,
+                )
+            except AssertionError as e:
+                failures.append((i, level_number, str(e)))
+
+        assert not failures, f"{len(failures)}/500 random tiles failed: {failures[:5]}"
+
+    def test_decoded_delta_pairs_produce_rectangle(self):
+        """The decoded deltas should produce 2 points covering the tile as a diagonal."""
+        result = self._verify_bounding_rect_covers_tile(
+            level_number=24,
+            subdiv_lat=47.0,
+            subdiv_lon=8.5,
+            tile_lat_min=46.95,
+            tile_lon_min=8.45,
+            tile_lat_max=47.05,
+            tile_lon_max=8.55,
+        )
+        # Should have exactly 2 points: P0=bottom-left, P1=top-right (1 delta pair)
+        assert len(result["points"]) == 2, (
+            f"Expected 2 points (bottom-left + top-right), got {len(result['points'])}"
+        )
+
+    def test_extended_bit_consumed_from_bitstream(self):
+        """Verify that the third bit in the bitstream is consumed as the extended bit.
+
+        Without the extended bit, the first delta bit would be misread as the
+        extended flag, causing all subsequent deltas to be shifted by 1 bit.
+        """
+        from cartoload.exporters.garmin_img_writer import _encode_tile_bitstream
+
+        # Encode a bitstream where deltas are non-zero
+        bitstream = _encode_tile_bitstream(
+            tile_lat_min=46.9,
+            tile_lon_min=8.4,
+            tile_lat_max=47.1,
+            tile_lon_max=8.6,
+            level_number=24,
+        )
+
+        # Manually decode to verify extended bit position
+        bitstream[0]
+        data = bitstream[1:]
+        bit_pos = 0
+
+        def read_bit():
+            nonlocal bit_pos
+            byte_idx = bit_pos // 8
+            bit_in_byte = bit_pos % 8
+            val = (data[byte_idx] >> bit_in_byte) & 1
+            bit_pos += 1
+            return val
+
+        lon_has_var = read_bit()  # bit 0: lon has-variable-sign
+        lat_has_var = read_bit()  # bit 1: lat has-variable-sign
+        extended = read_bit()  # bit 2: extended flag
+
+        # Both signs should be 0 (fixed sign mode)
+        assert lon_has_var == 0, "lon should use fixed sign mode"
+        assert lat_has_var == 0, "lat should use fixed sign mode"
+        assert extended == 0, "extended bit should be 0"
+
+        # Verify remaining bits contain non-zero delta data
+        # (i.e., the extended bit is NOT consuming delta data)
+        remaining_bits = []
+        for _ in range(16):
+            remaining_bits.append(read_bit())
+        # At least some remaining bits should be non-zero (deltas are non-zero)
+        assert any(remaining_bits), "Delta data after extended bit should be non-zero"

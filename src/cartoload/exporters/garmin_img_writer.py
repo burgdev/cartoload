@@ -1360,32 +1360,33 @@ def _build_net_subheader(now: datetime) -> bytes:
 
 
 def _encode_tile_bitstream(
-    tile_center_lat: float,
-    tile_center_lon: float,
     tile_lat_min: float,
     tile_lon_min: float,
     tile_lat_max: float,
     tile_lon_max: float,
     level_number: int,
 ) -> bytes:
-    """Encode 8-byte bitstream with tile corner deltas.
+    """Encode 8-byte bitstream with tile extent delta for boundingRect coverage.
 
     Generates a DeltaStream that GPXSee decodes as polygon points expanding
-    the boundingRect to cover the full tile area. Without this, the boundingRect
-    is a single point (the tile center), causing GPXSee's copyPolys filter to
-    exclude tiles whose center falls outside the RasterTile view rect.
+    the boundingRect to cover the full tile area. The P0 position (set by the
+    record header delta) is at the tile's bottom-left corner. One delta pair
+    (+width, +height) extends the boundingRect to the tile's top-right corner.
 
     Format (matches GPXSee DeltaStream in deltastream.cpp):
       byte 0: info byte — low nibble = lon baseSize, high nibble = lat baseSize
-      bytes 1-7: sign bits + delta-encoded coordinate pairs (LSB-first bit packing)
+      bytes 1-7: sign bits + extended bit + delta-encoded coordinate pair (LSB-first)
 
-    The encoding uses variable-sign mode for both axes and encodes 2 delta pairs:
-      delta 1: center → top-left corner
-      delta 2: top-left → bottom-right corner
-    This produces a boundingRect covering [left, bottom] to [right, top].
+    The encoding uses fixed-sign mode for both axes (sign bit embedded in each
+    delta value). GPXSee's extPolyObjects calls stream.init(info, false, true)
+    with extended=true, so an extended bit is included after the sign bits.
+
+    Bit budget for 8 bytes (56 data bits in bytes 1-7):
+      3 bits: lon sign + lat sign + extended
+      1 delta pair at (3+baseSize) bits each axis
+      Total: 3 + 2*(3+baseSize) = 9 + 2*baseSize bits → baseSize up to 23
 
     Args:
-        tile_center_lat/lon: Tile center in degrees
         tile_lat_min/max, tile_lon_min/max: Tile geographic bounds in degrees
         level_number: TRE1 bits value (determines coordinate shift)
 
@@ -1393,49 +1394,47 @@ def _encode_tile_bitstream(
         8 bytes of bitstream data
     """
     shift = max(0, 24 - level_number)
+    mask = (1 << shift) - 1 if shift > 0 else 0
 
-    # Compute tile half-extents in level-space (24-bit map units >> shift)
-    center_lat_mu = _deg_to_map_units(tile_center_lat)
-    center_lon_mu = _deg_to_map_units(tile_center_lon)
-    top_mu = _deg_to_map_units(tile_lat_max)
-    _deg_to_map_units(tile_lon_min)
+    left_mu = _deg_to_map_units(tile_lon_min)
     right_mu = _deg_to_map_units(tile_lon_max)
-    _deg_to_map_units(tile_lat_min)
+    bottom_mu = _deg_to_map_units(tile_lat_min)
+    top_mu = _deg_to_map_units(tile_lat_max)
 
-    # Half-widths in level-space
-    half_w = (right_mu - center_lon_mu) >> shift
-    half_h = (top_mu - center_lat_mu) >> shift
+    # Tile width and height in level-space, ceiling division + 1 for quantization
+    width_ls = ((right_mu - left_mu + mask) >> shift) + 1
+    height_ls = ((top_mu - bottom_mu + mask) >> shift) + 1
 
-    # Determine info byte based on max delta magnitude
-    # We need to encode: (-half_w, +half_h) and (+2*half_w, -2*half_h)
-    max_delta = max(half_w, half_h, 2 * half_w, 2 * half_h)
-    # Clamp base_size to fit in 8-byte bitstream (56 data bits = 7 bytes):
-    # total bits = 2 (signs) + 4 * bits_per_delta, max bits_per_delta = 13
-    base_size = min(_bitstream_base_size(max_delta), 10)
-    info = (base_size << 4) | base_size  # same base for lon and lat
+    # Determine info byte based on max delta magnitude (width or height)
+    max_delta = max(width_ls, height_ls)
+    base_size = min(_bitstream_base_size(max_delta), 15)
+    info = (base_size << 4) | base_size
 
-    # Bit sizes for each axis (variable-sign mode)
-    lon_bits = 2 + base_size + 1  # +1 for variable sign
-    lat_bits = 2 + base_size + 1
-    max_pos = (1 << (lon_bits - 1)) - 1  # max positive with variable sign
+    # Bit sizes for each axis — must match GPXSee's bitSize() exactly:
+    #   baseSize <= 9: bits = 2 + baseSize
+    #   baseSize >  9: bits = 2 + 2*baseSize - 9
+    # Plus +1 for fixed-sign mode (sign bit embedded in each delta value)
+    def _gpxsee_bit_size(bs: int) -> int:
+        base = 2 + (bs if bs <= 9 else 2 * bs - 9)
+        return base + 1  # +1 for fixed sign (variableSign=true in bitSize)
 
-    # Build bit stream for DeltaStream (bytes 1-7 of the 8-byte bitstream)
-    # Byte 0 is the info byte; bytes 1-7 contain sign bits + delta pairs
+    lon_bits = _gpxsee_bit_size(base_size)
+    lat_bits = _gpxsee_bit_size(base_size)
+    max_pos = (1 << (lon_bits - 1)) - 1
+
     bits: list[int] = []
 
-    # Sign bits: 0 = variable sign for both axes (each: 1 bit = 0)
-    bits.append(0)  # lonSign = 0
-    bits.append(0)  # latSign = 0
+    # Sign bits: 0 = fixed sign for both axes (sign bit embedded in each delta)
+    bits.append(0)  # lon: has-variable-sign = 0
+    bits.append(0)  # lat: has-variable-sign = 0
+    # Extended bit required by extPolyObjects (stream.init with extended=true)
+    bits.append(0)  # extended = 0
 
-    # Delta pair 1: center → top-left = (-half_w, +half_h)
-    bits.extend(_encode_delta(max(-max_pos, -half_w), lon_bits))
-    bits.extend(_encode_delta(min(max_pos, half_h), lat_bits))
+    # Single delta pair: (+width, +height) — P0 is tile bottom-left, P1 is top-right
+    bits.extend(_encode_delta(min(max_pos, width_ls), lon_bits))
+    bits.extend(_encode_delta(min(max_pos, height_ls), lat_bits))
 
-    # Delta pair 2: top-left → bottom-right = (+2*half_w, -2*half_h)
-    bits.extend(_encode_delta(min(max_pos, 2 * half_w), lon_bits))
-    bits.extend(_encode_delta(max(-max_pos, -2 * half_h), lat_bits))
-
-    # Pack: byte 0 = info, bytes 1-7 = bit-packed sign+deltas
+    # Pack into 8 bytes: byte 0 = info, bytes 1-7 = bit-packed data
     data = bytearray(8)
     data[0] = info
     for i, bit in enumerate(bits):
@@ -1448,20 +1447,25 @@ def _encode_tile_bitstream(
 def _bitstream_base_size(max_val: int) -> int:
     """Determine the DeltaStream baseSize for a given max delta magnitude.
 
-    bitSize(baseSize, variableSign=True, extraBit=False) = baseSize + 3
-    We need baseSize + 3 >= bits to represent max_val with sign.
+    GPXSee's bitSize(baseSize, variableSign=True, extraBit=False):
+      baseSize <= 9: bits = 2 + baseSize + 1 = baseSize + 3
+      baseSize >  9: bits = 2 + 2*baseSize - 9 + 1 = 2*baseSize - 6
+
+    We need max positive (1 << (bits-1)) - 1 >= max_val.
+    Iterates from baseSize=1 to find the smallest valid baseSize.
     """
     import math as _math
 
-    # With variable sign, max positive = (1 << (bits-1)) - 1
-    # bits = baseSize + 3
-    # Need: (1 << (bits-1)) - 1 >= max_val
-    # So: bits-1 >= ceil(log2(max_val + 1))
     if max_val <= 0:
         return 1
+    # For baseSize <= 9: bits = baseSize + 3, max_pos = (1 << (bits-1)) - 1
     needed_bits = _math.ceil(_math.log2(max_val + 1)) + 1
     base = max(1, needed_bits - 3)
-    return min(base, 15)  # max baseSize = 15
+    if base <= 9:
+        return min(base, 15)
+    # For baseSize > 9: bits = 2*baseSize - 6, so baseSize = (bits + 6) / 2
+    base = max(10, _math.ceil((needed_bits + 6) / 2))
+    return min(base, 15)
 
 
 def _encode_delta(val: int, bits: int) -> list[int]:
@@ -1508,12 +1512,11 @@ def _write_rgn2_raster_record(
       [0x00] type = 0x06 (polyline)
       [0x01] subtype = 0xB3 (bit7=1→has class fields, bit5=1→has label, bits[4:0]=0x13)
              subtype & 0x1F = 0x13, type | (0x13<<8) | 0x10000 = 0x10613 = isRaster()
-      [0x02-03] lon_delta (int16 LE) — tile center lon minus subdiv center lon, in map units
-      [0x04-05] lat_delta (int16 LE) — tile center lat minus subdiv center lat, in map units
+      [0x02-03] lon_delta (int16 LE) — tile left edge minus subdiv center, in level-space
+      [0x04-05] lat_delta (int16 LE) — tile bottom edge minus subdiv center, in level-space
       [0x06] VUInt32(bitstream_len) = 0x11 (value=8, single-byte encoding)
-      [0x07-0E] bitstream (8 bytes) — degenerate 1-point polyline at tile center
-                byte 0: bitstreamInfo = 0x00 (no extra bytes, 1 address point)
-                bytes 1-7: coordinate deltas (zeros for single-point degenerate line)
+      [0x07-0E] bitstream (8 bytes) — 1 delta pair (+width, +height) from bottom-left
+                to top-right, producing a boundingRect covering the full tile area
       [0x0F-11] label_ptr (uint24 LE) = 0x000000 (no label needed for raster)
       [0x12] class_flags = 0xE0 (flags>>5 = 7 → triggers readRasterInfo)
       [0x13] VUInt32(remaining_size) = 0x2D (value=22, single-byte encoding)
@@ -1554,15 +1557,16 @@ def _write_rgn2_raster_record(
 
     # Lon/lat deltas from subdivision center (int16 LE, in level-space)
     # GPXSee computes: pos = subdiv_center_24bit + (delta_int16 << (24 - bits))
-    # So delta must be in level-space: delta_24bit >> (24 - level_number)
+    # P0 is positioned at the tile's bottom-left corner so the single bitstream
+    # delta pair (+width, +height) produces a boundingRect covering the full tile.
     center_lat_mu = _deg_to_map_units(subdiv_center_lat)
     center_lon_mu = _deg_to_map_units(subdiv_center_lon)
-    tile_center_lat_mu = _deg_to_map_units(tile_center_lat)
-    tile_center_lon_mu = _deg_to_map_units(tile_center_lon)
+    tile_left_mu = _deg_to_map_units(tile_lon_min)
+    tile_bottom_mu = _deg_to_map_units(tile_lat_min)
 
     shift = max(0, 24 - level_number)
-    lon_delta = (tile_center_lon_mu - center_lon_mu) >> shift
-    lat_delta = (tile_center_lat_mu - center_lat_mu) >> shift
+    lon_delta = (tile_left_mu - center_lon_mu) >> shift
+    lat_delta = (tile_bottom_mu - center_lat_mu) >> shift
 
     # Clamp to int16 range
     lon_delta = max(-32768, min(32767, lon_delta))
@@ -1574,12 +1578,9 @@ def _write_rgn2_raster_record(
     # VUInt32(bitstream_len=8) → 0x11
     f.write(_encode_vuint32(8))
 
-    # Bitstream (8 bytes): 2-point polyline encoding tile corners
-    # Expands the polygon boundingRect to cover the full tile area,
-    # ensuring GPXSee's copyPolys filter includes tiles at view edges.
+    # Bitstream (8 bytes): 1 delta pair (+width, +height) from tile bottom-left
+    # Produces a boundingRect covering [bottom-left, top-right] of the tile.
     bitstream = _encode_tile_bitstream(
-        tile_center_lat,
-        tile_center_lon,
         tile_lat_min,
         tile_lon_min,
         tile_lat_max,

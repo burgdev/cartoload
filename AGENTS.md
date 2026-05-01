@@ -52,6 +52,7 @@ Guidelines for AI coding agents working on cartoload.
 
 - **mkgmap** (Java Garmin IMG writer): `~/git/tmp/mkgmap-r4924` — the definitive open-source reference for Garmin IMG format. Key packages: `uk.me.parabola.mkgmap.reader`, `uk.me.parabola.mkgmap.building`, `uk.me.parabola.mkgmap.general`, `uk.me.parabola.mkgmap.outputs`.
 - **GPXSee** (C++ Garmin IMG reader): `~/git/tmp/GPXSee` — useful for understanding how IMG files are parsed. Key directories: `src/map/IMG`, `src/GPXSee` (main app).
+- **QMapShack**: `~/git/tmp/gmapshack`
 
 ## General Guidelines
 
