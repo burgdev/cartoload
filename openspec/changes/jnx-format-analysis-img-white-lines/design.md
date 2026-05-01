@@ -1,74 +1,65 @@
 ## Context
 
-The Garmin IMG raster format positions tiles within spatial subdivisions using delta-encoding relative to subdivision centers. This differs fundamentally from the JNX format (Garmin's BirdsEye imagery format), where each tile has an independent 32-bit bounding rectangle with no quantization.
+Analysis of the SwissTopo reference IMG file revealed that its RGN2 bitstream encoding is fundamentally different from our implementation:
 
-**Current architecture**: Tiles are positioned via:
-1. RGN2 header deltas (int16 `lon_delta`/`lat_delta`) — tile position relative to subdivision center, right-shifted by `24 - level_number`
-2. DeltaStream bitstream — tile extent from bottom-left to top-right, also in shifted units
-3. TRE2 width/height — subdivision extent, also shifted
-4. GPXSee reconstructs a boundingRect from (1)+(2) for tile filtering
+**SwissTopo bitstream** (level 22, shift=2, tile ~576x400 MU):
+- 3 points forming an L-shaped marker
+- Deltas: (288, 0) then (0, -12) — in shifted coordinates
+- After applying shift: boundingRect is ~1152 x 48 MU
+- Just a coarse position marker for `copyPolys()` filtering
 
-**The problem**: The shift operation `>> (24 - level_number)` introduces quantization error. At lower level_numbers, the quantization step can exceed tile dimensions, causing:
-- Tile boundingRect points to fall outside the view → tiles filtered out → white gaps
-- Adjacent tiles' boundingRects to not meet → white lines between them
-- Tiles near subdivision boundaries to be excluded → missing edge tiles
+**Our implementation**:
+- 2 points forming a line from bottom-left to top-right
+- Single delta: (+width_ls, +height_ls) — covering the full tile
+- After applying shift: boundingRect is ~580 x 404 MU
+- Tries to cover the full tile but is a different format than the reference
 
-**JNX comparison**: JNX avoids this entirely — each tile has absolute 32-bit bounds, no subdivision scheme, no delta encoding. QMapShack's JNX reader even has explicit gap detection that switches to a high-quality rendering mode when gaps exceed 2 pixels.
+GPXSee's rendering pipeline:
+1. R-tree query finds subdivisions whose TRE2 bounds overlap the view
+2. For matching subdivisions, iterate RGN2 records and compute boundingRect from deltas
+3. `copyPolys()` filters tiles whose boundingRect intersects the view
+4. Render matching tiles using absolute 32-bit bounds from `readRasterInfo()`
+
+Both header deltas and bitstream deltas are shifted by `LS(delta, 24-bits)` (confirmed rgnfile.cpp:851).
 
 ## Goals / Non-Goals
 
 **Goals:**
-- Eliminate white lines/gaps at all zoom levels in generated IMG raster files
-- Ensure boundingRects of adjacent tiles always overlap (never gap)
-- Ensure tiles near subdivision boundaries are correctly included in filtering
-- Document the JNX format comparison and quantization behavior
+- Match the SwissTopo bitstream format (proven to work)
+- Fix subdivision bounds to cover all assigned tiles
+- Minimize quantization error by centering subdivisions on actual tile positions
 
 **Non-Goals:**
-- Switching to JNX format (we need IMG for Garmin device compatibility)
-- Modifying GPXSee's rendering code (we control only the writer)
-- Changing the overall subdivision hierarchy structure
-- Supporting Garmin vector map features
+- Switching to JNX format
+- Modifying GPXSee's rendering
+- Changing the subdivision hierarchy structure
 
 ## Decisions
 
-### Decision 1: Extend bitstream boundingRect with quantization margin
+### Decision 1: Match SwissTopo's 3-point L-shaped bitstream
 
-**Choice**: Add a quantization-safe overlap margin to the bitstream delta encoding, extending the boundingRect beyond the actual tile bounds.
+**Choice**: Encode 2 delta pairs forming an L-shape: (+half_width, 0) then (0, +half_height), where each half is approximately half the tile dimension in shifted coordinates.
 
-**Rationale**: The boundingRect is GPXSee's primary filter for tile visibility. If two adjacent tiles have boundingRects that barely touch or have a 1-unit gap (due to quantization rounding), GPXSee's `intersects()` check can exclude one tile. Extending each boundingRect by 1 quantization step in each direction ensures overlap regardless of rounding direction.
+**Rationale**: This matches the SwissTopo reference file exactly. SwissTopo uses deltas like (288, 0) and (0, -12) for tiles of ~576x400 MU. The exact values encode the tile extent direction — the first delta moves right, the second moves up/down, forming an L that creates a boundingRect marker near the tile position. Since this is proven in millions of devices, matching it is the safest approach.
 
-**How**: In `_encode_tile_bitstream()`, add 1 to `width_ls` and `height_ls` after the shift operation. This extends the boundingRect by one quantization step past the tile's actual right/top edge, ensuring overlap with the next tile.
+**Implementation**: In `_encode_tile_bitstream()`, change from 1 delta pair (+width, +height) to 2 delta pairs (+width/2, 0) and (0, +height/2). Adjust the info byte to use smaller baseSize since each individual delta is smaller.
 
-**Alternative considered**: Use overlapping tile images — rejected because JPEG tiles are independent and overlap would require duplicating/compositing pixel data.
+### Decision 2: Compute subdivision bounds from actual tile positions
 
-### Decision 2: Extend TRE2 subdivision bounds to cover all assigned tiles
+**Choice**: Use min/max of assigned tiles' geographic bounds for subdivision `bounds_west/east/north/south`, not grid cell boundaries.
 
-**Choice**: When computing subdivision width/height for TRE2, ensure the bounds cover all assigned tiles' quantized positions, not just the grid cell.
+**Rationale**: Grid cell boundaries are computed from a regular grid that may not align with tile positions. Tiles near cell boundaries may have boundingRects extending beyond the grid cell, causing the R-tree to miss them. Using actual tile bounds ensures full coverage.
 
-**Rationale**: The grid cell bounds are computed from a regular geographic grid, but tiles near cell boundaries may have their boundingRect extend slightly beyond the grid cell due to quantization rounding. If the TRE2 bounds don't cover this extension, GPXSee's R-tree query won't find the subdivision for those view rects, causing missing tiles at cell boundaries.
+### Decision 3: Compute subdivision center from tile midpoint
 
-**How**: In `encode_tre2_width()`/`encode_tre2_height()`, compute bounds from actual tile positions rather than grid cell bounds. Use the min/max of assigned tiles' geographic bounds, rounded outward to account for quantization.
+**Choice**: `center = (min_tile_bound + max_tile_bound) / 2` for each axis.
 
-**Alternative considered**: Make grid cells overlap — rejected because it complicates tile assignment and can cause duplicate rendering.
-
-### Decision 3: Ensure subdivision center is at the midpoint of actual tile bounds
-
-**Choice**: Compute subdivision center from the geometric midpoint of assigned tiles' bounds, not from the grid cell center.
-
-**Rationale**: The grid cell center may not align with the centroid of the tiles assigned to that cell (especially when tiles at cell boundaries are assigned to one side). A misaligned center increases the magnitude of lon_delta/lat_delta, which increases the impact of quantization error. Centering on actual tile bounds minimizes delta magnitudes.
-
-**How**: In `_assign_tiles_to_grid()`, compute `center_lat`/`center_lon` from the average of min/max tile bounds in the cell, not from the geometric center of the grid cell.
-
-### Decision 4: Add JNX format comparison to documentation
-
-**Choice**: Add a dedicated section to `garmin-img.md` comparing JNX and IMG raster positioning models.
-
-**Rationale**: The JNX format analysis provided key insights into why the IMG subdivision approach is prone to gaps. Documenting this comparison helps future developers understand the trade-offs and avoid similar issues.
+**Rationale**: The grid cell center may not align with the centroid of tiles assigned to that cell. A misaligned center increases delta magnitudes, amplifying quantization error. Centering on tile bounds minimizes this.
 
 ## Risks / Trade-offs
 
-- **[Slight boundingRect over-coverage]**: Extending boundingRects by 1 quantization step means GPXSee may draw some tiles that are just outside the view. This is harmless — the rendering uses the absolute 32-bit bounds for positioning, so the image is placed correctly regardless of boundingRect extent. → Mitigation: The over-coverage is at most 1 quantization step (typically < 0.001°), negligible for rendering.
+- **[Format correctness]**: The 3-point L-shape must produce a valid boundingRect that intersects the view when the tile should be visible. → Mitigation: SwissTopo uses this exact format successfully.
 
-- **[Increased TRE2 extent]**: Using tile-derived bounds instead of grid cell bounds may increase subdivision extent slightly. → Mitigation: The increase is bounded by tile size plus 1 quantization step. TRE2 width/height clamping to 0x7FFF handles overflow.
+- **[baseSize recalculation]**: With 2 smaller deltas instead of 1 large one, the bit budget per delta changes. Need to verify the total fits in 56 bits. → Mitigation: Each delta is ~half the tile size, so baseSize may be smaller. 2 pairs at smaller baseSize should fit.
 
-- **[Regression in existing levels]**: Changing the bitstream encoding may affect levels that currently render correctly. → Mitigation: All 104 existing tests pass; new tests verify overlap at all level_numbers. Visual testing required after implementation.
+- **[Regression]**: Changing the bitstream format affects all levels. → Mitigation: Existing tests verify bitstream decoding; add tests for the new format matching SwissTopo patterns.

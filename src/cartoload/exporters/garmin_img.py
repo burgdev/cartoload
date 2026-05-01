@@ -221,23 +221,33 @@ def _assign_tiles_to_grid(
             if not cell_tiles:
                 continue
 
-            cell_lat_min = lat_min_all + r * cell_lat
-            cell_lat_max = cell_lat_min + cell_lat
-            cell_lon_min = lon_min_all + c * cell_lon
-            cell_lon_max = cell_lon_min + cell_lon
+            # Compute bounds from actual tile positions (not grid cell)
+            tile_lat_min = float("inf")
+            tile_lat_max = float("-inf")
+            tile_lon_min = float("inf")
+            tile_lon_max = float("-inf")
+            for te in cell_tiles:
+                if isinstance(te, tuple):
+                    _, tb = te
+                    tl_min, tn_min, tl_max, tn_max = tb
+                    tile_lat_min = min(tile_lat_min, tl_min)
+                    tile_lat_max = max(tile_lat_max, tl_max)
+                    tile_lon_min = min(tile_lon_min, tn_min)
+                    tile_lon_max = max(tile_lon_max, tn_max)
 
-            center_lat = (cell_lat_min + cell_lat_max) / 2
-            center_lon = (cell_lon_min + cell_lon_max) / 2
+            # Center on actual tile midpoint to minimize delta magnitudes
+            center_lat = (tile_lat_min + tile_lat_max) / 2
+            center_lon = (tile_lon_min + tile_lon_max) / 2
 
             sub = Subdivision(
                 center_lat=center_lat,
                 center_lon=center_lon,
                 zoom_level_index=z_idx,
                 tile_entries=cell_tiles,
-                bounds_west=cell_lon_min,
-                bounds_east=cell_lon_max,
-                bounds_north=cell_lat_max,
-                bounds_south=cell_lat_min,
+                bounds_west=tile_lon_min,
+                bounds_east=tile_lon_max,
+                bounds_north=tile_lat_max,
+                bounds_south=tile_lat_min,
             )
             subdivisions.append(sub)
 

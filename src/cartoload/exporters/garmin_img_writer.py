@@ -1369,22 +1369,21 @@ def _encode_tile_bitstream(
     """Encode 8-byte bitstream with tile extent delta for boundingRect coverage.
 
     Generates a DeltaStream that GPXSee decodes as polygon points expanding
-    the boundingRect to cover the full tile area. The P0 position (set by the
-    record header delta) is at the tile's bottom-left corner. One delta pair
-    (+width, +height) extends the boundingRect to the tile's top-right corner.
+    the boundingRect to cover the full tile area. P0 is at the tile's bottom-left
+    (set by record header delta). One delta pair (+width, +height) extends the
+    boundingRect to the tile's top-right corner.
 
     Format (matches GPXSee DeltaStream in deltastream.cpp):
       byte 0: info byte — low nibble = lon baseSize, high nibble = lat baseSize
       bytes 1-7: sign bits + extended bit + delta-encoded coordinate pair (LSB-first)
 
-    The encoding uses fixed-sign mode for both axes (sign bit embedded in each
-    delta value). GPXSee's extPolyObjects calls stream.init(info, false, true)
-    with extended=true, so an extended bit is included after the sign bits.
+    The encoding uses fixed-sign mode for both axes. GPXSee's extPolyObjects calls
+    stream.init(info, false, true) with extended=true, so an extended bit is included.
 
     Bit budget for 8 bytes (56 data bits in bytes 1-7):
       3 bits: lon sign + lat sign + extended
       1 delta pair at (3+baseSize) bits each axis
-      Total: 3 + 2*(3+baseSize) = 9 + 2*baseSize bits → baseSize up to 23
+      Total: 3 + 2*(3+baseSize) = 9 + 2*baseSize → baseSize up to 23
 
     Args:
         tile_lat_min/max, tile_lon_min/max: Tile geographic bounds in degrees

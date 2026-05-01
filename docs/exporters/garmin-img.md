@@ -436,7 +436,7 @@ The lon_delta and lat_delta fields are int16 values in **level-shifted map units
 
 #### 4.5.2 DeltaStream Bitstream Encoding
 
-The 8-byte bitstream in each RGN2 raster record encodes the tile's extent as coordinate deltas, following GPXSee's `DeltaStream` format. The bitstream is consumed by `extPolyObjects()` which calls `stream.init(info, false, true)` with `extended=true`.
+The 8-byte bitstream in each RGN2 raster record encodes coordinate deltas following GPXSee's `DeltaStream` format. The bitstream is consumed by `extPolyObjects()` which calls `stream.init(info, false, true)` with `extended=true`.
 
 **Info byte (byte 0):**
 
@@ -453,27 +453,29 @@ The `baseSize` determines the number of bits per delta via GPXSee's `bitSize()` 
 **Bit layout (bytes 1-7, LSB-first packing):**
 
 ```
-[lon_sign(1)][lat_sign(1)][extended(1)][lon_delta1(bits)][lat_delta1(bits)]
+[lon_sign(1)][lat_sign(1)][extended(1)][lon_delta(bits)][lat_delta(bits)]
 ```
 
 Where:
 - `lon_sign` = 0 (fixed sign, positive delta)
 - `lat_sign` = 0 (fixed sign, positive delta)
 - `extended` = 0 (consumed by `stream.init()` but not used for raster)
-- `lon_delta1` = tile width in level-shifted map units
-- `lat_delta1` = tile height in level-shifted map units
+- `lon_delta` = tile width in level-shifted map units
+- `lat_delta` = tile height in level-shifted map units
 
 **Delta computation:**
-1. Header delta positions tile bottom-left: `lon_delta = (tile_left - subdiv_center) >> shift`, `lat_delta = (tile_bottom - subdiv_center) >> shift`
-2. Bitstream encodes the extent from bottom-left to top-right: `width_ls = (tile_right - tile_left) >> shift`, `height_ls = (tile_top - tile_bottom) >> shift`
-3. GPXSee recovers two points: P0 at `center + (header_delta << shift)` and P1 at `P0 + (delta << 0)`
+1. Header delta positions P0 at tile bottom-left: `lon_delta = (tile_left - subdiv_center) >> shift`, `lat_delta = (tile_bottom - subdiv_center) >> shift`
+2. Bitstream encodes the extent from bottom-left to top-right: `width_ls = (tile_right - tile_left + mask) >> shift + 1`, `height_ls = (tile_top - tile_bottom + mask) >> shift + 1`
+3. GPXSee recovers two points: P0 at `center + (header_delta << shift)` and P1 at `P0 + (bitstream_delta << shift)`
 4. `boundingRect` = [P0, P1] covering the full tile extent
 
-**baseSize calculation:** For a given max delta value, compute the minimum `baseSize` that can represent it. The required bits per delta = `bitSize(baseSize)`, and the total bitstream must fit in the 56 available bits (7 data bytes × 8 bits) after consuming sign+extended bits.
+**baseSize calculation:** For a given max delta value, compute the minimum `baseSize` that can represent it. The required bits per delta = `bitSize(baseSize)`, and the total bitstream must fit in the 56 available bits (7 data bytes × 8 bits) after consuming sign+extended bits (3 bits). With a single delta pair: `3 + 2 × bitSize ≤ 56`, allowing baseSize up to 23.
 
 **Packing order:** Bits are packed LSB-first into bytes (GPXSee's `BitStream1` reads from bit 0 of each byte). The first bit written goes into bit 0 of byte 1.
 
 **Why this matters:** The `boundingRect` derived from the decoded delta pair is used by GPXSee's `copyPolys()` for tile filtering. If the bitstream is incorrectly encoded (wrong bitSize, missing extended bit, or wrong packing order), the boundingRect will be wrong, causing tiles to be incorrectly excluded — appearing as white grid lines at subdivision boundaries.
+
+**Reference implementations:** SwissTopo uses 3 delta pairs tracing the tile outline (+w,0), (0,+h), (-w,0) with different sign modes per axis. IOM uses 0 delta pairs (single-point boundingRect). Both produce valid files. Our implementation uses 1 pair (+w, +h) for full tile coverage with the simplest encoding.
 
 **GPXSee parsing flow:**
 
@@ -487,7 +489,7 @@ extPolyObjects() reads compound record:
   6. raster_size_enc(VUInt32) + image_id(2) + bounds(16) + jpeg_size(4)
 
 copyPolys() filters: rect.intersects(boundingRect)
-  → boundingRect is single point at subdiv_center + delta<<shift
+  → boundingRect covers full tile [bottom-left, top-right]
   → tiles with boundingRect outside view rect are excluded
 
 drawPolygons() renders: uses poly.raster.rect()
@@ -871,6 +873,27 @@ SwissTopo files use 5 zoom levels (20-24), forming a pyramid where each level co
 
 For our implementation, we support configurable zoom levels with the zoom_code specified per level.
 
+## 5.7 JNX Format Comparison
+
+JNX (used by Garmin BirdsEye and SwissTopo's original format) is a simpler raster map format. SwissTopo IMG files were converted from JNX using Garmin tools. Understanding JNX's approach helps explain why IMG raster requires careful subdivision handling.
+
+**JNX tile positioning:** Each tile stores its own 32-bit bounding rectangle (north, south, east, west as int32 LE) with NO quantization or subdivision scheme. Tiles are independently positioned at full precision, making gap-free display trivial.
+
+**IMG tile positioning:** Tiles are positioned relative to subdivision centers via 16-bit deltas with shift = `24 - level_number`. This introduces quantization at the subdivision level. The bitstream boundingRect is a coarse L-shaped marker (not full tile coverage) used only for `copyPolys()` filtering, while absolute 32-bit bounds handle rendering.
+
+**Key differences:**
+
+| Aspect | JNX | IMG (raster) |
+|--------|-----|--------------|
+| Tile bounds | Independent 32-bit rect per tile | Subdivision-relative 16-bit deltas |
+| Quantization | None | Shift = `24 - level_number` |
+| Spatial indexing | Per-tile bounds | TRE2 subdivision grid |
+| Tile filtering | Direct bounds comparison | `copyPolys()` via boundingRect |
+| Rendering | Direct | Absolute 32-bit from readRasterInfo |
+| Gap risk | None (full precision) | Quantization at low level_numbers |
+
+**Why this matters for white lines:** JNX has no subdivision concept, so tiles are always gap-free. IMG's subdivision-relative encoding can produce white lines when: (1) subdivision bounds don't cover all tile positions, (2) boundingRect quantization exceeds tile extent, or (3) subdivision centers are misaligned with tile positions. Our implementation avoids these by using tile-derived subdivision bounds and centers, and by remapping level_numbers to ensure coordinate precision exceeds tile size.
+
 ## 6. Vector vs Raster Format Differences
 
 This section provides a brief comparison of vector vs raster format differences. For detailed vector format documentation, see **Appendix A** (from Willink/Pinns `expl_img2015.pdf` and Mechalas `imgformat-1.0.pdf`). Raster maps use the same container structure but different internal formats.
@@ -910,14 +933,15 @@ Actual area size = (width*2 + 1) × (height*2 + 1) map units around center.
 
 **Raster maps use the same TRE2 subdivision record structure** as vector maps (16-byte for non-last levels, 14-byte for last level), but with different object type flags and a focus on raster tile assignment rather than vector elements.
 
-Our implementation generates spatial subdivisions using a geographic grid:
+Our implementation generates spatial subdivisions using a geographic grid with tile-derived bounds:
 
 1. **Grid computation:** For each zoom level, `grid_side = max(2, int(n_tiles**0.25))` determines the grid dimensions
 2. **Tile assignment:** Each tile is assigned to a grid cell based on its center position
-3. **Subdivision bounds:** Set to the grid cell bounds (not individual tile bounds)
-4. **Empty cells:** Skipped (no subdivision created)
-5. **Width/height encoding:** Uses shift = `max(0, 24 - level_number)` with `((2*(center - bound) + 1)//2 + mask) >> shift`
-6. **has_children flag:** Bit 15 of width field set for all non-last levels
+3. **Subdivision bounds:** Computed from the min/max of assigned tiles' geographic bounds (not grid cell boundaries)
+4. **Subdivision center:** Computed from the midpoint of the tile-derived bounds (not grid cell center) — this minimizes delta magnitudes for header and bitstream encoding
+5. **Empty cells:** Skipped (no subdivision created)
+6. **Width/height encoding:** Uses shift = `max(0, 24 - level_number)` with `((2*(center - bound) + 1)//2 + mask) >> shift`
+7. **has_children flag:** Bit 15 of width field set for all non-last levels
 
 The level_number values are remapped to `24-N+1..24` to ensure coordinate precision exceeds tile size (see Section 5.2).
 

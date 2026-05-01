@@ -2177,18 +2177,22 @@ class TestBitstreamDeltaStreamDecoding:
         tile_bottom_mu = self._deg_to_mu(tile_lat_min)
         tile_top_mu = self._deg_to_mu(tile_lat_max)
 
-        # Verify boundingRect covers the tile (with tolerance for quantization)
+        # Verify boundingRect covers the full tile area.
+        # P0 at tile bottom-left, single delta pair (+width, +height) to top-right.
+        # At shift>0 there's quantization, so allow tolerance of a few level-space units.
         shift = max(0, 24 - level_number)
-        tol = 2 << shift  # allow up to 2 level-space units of tolerance
+        tol = 2 << shift
 
+        # boundingRect must start at or before tile bottom-left
         assert result["min_lon_mu"] <= tile_left_mu + tol, (
             f"Left edge: boundingRect min_lon={result['min_lon_mu']} > tile_left={tile_left_mu} + tol={tol}"
         )
-        assert result["max_lon_mu"] >= tile_right_mu - tol, (
-            f"Right edge: boundingRect max_lon={result['max_lon_mu']} < tile_right={tile_right_mu} - tol={tol}"
-        )
         assert result["min_lat_mu"] <= tile_bottom_mu + tol, (
             f"Bottom edge: boundingRect min_lat={result['min_lat_mu']} > tile_bottom={tile_bottom_mu} + tol={tol}"
+        )
+        # boundingRect must extend to at least the tile top-right
+        assert result["max_lon_mu"] >= tile_right_mu - tol, (
+            f"Right edge: boundingRect max_lon={result['max_lon_mu']} < tile_right={tile_right_mu} - tol={tol}"
         )
         assert result["max_lat_mu"] >= tile_top_mu - tol, (
             f"Top edge: boundingRect max_lat={result['max_lat_mu']} < tile_top={tile_top_mu} - tol={tol}"
@@ -2365,3 +2369,89 @@ class TestBitstreamDeltaStreamDecoding:
             remaining_bits.append(read_bit())
         # At least some remaining bits should be non-zero (deltas are non-zero)
         assert any(remaining_bits), "Delta data after extended bit should be non-zero"
+
+    @pytest.mark.parametrize("level_number", [20, 21, 22, 23, 24])
+    def test_bounding_rect_covers_tile_at_all_level_numbers(self, level_number):
+        """boundingRect must cover the full tile at all level_numbers."""
+        result = self._verify_bounding_rect_covers_tile(
+            level_number=level_number,
+            subdiv_lat=47.0,
+            subdiv_lon=8.5,
+            tile_lat_min=46.95,
+            tile_lon_min=8.45,
+            tile_lat_max=47.05,
+            tile_lon_max=8.55,
+        )
+        # 1 delta pair → 2 points: P0=bottom-left, P1=top-right
+        points = result["points"]
+        assert len(points) == 2, (
+            f"Expected 2 points at level_number={level_number}, got {len(points)}"
+        )
+
+
+class TestSubdivisionTileDerivedBounds:
+    """Tests verifying subdivisions use tile-derived bounds and centers."""
+
+    def test_subdivision_bounds_cover_all_assigned_tiles(self):
+        """Subdivision bounds must cover all assigned tiles' geographic extents."""
+        tiles = _make_tiles_with_bounds(
+            4, lat_min=46.0, lat_max=47.0, lon_min=8.0, lon_max=9.0
+        )
+        compressed = {15: tiles}
+        result = generate_subdivisions(
+            compressed, [15], {"north": 47.5, "south": 46.5, "west": 8.0, "east": 9.0}
+        )
+        for sub in result:
+            if sub.get_tile_count() == 0:
+                continue
+            for entry in sub.tile_entries:
+                if isinstance(entry, tuple):
+                    _, tb = entry
+                    t_lat_min, t_lon_min, t_lat_max, t_lon_max = tb
+                    assert sub.bounds_south <= t_lat_min + 0.001, (
+                        f"Tile south={t_lat_min} not covered by subdiv south={sub.bounds_south}"
+                    )
+                    assert sub.bounds_north >= t_lat_max - 0.001, (
+                        f"Tile north={t_lat_max} not covered by subdiv north={sub.bounds_north}"
+                    )
+                    assert sub.bounds_west <= t_lon_min + 0.001, (
+                        f"Tile west={t_lon_min} not covered by subdiv west={sub.bounds_west}"
+                    )
+                    assert sub.bounds_east >= t_lon_max - 0.001, (
+                        f"Tile east={t_lon_max} not covered by subdiv east={sub.bounds_east}"
+                    )
+
+    def test_subdivision_center_from_tile_bounds_not_grid_cell(self):
+        """Subdivision center must be the midpoint of actual tile bounds."""
+        # Create tiles clustered in a specific region, NOT at grid cell center
+        tiles = []
+        jpeg_stub = b"\xff\xd8\xff\xe0" + b"\x00" * 50
+        # Cluster tiles in the NE corner of the map area
+        for r in range(2):
+            for c in range(2):
+                t_lat_min = 47.0 + r * 0.05
+                t_lon_min = 8.8 + c * 0.05
+                tiles.append(
+                    (
+                        jpeg_stub,
+                        (t_lat_min, t_lon_min, t_lat_min + 0.05, t_lon_min + 0.05),
+                    )
+                )
+
+        compressed = {15: tiles}
+        # Map bounds are much larger than tile cluster
+        result = generate_subdivisions(
+            compressed, [15], {"north": 48.0, "south": 46.0, "west": 7.0, "east": 10.0}
+        )
+        assert len(result) >= 1
+        sub = [s for s in result if s.get_tile_count() > 0][0]
+
+        # Expected center = midpoint of tile cluster bounds
+        expected_lat = (47.0 + 47.1) / 2  # tiles span 47.0-47.1
+        expected_lon = (8.8 + 8.9) / 2  # tiles span 8.8-8.9
+        assert abs(sub.center_lat - expected_lat) < 0.01, (
+            f"Center lat {sub.center_lat} != tile midpoint {expected_lat}"
+        )
+        assert abs(sub.center_lon - expected_lon) < 0.01, (
+            f"Center lon {sub.center_lon} != tile midpoint {expected_lon}"
+        )
