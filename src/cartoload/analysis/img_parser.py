@@ -1110,6 +1110,194 @@ class IMGParser:
 
         return results
 
+    def validate_tile_alignment(self, gmp):
+        """Validate tile-subdivision alignment, coverage gaps, and delta encoding.
+
+        Returns a dict with:
+          - alignment: tiles inside/outside subdivision bounds
+          - empty_subdivisions: subdivisions with no assigned tiles
+          - latitude_gaps: gaps in latitude coverage
+          - level_errors: boundingRect reconstruction errors by level
+          - delta_errors: tiles with incorrect delta encoding
+        """
+        tre = gmp.get("tre", {})
+        rgn = gmp.get("rgn", {})
+        subdivisions = tre.get("subdivisions", [])
+        levels = tre.get("levels", [])
+        rgn2_records = rgn.get("rgn2_records", [])
+        tre7_offsets = tre.get("tre7_offsets", [])
+        rgn2_total_size = rgn.get("rgn2_size", 0)
+        rgn2_record_size = 42
+
+        raster_tiles = [r for r in rgn2_records if r.get("type") == "raster tile"]
+        if not raster_tiles or not subdivisions:
+            return {"error": "No raster tiles or subdivisions found"}
+
+        # Build per-subdivision tile ranges from TRE7 offsets
+        subdiv_tile_ranges = []
+        if tre7_offsets and len(tre7_offsets) > len(subdivisions):
+            tile_idx = 0
+            for si, sub in enumerate(subdivisions):
+                rgn_off = sub.get("rgn_offset", 0)
+                if si + 1 < len(subdivisions):
+                    next_off = subdivisions[si + 1].get("rgn_offset", rgn_off)
+                else:
+                    sentinel = tre7_offsets[-1]
+                    next_off = (
+                        sentinel.get("offset", rgn2_total_size)
+                        if isinstance(sentinel, dict)
+                        else sentinel
+                    )
+                tile_count = (next_off - rgn_off) // rgn2_record_size
+                subdiv_tile_ranges.append((tile_idx, tile_idx + tile_count, sub))
+                tile_idx += tile_count
+
+        # Map raster tiles to their subdivision indices
+        raster_to_subdiv = {}
+        for ri, rec in enumerate(raster_tiles):
+            for si, (start, end, _sub) in enumerate(subdiv_tile_ranges):
+                if start <= ri < end:
+                    raster_to_subdiv[ri] = si
+                    break
+
+        # --- Tile-subdivision alignment ---
+        inside_count = 0
+        outside_count = 0
+        outside_by_subdiv = {}
+        level_errors = {}
+        delta_errors = []
+
+        for ri, rec in enumerate(raster_tiles):
+            if ri not in raster_to_subdiv:
+                continue
+            si = raster_to_subdiv[ri]
+            sub = subdiv_tile_ranges[si][2]
+            level_number = sub.get("level_number", 24)
+            shift = max(0, 24 - level_number)
+
+            tile_center_lon = (rec["left_deg"] + rec["right_deg"]) / 2
+            tile_center_lat = (rec["bottom_deg"] + rec["top_deg"]) / 2
+
+            # Decode subdivision bounds from width/height (last-level only)
+            if "width" in sub and "height" in sub:
+                extent_w = sub["width"] & 0x7FFF
+                extent_h = sub["height"] & 0x7FFF
+                center_lon_mu = sub["lon_center"]
+                center_lat_mu = sub["lat_center"]
+                west_mu = center_lon_mu - (extent_w << shift)
+                east_mu = center_lon_mu + (extent_w << shift)
+                south_mu = center_lat_mu - (extent_h << shift)
+                north_mu = center_lat_mu + (extent_h << shift)
+                west_deg = map_units_to_degrees(west_mu)
+                east_deg = map_units_to_degrees(east_mu)
+                south_deg = map_units_to_degrees(south_mu)
+                north_deg = map_units_to_degrees(north_mu)
+
+                in_lon = west_deg - 0.0001 <= tile_center_lon <= east_deg + 0.0001
+                in_lat = south_deg - 0.0001 <= tile_center_lat <= north_deg + 0.0001
+                if in_lon and in_lat:
+                    inside_count += 1
+                else:
+                    outside_count += 1
+                    outside_by_subdiv[si] = outside_by_subdiv.get(si, 0) + 1
+
+            # BoundingRect reconstruction error by level
+            sc_lon_mu = sub["lon_center"]
+            sc_lat_mu = sub["lat_center"]
+            tc_lon_mu = int(tile_center_lon * (2**24) / 360)
+            tc_lat_mu = int(tile_center_lat * (2**24) / 360)
+            recon_lon_mu = sc_lon_mu + (rec["lon_delta"] << shift)
+            recon_lat_mu = sc_lat_mu + (rec["lat_delta"] << shift)
+            recon_lon = map_units_to_degrees(recon_lon_mu)
+            recon_lat = map_units_to_degrees(recon_lat_mu)
+            lon_err = abs(recon_lon - tile_center_lon)
+            lat_err = abs(recon_lat - tile_center_lat)
+
+            if level_number not in level_errors:
+                level_errors[level_number] = {
+                    "total": 0,
+                    "max_err": 0.0,
+                    "shift": shift,
+                }
+            level_errors[level_number]["total"] += 1
+            level_errors[level_number]["max_err"] = max(
+                level_errors[level_number]["max_err"], max(lon_err, lat_err)
+            )
+
+            # Delta encoding verification
+            expected_lon = (tc_lon_mu - sc_lon_mu) >> shift
+            expected_lat = (tc_lat_mu - sc_lat_mu) >> shift
+            if rec["lon_delta"] != expected_lon or rec["lat_delta"] != expected_lat:
+                delta_errors.append(
+                    {
+                        "tile_index": ri,
+                        "subdiv_index": si,
+                        "level_number": level_number,
+                        "shift": shift,
+                        "lon_expected": expected_lon,
+                        "lon_actual": rec["lon_delta"],
+                        "lat_expected": expected_lat,
+                        "lat_actual": rec["lat_delta"],
+                    }
+                )
+
+        # --- Empty subdivisions ---
+        tiles_per_subdiv = {}
+        for ri, si in raster_to_subdiv.items():
+            tiles_per_subdiv[si] = tiles_per_subdiv.get(si, 0) + 1
+
+        empty_subdivisions = []
+        last_level = levels[-1] if levels else None
+        last_level_number = last_level["level_number"] if last_level else 24
+        for i, sub in enumerate(subdivisions):
+            if sub.get("level_number") == last_level_number:
+                count = tiles_per_subdiv.get(i, 0)
+                if count == 0:
+                    empty_subdivisions.append(
+                        {
+                            "index": i,
+                            "center_lon": sub["lon_center_deg"],
+                            "center_lat": sub["lat_center_deg"],
+                            "width": sub.get("width", 0),
+                            "height": sub.get("height", 0),
+                        }
+                    )
+
+        # --- Latitude gap detection ---
+        lat_bands = {}
+        for rec in raster_tiles:
+            center_lat = round((rec["bottom_deg"] + rec["top_deg"]) / 2, 2)
+            lat_bands.setdefault(center_lat, []).append(rec)
+
+        gaps = []
+        sorted_lats = sorted(lat_bands.keys())
+        if len(sorted_lats) > 1:
+            tile_heights = [r["top_deg"] - r["bottom_deg"] for r in raster_tiles]
+            avg_tile_h = sum(tile_heights) / len(tile_heights)
+            for i in range(len(sorted_lats) - 1):
+                gap = sorted_lats[i + 1] - sorted_lats[i]
+                if gap > avg_tile_h * 1.5:
+                    gaps.append(
+                        {
+                            "from_lat": sorted_lats[i],
+                            "to_lat": sorted_lats[i + 1],
+                            "gap_deg": round(gap, 4),
+                            "expected_deg": round(avg_tile_h, 4),
+                        }
+                    )
+
+        return {
+            "total_tiles": len(raster_tiles),
+            "assigned_tiles": len(raster_to_subdiv),
+            "inside_count": inside_count,
+            "outside_count": outside_count,
+            "outside_by_subdiv": outside_by_subdiv,
+            "empty_subdivisions": empty_subdivisions,
+            "latitude_gaps": gaps,
+            "level_errors": level_errors,
+            "delta_errors": delta_errors,
+        }
+
     def dump_section_hex(self, gmp, section):
         """Dump hex of a section for analysis. Uses GMP-relative offsets."""
         data = gmp["data"]

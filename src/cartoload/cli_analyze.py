@@ -924,6 +924,89 @@ def info(
             else:
                 console.print("  [dim]No raster tiles found in RGN2[/]")
 
+            # Alignment analysis
+            alignment = parser.validate_tile_alignment(gmp)
+            if "error" not in alignment:
+                console.print(
+                    Rule(
+                        _styled_path("Tile-Subdivision Alignment"),
+                        style="bold cyan",
+                        align="left",
+                    )
+                )
+
+                total = alignment["assigned_tiles"]
+                inside = alignment["inside_count"]
+                outside = alignment["outside_count"]
+                if total > 0:
+                    console.print(
+                        f"  Tiles inside subdiv bounds: {inside}/{total} "
+                        f"({100 * inside / total:.1f}%)"
+                    )
+                    console.print(
+                        f"  Tiles outside subdiv bounds: {outside}/{total} "
+                        f"({100 * outside / total:.1f}%)"
+                    )
+
+                # Level errors
+                if alignment["level_errors"]:
+                    console.print("  [bold]BoundingRect error by level:[/]")
+                    for ln in sorted(alignment["level_errors"].keys()):
+                        le = alignment["level_errors"][ln]
+                        console.print(
+                            f"    level_number={ln:2d} shift={le['shift']:2d} "
+                            f"tiles={le['total']:5d} max_err={le['max_err']:.6f} deg"
+                        )
+
+                # Delta errors
+                de = alignment["delta_errors"]
+                if de:
+                    console.print(
+                        f"  [bold yellow]Delta encoding errors: {len(de)} tiles[/]"
+                    )
+                    for err in de[:10]:
+                        console.print(
+                            f"    tile[{err['tile_index']}] subdiv[{err['subdiv_index']}] "
+                            f"shift={err['shift']}: "
+                            f"lon exp={err['lon_expected']} got={err['lon_actual']} "
+                            f"lat exp={err['lat_expected']} got={err['lat_actual']}"
+                        )
+                    if len(de) > 10:
+                        _truncated(console, len(de) - 10, "delta errors")
+                else:
+                    console.print("  Delta encoding: [green]all correct[/]")
+
+                # Empty subdivisions
+                empty = alignment["empty_subdivisions"]
+                if empty:
+                    console.print(f"  [bold yellow]Empty subdivisions: {len(empty)}[/]")
+                    for sd in empty[:10]:
+                        console.print(
+                            f"    subdiv[{sd['index']}] "
+                            f"center=({sd['center_lon']:.4f},{sd['center_lat']:.4f}) "
+                            f"w={sd['width']} h={sd['height']}"
+                        )
+                    if len(empty) > 10:
+                        _truncated(console, len(empty) - 10, "empty subdivisions")
+                else:
+                    console.print("  Empty subdivisions: [green]none[/]")
+
+                # Latitude gaps
+                gaps = alignment["latitude_gaps"]
+                if gaps:
+                    console.print(
+                        f"  [bold yellow]Latitude coverage gaps: {len(gaps)}[/]"
+                    )
+                    for g in gaps[:10]:
+                        console.print(
+                            f"    {g['from_lat']:.2f} -> {g['to_lat']:.2f} "
+                            f"(gap={g['gap_deg']:.4f} deg, expected ~{g['expected_deg']:.4f})"
+                        )
+                    if len(gaps) > 10:
+                        _truncated(console, len(gaps) - 10, "gaps")
+                else:
+                    console.print("  Latitude coverage: [green]no gaps[/]")
+
             return
 
         # --rgn2: annotated RGN2 analysis

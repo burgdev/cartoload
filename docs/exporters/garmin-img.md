@@ -424,7 +424,7 @@ Total: 42 bytes
 
 The lon_delta and lat_delta fields are int16 values in **level-shifted map units**. The shift is `max(0, 24 - level_number)` where level_number comes from TRE1 byte 1. The actual offset in 24-bit map units is `delta << shift`. GPXSee reconstructs the tile's boundingRect as a single point at `subdiv_center + (delta << shift)`.
 
-**Warning:** The boundingRect is a single point used by GPXSee's `copyPolys()` for tile filtering. If the quantization step (2^shift × 360 / 2^24 degrees) exceeds tile size, tiles can be incorrectly filtered out. This is why level_number must be >= 20 for detailed zoom levels (see Section 5.2).
+**Warning:** The boundingRect is a rectangle [P0, P1] covering the full tile extent, reconstructed by GPXSee's `copyPolys()` from header deltas (positioning P0) plus bitstream deltas (extending to P1). If the quantization step (2^shift × 360 / 2^24 degrees) is too large, the boundingRect may not accurately cover the tile, causing tiles to be incorrectly filtered out. This is why level_number must be >= 20 for detailed zoom levels (see Section 5.2).
 
 **VUInt32 encoding:** Variable-length unsigned 32-bit integer. Single-byte encoding: `(value << 1) | 1`. Examples: 0→0x01, 8→0x11, 22→0x2D.
 
@@ -580,7 +580,7 @@ GPXSee uses a two-stage filtering process for raster tiles:
 1. **R-tree query:** Find subdivisions whose bounds (from TRE2 width/height) overlap the view rect
 2. **copyPolys() filter:** Check if each tile's boundingRect intersects the view rect
 
-The boundingRect is a **single-point rectangle** computed from `subdiv_center + (lon_delta << shift), subdiv_center + (lat_delta << shift)`. The absolute 32-bit tile bounds (from readRasterInfo) are used only for rendering, NOT for filtering.
+The boundingRect is computed by GPXSee as a rectangle [P0, P1]: P0 is at `subdiv_center + (lon_delta << shift), subdiv_center + (lat_delta << shift)` from the header deltas, and P1 extends from P0 by the bitstream deltas (+width, +height). The absolute 32-bit tile bounds (from readRasterInfo) are used only for rendering, NOT for filtering.
 
 If the boundingRect point (quantized by the shift) falls outside the view, the tile is excluded even though the actual raster image would be visible. This is why level_number must be high enough for the quantization step to be smaller than tile size.
 
@@ -879,7 +879,7 @@ JNX (used by Garmin BirdsEye and SwissTopo's original format) is a simpler raste
 
 **JNX tile positioning:** Each tile stores its own 32-bit bounding rectangle (north, south, east, west as int32 LE) with NO quantization or subdivision scheme. Tiles are independently positioned at full precision, making gap-free display trivial.
 
-**IMG tile positioning:** Tiles are positioned relative to subdivision centers via 16-bit deltas with shift = `24 - level_number`. This introduces quantization at the subdivision level. The bitstream boundingRect is a coarse L-shaped marker (not full tile coverage) used only for `copyPolys()` filtering, while absolute 32-bit bounds handle rendering.
+**IMG tile positioning:** Tiles are positioned relative to subdivision centers via 16-bit deltas with shift = `24 - level_number`. This introduces quantization at the subdivision level. The bitstream produces a full-tile boundingRect via 1 delta pair (+width, +height) from P0 to P1, used by `copyPolys()` for tile filtering. Absolute 32-bit bounds handle rendering.
 
 **Key differences:**
 
@@ -1151,7 +1151,7 @@ Based on analysis of both reference files, there are two distinct raster IMG for
 | `src/cartoload/exporters/garmin_img_model.py`  | Data model (dataclasses for IMG structure)        |
 | `src/cartoload/exporters/garmin_img_writer.py` | Binary writer (header, FAT, GMP container, tiles) |
 | `src/cartoload/exporters/garmin_img.py`        | Exporter class (pipeline integration)             |
-| `tests/test_exporter_garmin_img.py`            | Test suite (96 tests, all passing)                |
+| `tests/test_exporter_garmin_img.py`            | Test suite (113 tests, all passing)               |
 | `src/cartoload/analysis/img_parser.py`        | IMG binary parser (FAT, GMP, TRE, RGN, LBL)      |
 | `src/cartoload/analysis/img_export.py`         | GeoTIFF export tool for visual validation          |
 
@@ -1431,4 +1431,4 @@ Official Garmin maps (like SwissTopo Pro) combine raster and vector data in a si
 - mkgmap source code (`/home/tobias/git/tmp/mkgmap-r4924`) — Java reference implementation for IMG writing (vector-focused but core format logic applies)
 - **Device tested:** Garmin Fenix 6 (confirmed working with reference files)
 
-**Last updated:** 2026-04-30
+**Last updated:** 2026-05-01
