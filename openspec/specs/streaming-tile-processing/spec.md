@@ -2,19 +2,19 @@
 
 ### Requirement: Tiles processed in batches, not all at once
 
-The system SHALL process tiles in configurable batches rather than loading all tiles into memory simultaneously. Batches SHALL be processed in parallel using `ProcessPoolExecutor` (not `ThreadPoolExecutor`) because rasterio's warp operation holds the GIL. Each batch SHALL be reprojected, encoded to JPEG, and streamed to the IMG writer before the next batch begins.
+The system SHALL process tiles in configurable batches rather than loading all tiles into memory simultaneously. Batches SHALL be processed in parallel using `ProcessPoolExecutor` during the write pass of the IMG writer, not during a separate pipeline processing stage. The pipeline stage SHALL produce only `TileMetadata` (no JPEG data), and JPEG processing SHALL happen during the write pass.
 
 #### Scenario: Default batch size
 
-- **WHEN** the system processes tiles with default settings
-- **THEN** tiles SHALL be processed in batches of 500 tiles per batch
-- **AND** only one batch's worth of raw tile data SHALL be in memory at a time
+- **WHEN** the system writes tiles with default settings
+- **THEN** tiles SHALL be written in batches of 500 tiles per batch
+- **AND** only one batch's worth of JPEG data SHALL be in memory at a time
 
-#### Scenario: ProcessPoolExecutor used for parallelism
+#### Scenario: ProcessPoolExecutor used during write pass
 
-- **WHEN** the system processes a batch of tiles
+- **WHEN** the system writes a batch of tiles
 - **THEN** it SHALL use `concurrent.futures.ProcessPoolExecutor` with `min(cpu_count, 8)` workers
-- **AND** each worker SHALL independently open the source file, warp, and return JPEG bytes
+- **AND** each worker SHALL read the source JPEG, warp to EPSG:4326, and return JPEG bytes for writing
 
 #### Scenario: Memory footprint bounded
 
@@ -29,25 +29,24 @@ The system SHALL process tiles in configurable batches rather than loading all t
 
 ### Requirement: Stream tiles directly from cache as JPEG bytes
 
-When the source CRS matches the target CRS (EPSG:4326), the system SHALL read tiles as raw JPEG bytes without decoding. When reprojection is needed, the system SHALL warp in-process via rasterio and output JPEG bytes directly without writing a TIFF intermediate to disk.
+When the source CRS matches the target CRS (EPSG:4326), the system SHALL read tiles as raw JPEG bytes without decoding during the write pass. When reprojection is needed, the system SHALL warp in-process via rasterio during the write pass and output JPEG bytes directly without writing a TIFF intermediate to disk.
 
-#### Scenario: CRS match — JPEG pass-through
+#### Scenario: CRS match — JPEG pass-through during write
 
 - **WHEN** a source tile is already in EPSG:4326 and the target quality matches the source quality
-- **THEN** the system SHALL read the raw JPEG bytes from cache and pass them directly to the IMG writer
+- **THEN** the system SHALL read the raw JPEG bytes from cache and write them directly to the IMG file
 - **AND** no image decoding or re-encoding SHALL occur
 
 #### Scenario: CRS match — quality change required
 
 - **WHEN** a source tile is in EPSG:4326 but the target quality differs
-- **THEN** the system SHALL decode, re-encode at target quality, and discard the decoded data immediately
+- **THEN** the system SHALL decode, re-encode at target quality, and write to IMG immediately
 
-#### Scenario: Reprojection needed — in-process warp
+#### Scenario: Reprojection needed — in-process warp during write
 
 - **WHEN** a source tile is in EPSG:3857 and needs reprojection to EPSG:4326
-- **THEN** the system SHALL warp the tile in-process using rasterio and output JPEG bytes
+- **THEN** the system SHALL warp the tile in-process using rasterio and write JPEG bytes to the IMG file
 - **AND** no TIFF file SHALL be written to disk at any point
-- **AND** no `gdalwarp` subprocess SHALL be spawned
 
 ### Requirement: IMG writer accepts JPEG bytes, not numpy arrays
 
