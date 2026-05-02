@@ -31,9 +31,11 @@ from __future__ import annotations
 import io
 import logging
 import math
+import os
 import struct
 import subprocess
 import tempfile
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Union
@@ -47,7 +49,11 @@ from .garmin_img_model import (
     Subdivision,
     SubfileHeader,
     SubfileType,
+    TileMetadata,
 )
+
+# Type alias for processed tile result from warp operations
+ProcessedTile = tuple[bytes, tuple[float, float, float, float]]
 
 if TYPE_CHECKING:
     pass
@@ -92,6 +98,47 @@ LBL_HEADER_LENGTH = 596  # LBL sub-header length
 NET_HEADER_LENGTH = 100  # NET sub-header length
 TILE_INDEX_ENTRY_SIZE = 4  # Tile index: one uint32 per tile
 MPS_SUBFILE_SIZE = 98
+
+
+def _get_worker_count() -> int:
+    """Get parallel worker count from environment or default.
+
+    Default: max(1, ceil(cpu_count / 2)).
+    Override: CARTOLOAD_WORKERS environment variable.
+    """
+    env_val = os.environ.get("CARTOLOAD_WORKERS")
+    if env_val is not None:
+        try:
+            return max(1, int(env_val))
+        except ValueError:
+            pass
+    cpu_count = os.cpu_count() or 4
+    return max(1, math.ceil(cpu_count / 2))
+
+
+def _warp_tile_worker(
+    source_path: Path,
+    x: int,
+    y: int,
+    zoom: int,
+    source_crs: str,
+    target_crs: str,
+    quality: int,
+) -> tuple[int, int, int, bytes | None]:
+    """Top-level worker for parallel tile warping via ProcessPoolExecutor.
+
+    Returns (x, y, zoom, jpeg_bytes_or_none) for result mapping.
+    Must be top-level (not a method) for pickling.
+    """
+    from ..processor.rasterio_warp import warp_tile_to_jpeg
+
+    if not source_path.exists():
+        return (x, y, zoom, None)
+
+    result = warp_tile_to_jpeg(source_path, x, y, zoom, source_crs, target_crs, quality)
+    if result is not None:
+        return (x, y, zoom, result[0])
+    return (x, y, zoom, None)
 
 
 def _img_id_size(total_tiles: int) -> int:
@@ -239,11 +286,11 @@ class LayoutComputer:
     def __init__(
         self,
         img_file: IMGFile,
-        compressed_tiles: CompressedTiles,
+        compressed_tiles: CompressedTiles | None = None,
         subdivisions: list[Subdivision] | None = None,
     ):
         self.img_file = img_file
-        self.compressed_tiles = compressed_tiles
+        self.compressed_tiles: CompressedTiles = compressed_tiles or {}
         self.subdivisions = subdivisions
         self.layouts: list[SubfileLayout] = []
 
@@ -303,16 +350,18 @@ class LayoutComputer:
           LBL28 section (image index - uint32 offsets to LBL29)
           LBL29 section (image storage - concatenated JPEG files)
         """
-        total_tiles = sum(len(tiles) for tiles in self.compressed_tiles.values())
-
-        # Validate subdivision tile count matches compressed_tiles count
+        # Compute total tiles from subdivisions (if available) or compressed_tiles
         if self.subdivisions is not None and len(self.subdivisions) > 0:
-            subdiv_tile_count = sum(len(sub.tile_entries) for sub in self.subdivisions)
-            if subdiv_tile_count != total_tiles:
+            total_tiles = sum(len(sub.tile_entries) for sub in self.subdivisions)
+            # Validate against compressed_tiles if both have data
+            ct_count = sum(len(tiles) for tiles in self.compressed_tiles.values())
+            if ct_count > 0 and total_tiles != ct_count:
                 raise ValueError(
-                    f"Subdivision tile count ({subdiv_tile_count}) != "
-                    f"compressed_tiles count ({total_tiles})"
+                    f"Subdivision tile count ({total_tiles}) != "
+                    f"compressed_tiles count ({ct_count})"
                 )
+        else:
+            total_tiles = sum(len(tiles) for tiles in self.compressed_tiles.values())
 
         # Container header + copyright strings
         copyright_str = self.img_file.copyright_string or "Copyright GARMIN."
@@ -388,20 +437,28 @@ class LayoutComputer:
             # When using subdivisions, tiles are stored in subdivision objects
             for sub in self.subdivisions:
                 for tile_entry in sub.tile_entries:
-                    jpeg_data = (
-                        tile_entry[0] if isinstance(tile_entry, tuple) else tile_entry
-                    )
-                    lbl29_size += len(jpeg_data)
+                    if isinstance(tile_entry, TileMetadata):
+                        lbl29_size += tile_entry.jpeg_size
+                    else:
+                        jpeg_data = (
+                            tile_entry[0]
+                            if isinstance(tile_entry, tuple)
+                            else tile_entry
+                        )
+                        lbl29_size += len(jpeg_data)
         else:
             # Legacy: tiles are in compressed_tiles dict
             for tiles in self.compressed_tiles.values():
                 for tile_entry in tiles:
-                    jpeg_size = (
-                        len(tile_entry[0])
-                        if isinstance(tile_entry, tuple)
-                        else len(tile_entry)
-                    )
-                    lbl29_size += jpeg_size
+                    if isinstance(tile_entry, TileMetadata):
+                        lbl29_size += tile_entry.jpeg_size
+                    else:
+                        jpeg_size = (
+                            len(tile_entry[0])
+                            if isinstance(tile_entry, tuple)
+                            else len(tile_entry)
+                        )
+                        lbl29_size += jpeg_size
 
         size = (
             GMP_CONTAINER_HEADER_SIZE
@@ -831,10 +888,15 @@ class GMPWriter:
             # When using subdivisions, tiles are stored in subdivision objects
             for sub in subdivisions:
                 for tile_entry in sub.tile_entries:
-                    jpeg_data = (
-                        tile_entry[0] if isinstance(tile_entry, tuple) else tile_entry
-                    )
-                    lbl29_size += len(jpeg_data)
+                    if isinstance(tile_entry, TileMetadata):
+                        lbl29_size += tile_entry.jpeg_size
+                    else:
+                        jpeg_data = (
+                            tile_entry[0]
+                            if isinstance(tile_entry, tuple)
+                            else tile_entry
+                        )
+                        lbl29_size += len(jpeg_data)
         else:
             # Legacy: tiles are in compressed_tiles dict
             for zoom in img_file.zoom_levels:
@@ -1783,21 +1845,30 @@ def _write_rgn_data_section_subdivisions(
 
     For each subdivision, writes compound raster records for all its tiles.
     Each record encodes the tile's position relative to the subdivision center.
+    Supports TileMetadata entries (bounds from fields) and legacy tuple/bytes entries.
     """
     iid_size = _img_id_size(total_tiles)
     image_index = 0
     for sub in subdivisions:
         level_number = img_file.zoom_levels[sub.zoom_level_index].level_number
         for tile_entry in sub.tile_entries:
-            if isinstance(tile_entry, tuple):
+            if isinstance(tile_entry, TileMetadata):
+                lat_min = tile_entry.lat_min
+                lon_min = tile_entry.lon_min
+                lat_max = tile_entry.lat_max
+                lon_max = tile_entry.lon_max
+                jpeg_size = tile_entry.jpeg_size
+            elif isinstance(tile_entry, tuple):
                 jpeg_data, tile_bounds = tile_entry
                 lat_min, lon_min, lat_max, lon_max = tile_bounds
+                jpeg_size = len(jpeg_data)
             else:
                 jpeg_data = tile_entry
                 lat_min = img_file.bounds_south
                 lon_min = img_file.bounds_west
                 lat_max = img_file.bounds_north
                 lon_max = img_file.bounds_east
+                jpeg_size = len(jpeg_data)
 
             tile_center_lat = (lat_min + lat_max) / 2
             tile_center_lon = (lon_min + lon_max) / 2
@@ -1812,7 +1883,7 @@ def _write_rgn_data_section_subdivisions(
                 tile_lon_max=lon_max,
                 tile_center_lat=tile_center_lat,
                 tile_center_lon=tile_center_lon,
-                jpeg_size=len(jpeg_data),
+                jpeg_size=jpeg_size,
                 image_index=image_index,
                 level_number=level_number,
                 img_id_size=iid_size,
@@ -1823,21 +1894,38 @@ def _write_rgn_data_section_subdivisions(
 def _write_lbl28_section_subdivisions(
     f: io.BufferedWriter, subdivisions: list[Subdivision]
 ) -> None:
-    """Write LBL28 section (image index table) for subdivision-ordered tiles."""
+    """Write LBL28 section (image index table) for subdivision-ordered tiles.
+
+    Supports TileMetadata entries (uses jpeg_size field) and legacy tuple/bytes entries.
+    """
     offset = 0
     for sub in subdivisions:
         for tile_entry in sub.tile_entries:
             f.write(struct.pack("<I", offset))
-            jpeg_data = tile_entry[0] if isinstance(tile_entry, tuple) else tile_entry
-            offset += len(jpeg_data)
+            if isinstance(tile_entry, TileMetadata):
+                offset += tile_entry.jpeg_size
+            else:
+                jpeg_data = (
+                    tile_entry[0] if isinstance(tile_entry, tuple) else tile_entry
+                )
+                offset += len(jpeg_data)
 
 
 def _write_lbl29_section_subdivisions(
     f: io.BufferedWriter, subdivisions: list[Subdivision]
 ) -> None:
-    """Write LBL29 section (image storage) for subdivision-ordered tiles."""
+    """Write LBL29 section (image storage) for subdivision-ordered tiles.
+
+    Supports TileMetadata entries (raises error — use StreamingIMGWriter for
+    metadata-only workflows) and legacy tuple/bytes entries.
+    """
     for sub in subdivisions:
         for tile_entry in sub.tile_entries:
+            if isinstance(tile_entry, TileMetadata):
+                raise TypeError(
+                    "TileMetadata entries cannot be written directly to LBL29. "
+                    "Use StreamingIMGWriter which processes JPEG data on demand."
+                )
             tile_data = tile_entry[0] if isinstance(tile_entry, tuple) else tile_entry
             if len(tile_data) >= 4 and tile_data[0:2] == b"\xff\xd8":
                 f.write(tile_data)
@@ -1846,6 +1934,604 @@ def _write_lbl29_section_subdivisions(
                     "Tile in subdivision does not start with JPEG marker (FFD8)"
                 )
                 f.write(tile_data)
+
+
+class StreamingIMGWriter:
+    """Writes Garmin IMG files using a streaming two-pass approach.
+
+    Pass 1 (layout): Compute all section positions from TileMetadata only.
+    Pass 2 (write): Write the IMG file, streaming JPEG data in batches.
+
+    Memory is bounded to ~12 MB per batch of tiles regardless of total tile count.
+    """
+
+    # Number of tiles to process in one batch during the LBL29 streaming write
+    BATCH_SIZE = 500
+
+    def __init__(self, output_path: Path):
+        self.output_path = output_path
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def write(
+        self,
+        img_file: IMGFile,
+        subdivisions: list[Subdivision],
+        tile_processor: Callable[[Path, int, int, int, str], ProcessedTile | None]
+        | None = None,
+        source_crs: str = "EPSG:3857",
+        jpeg_quality: int = 85,
+        progress_callback: Callable[[str, int, int], None] | None = None,
+    ) -> None:
+        """Write complete IMG file streaming JPEG data from source files.
+
+        Args:
+            img_file: IMGFile data structure to serialize
+            subdivisions: Subdivisions with TileMetadata entries (must have
+                source_path set for all tiles that need JPEG data)
+            tile_processor: Optional callable to process source tiles.
+                Signature: (source_path, x, y, zoom, source_crs) -> (jpeg_bytes, bounds) | None
+                If None, reads raw bytes from source_path.
+            source_crs: Source CRS for tile processing (default EPSG:3857)
+            jpeg_quality: JPEG quality for warping (1-100, default 85)
+            progress_callback: Called with (stage, current, total) for progress.
+                Stage is "writing" for overall or "writing:ZOOM" for per-zoom.
+        """
+        logger.info(f"Streaming write IMG file: {self.output_path}")
+
+        # --- Pass 1: Compute layout from TileMetadata ---
+        computer = LayoutComputer(img_file, subdivisions=subdivisions)
+        layouts = computer.compute()
+
+        # Update subfile headers
+        img_file.subfiles = []
+        for layout in layouts:
+            img_file.subfiles.append(
+                SubfileHeader(
+                    subfile_type=layout.subfile_type,
+                    name=layout.name,
+                    start_block_offset=layout.start_block,
+                    length=layout.data_size,
+                )
+            )
+
+        # --- Pass 2: Write binary data ---
+        gmp_layout = next(lay for lay in layouts if lay.subfile_type == SubfileType.GMP)
+        mps_layout = next(lay for lay in layouts if lay.subfile_type == SubfileType.MPS)
+
+        with open(self.output_path, "wb") as f:
+            # Write main header
+            f.seek(0)
+            IMGHeaderWriter.write(f, img_file.header, layouts)
+
+            # Write FAT entries
+            f.seek(FAT_START)
+            FATWriter.write(f, layouts, FAT_START)
+
+            # Write GMP subfile (streaming)
+            self._write_gmp_streaming(
+                f,
+                img_file,
+                subdivisions,
+                gmp_layout,
+                tile_processor,
+                source_crs,
+                jpeg_quality,
+                progress_callback,
+            )
+
+            # Write MPS subfile
+            MPSWriter.write(f, mps_layout, img_file)
+
+            # Pad file to full size
+            total_size = max(lay.end_offset for lay in layouts)
+            current = f.tell()
+            if current < total_size:
+                f.seek(total_size - 1)
+                f.write(b"\x00")
+
+        actual_size = self.output_path.stat().st_size
+        logger.info(f"IMG file written: {self.output_path} ({actual_size:,} bytes)")
+
+    @staticmethod
+    def _write_gmp_streaming(
+        f: io.BufferedWriter,
+        img_file: IMGFile,
+        subdivisions: list[Subdivision],
+        gmp_layout: SubfileLayout,
+        tile_processor: Callable[[Path, int, int, int, str], ProcessedTile | None]
+        | None,
+        source_crs: str,
+        jpeg_quality: int,
+        progress_callback: Callable[[str, int, int], None] | None = None,
+    ) -> None:
+        """Write GMP subfile with streaming LBL29 section."""
+        f.seek(gmp_layout.start_offset)
+
+        total_tiles = sum(len(sub.tile_entries) for sub in subdivisions)
+        n_zoom = len(img_file.zoom_levels)
+        now = img_file.gmp_creation_date or datetime.now()
+        tre7_rec_size = 5
+
+        # --- Compute section layout (positions within GMP) ---
+        copyright_str = img_file.copyright_string or "Copyright GARMIN."
+        copyright_bytes = copyright_str.encode("cp1252") + b"\x00" + b"\x00"
+
+        pos = 0
+        pos += GMP_CONTAINER_HEADER_SIZE
+        pos += len(copyright_bytes)
+
+        tre_pos = pos
+        pos += TRE_HEADER_LENGTH
+
+        map_info = b"Raster Map\0" + copyright_str.encode("cp1252") + b"\x00"
+        pos += len(map_info)
+
+        rgn_pos = pos
+        pos += RGN_HEADER_LENGTH
+
+        lbl_pos = pos
+        pos += LBL_HEADER_LENGTH
+
+        net_pos = pos
+        pos += NET_HEADER_LENGTH
+
+        tre_copyright_pos = pos
+        pos += 6
+
+        tre_subdiv_pos = pos
+        n_last = sum(1 for s in subdivisions if s.zoom_level_index == n_zoom - 1)
+        n_non_last = len(subdivisions) - n_last
+        subdiv_binary_size = n_non_last * 16 + n_last * 14 + 4
+        pos += subdiv_binary_size
+
+        tre_maplevels_pos = pos
+        map_levels_size = n_zoom * 4
+        pos += map_levels_size
+
+        tre5_pos = pos
+        tre5_size = 3
+        pos += tre5_size
+
+        tre8_pos = pos
+        tre8_size = 3
+        pos += tre8_size
+
+        tre7_pos = pos
+        tre7_size = (len(subdivisions) + 1) * tre7_rec_size
+        pos += tre7_size
+
+        rgn1_pos = pos
+        rgn1_size = 0
+
+        rgn2_pos = pos
+        rgn2_size = total_tiles * _rgn2_record_size(_img_id_size(total_tiles))
+        pos += rgn2_size
+
+        lbl_labels_pos = pos
+        label_strings = bytearray()
+        for i in range(total_tiles):
+            label_strings += f"{i}.jpg\0".encode("ascii")
+        pos += len(label_strings)
+
+        lbl28_pos = pos
+        lbl28_size = total_tiles * 4
+        pos += lbl28_size
+
+        lbl29_pos = pos
+        # Estimate lbl29_size from TileMetadata.jpeg_size (source file sizes)
+        # Actual size may differ after warping; we'll fix up the header later
+        estimated_lbl29_size = 0
+        for sub in subdivisions:
+            for tile_entry in sub.tile_entries:
+                if isinstance(tile_entry, TileMetadata):
+                    estimated_lbl29_size += tile_entry.jpeg_size
+                else:
+                    jpeg_data = (
+                        tile_entry[0] if isinstance(tile_entry, tuple) else tile_entry
+                    )
+                    estimated_lbl29_size += len(jpeg_data)
+
+        # --- Build subdivision binary data ---
+        map_levels_data = bytearray(map_levels_size)
+        subdiv_data = bytearray(subdiv_binary_size)
+
+        # Fill TRE1 map levels
+        subdiv_count_per_level: dict[int, int] = {}
+        for sub in subdivisions:
+            subdiv_count_per_level[sub.zoom_level_index] = (
+                subdiv_count_per_level.get(sub.zoom_level_index, 0) + 1
+            )
+        for z_idx in range(n_zoom):
+            map_levels_data[z_idx * 4] = img_file.zoom_levels[z_idx].zoom_code
+            map_levels_data[z_idx * 4 + 1] = img_file.zoom_levels[z_idx].level_number
+            struct.pack_into(
+                "<H",
+                map_levels_data,
+                z_idx * 4 + 2,
+                subdiv_count_per_level.get(z_idx, 1),
+            )
+
+        # Assign RGN2 offsets and fill TRE2 subdivision records
+        rgn2_running_offset = 0
+        rgn2_total_extent = 0
+        record_size = _rgn2_record_size(_img_id_size(total_tiles))
+        for sub in subdivisions:
+            tile_count = sub.get_tile_count()
+            if tile_count == 0:
+                sub.rgn2_offset = 0
+                sub.tre7_flag = 0x01
+            else:
+                sub.rgn2_offset = rgn2_running_offset
+                sub.tre7_flag = 0x00
+                chunk_size = tile_count * record_size
+                rgn2_running_offset += chunk_size
+                rgn2_total_extent = rgn2_running_offset
+
+        zoom_shifts = {}
+        for z_idx, zoom in enumerate(img_file.zoom_levels):
+            zoom_shifts[z_idx] = max(0, 24 - zoom.level_number)
+
+        off = 0
+        for i, sub in enumerate(subdivisions):
+            is_last_level = sub.zoom_level_index == n_zoom - 1
+            rec_size = 14 if is_last_level else 16
+            shift = zoom_shifts.get(sub.zoom_level_index, 0)
+
+            rgn_off_bytes = sub.rgn2_offset.to_bytes(3, "little")
+            subdiv_data[off] = rgn_off_bytes[0]
+            subdiv_data[off + 1] = rgn_off_bytes[1]
+            subdiv_data[off + 2] = rgn_off_bytes[2]
+            subdiv_data[off + 3] = 0x00
+            lon_mu = int(sub.center_lon * (2**24) / 360)
+            subdiv_data[off + 4 : off + 7] = _put3s(lon_mu)
+            lat_mu = int(sub.center_lat * (2**24) / 360)
+            subdiv_data[off + 7 : off + 10] = _put3s(lat_mu)
+            w = sub.encode_tre2_width(shift)
+            if not is_last_level:
+                w |= 0x8000
+            struct.pack_into("<H", subdiv_data, off + 10, w)
+            h = sub.encode_tre2_height(shift)
+            struct.pack_into("<H", subdiv_data, off + 12, h)
+            if not is_last_level:
+                struct.pack_into("<H", subdiv_data, off + 14, sub.next_level_index)
+            off += rec_size
+        struct.pack_into("<I", subdiv_data, off, rgn2_total_extent)
+
+        # --- Write all sections up to LBL28 ---
+
+        # GMP Container Header
+        gmp_header = bytearray(GMP_CONTAINER_HEADER_SIZE)
+        gmp_header[0] = GMP_CONTAINER_HEADER_SIZE
+        gmp_header[1] = 0x00
+        gmp_header[2:12] = b"GARMIN GMP"
+        struct.pack_into("<H", gmp_header, 12, 1)
+        date_bytes = _encode_garmin_date_7(now)
+        gmp_header[14:21] = date_bytes[:7]
+        struct.pack_into("<I", gmp_header, 21, 0)
+        struct.pack_into("<I", gmp_header, 25, tre_pos)
+        struct.pack_into("<I", gmp_header, 29, rgn_pos)
+        struct.pack_into("<I", gmp_header, 33, lbl_pos)
+        struct.pack_into("<I", gmp_header, 37, net_pos)
+        f.write(gmp_header)
+
+        # Copyright strings
+        f.write(copyright_bytes)
+
+        # TRE Sub-Header
+        tre_header = _build_tre_subheader(
+            img_file,
+            now,
+            tre_copyright_pos,
+            6,
+            tre_subdiv_pos,
+            subdiv_binary_size,
+            tre_maplevels_pos,
+            map_levels_size,
+            tre5_pos,
+            tre5_size,
+            tre7_pos,
+            tre7_size,
+            tre7_rec_size,
+            tre8_pos,
+            tre8_size,
+            rgn1_pos,
+        )
+        f.write(tre_header)
+
+        # Map info strings
+        f.write(map_info)
+
+        # RGN Sub-Header
+        rgn_header = _build_rgn_subheader(now, rgn1_pos, rgn1_size, rgn2_pos, rgn2_size)
+        f.write(rgn_header)
+
+        # LBL Sub-Header (with estimated lbl29_size — will fix up later)
+        lbl_header = _build_lbl_subheader(
+            now,
+            lbl_labels_pos,
+            len(label_strings),
+            lbl28_pos,
+            lbl28_size,
+            lbl29_pos,
+            estimated_lbl29_size,
+        )
+        # Remember the absolute file position of the LBL header for later fixup
+        lbl_header_file_pos = f.tell()
+        f.write(lbl_header)
+
+        # NET Sub-Header
+        net_header = _build_net_subheader(now)
+        f.write(net_header)
+
+        # TRE copyright data
+        f.write(bytes([0x0C, 0x00, 0x00, 0x32, 0x00, 0x00]))
+
+        # TRE subdivisions
+        f.write(subdiv_data)
+
+        # TRE map levels
+        f.write(map_levels_data)
+
+        # TRE5 data
+        f.write(bytes([0x4B, 0x02, 0x01]))
+
+        # TRE8 data
+        f.write(bytes([0x06, 0x02, 0x13]))
+
+        # TRE7 data
+        for sub in subdivisions:
+            f.write(struct.pack("<I", sub.rgn2_offset))
+            f.write(struct.pack("<B", sub.tre7_flag))
+        f.write(
+            struct.pack(
+                "<I", total_tiles * _rgn2_record_size(_img_id_size(total_tiles))
+            )
+        )
+        f.write(b"\x00")
+
+        # RGN2 data section (bounds from TileMetadata, no JPEG data needed)
+        _write_rgn_data_section_subdivisions(f, subdivisions, total_tiles, img_file)
+
+        # LBL labels
+        f.write(label_strings)
+
+        # --- LBL28: write placeholder (zeros) — will fix up after LBL29 ---
+        lbl28_file_pos = f.tell()
+        f.write(b"\x00" * lbl28_size)
+
+        # --- LBL29: stream JPEG data from source files ---
+        # Flatten tiles into an ordered list for batch processing
+        all_tiles: list = []
+        for sub in subdivisions:
+            all_tiles.extend(sub.tile_entries)
+
+        # Per-zoom progress tracking
+        zoom_tile_counts: dict[int, int] = {}
+        for tile_entry in all_tiles:
+            if isinstance(tile_entry, TileMetadata):
+                z = tile_entry.zoom
+                zoom_tile_counts[z] = zoom_tile_counts.get(z, 0) + 1
+        zoom_progress: dict[int, int] = {}
+
+        # Determine parallelism: only warp jobs benefit from parallelism
+        use_parallel = tile_processor is not None and _get_worker_count() > 1
+        max_workers = _get_worker_count() if use_parallel else 1
+        batch_size = StreamingIMGWriter.BATCH_SIZE
+
+        if use_parallel:
+            logger.info(
+                "LBL29 streaming: %d tiles, batch_size=%d, workers=%d (parallel warp)",
+                len(all_tiles),
+                batch_size,
+                max_workers,
+            )
+        else:
+            logger.info(
+                "LBL29 streaming: %d tiles, batch_size=%d (sequential)",
+                len(all_tiles),
+                batch_size,
+            )
+
+        actual_lbl29_size = 0
+        lbl28_offsets: list[int] = []  # Accumulate offsets for fixup
+        running_offset = 0
+        tiles_processed = 0
+
+        for batch_start in range(0, len(all_tiles), batch_size):
+            batch = all_tiles[batch_start : batch_start + batch_size]
+            batch_jpegs: list[bytes] = [b""] * len(batch)
+
+            if use_parallel:
+                # Parallel warp: submit TileMetadata tiles to ProcessPoolExecutor
+                with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                    future_to_idx: dict = {}
+                    for i, tile_entry in enumerate(batch):
+                        if (
+                            isinstance(tile_entry, TileMetadata)
+                            and tile_entry.source_path is not None
+                            and tile_entry.source_path.exists()
+                        ):
+                            future = executor.submit(
+                                _warp_tile_worker,
+                                tile_entry.source_path,
+                                tile_entry.x,
+                                tile_entry.y,
+                                tile_entry.zoom,
+                                source_crs,
+                                "EPSG:4326",
+                                jpeg_quality,
+                            )
+                            future_to_idx[future] = i
+                        elif isinstance(tile_entry, tuple):
+                            batch_jpegs[i] = tile_entry[0]
+                        else:
+                            batch_jpegs[i] = tile_entry
+
+                    for future in as_completed(future_to_idx):
+                        idx = future_to_idx[future]
+                        try:
+                            _, _, _, jpeg_data = future.result()
+                            if jpeg_data is not None:
+                                batch_jpegs[idx] = jpeg_data
+                        except Exception as e:
+                            logger.warning("Parallel tile warp failed: %s", e)
+            else:
+                # Sequential processing
+                for i, tile_entry in enumerate(batch):
+                    if isinstance(tile_entry, TileMetadata):
+                        jpeg_data = _process_tile_jpeg(
+                            tile_entry,
+                            tile_processor,
+                            source_crs,
+                            jpeg_quality,
+                        )
+                        if jpeg_data is None:
+                            logger.warning(
+                                "Failed to process tile (%d, %d, z=%d), skipping",
+                                tile_entry.x,
+                                tile_entry.y,
+                                tile_entry.zoom,
+                            )
+                            jpeg_data = b""
+                        batch_jpegs[i] = jpeg_data
+                    elif isinstance(tile_entry, tuple):
+                        batch_jpegs[i] = tile_entry[0]
+                    else:
+                        batch_jpegs[i] = tile_entry
+
+            # Write batch results sequentially (preserving order)
+            for i, jpeg_data in enumerate(batch_jpegs):
+                lbl28_offsets.append(running_offset)
+                actual_lbl29_size += len(jpeg_data)
+                running_offset += len(jpeg_data)
+                f.write(jpeg_data)
+                tiles_processed += 1
+
+                # Per-zoom progress reporting
+                tile_entry = batch[i]
+                if isinstance(tile_entry, TileMetadata):
+                    z = tile_entry.zoom
+                    zoom_progress[z] = zoom_progress.get(z, 0) + 1
+                    if progress_callback is not None:
+                        progress_callback(
+                            f"writing:{z}",
+                            zoom_progress[z],
+                            zoom_tile_counts.get(z, 0),
+                        )
+
+            # Overall progress after each batch
+            if progress_callback is not None:
+                progress_callback("writing", tiles_processed, total_tiles)
+
+            if tiles_processed % 500 == 0 or batch_start + batch_size >= len(all_tiles):
+                logger.info(f"  LBL29: {tiles_processed}/{total_tiles} tiles streamed")
+
+        logger.info(
+            f"  LBL29 complete: {tiles_processed} tiles, {actual_lbl29_size:,} bytes"
+        )
+
+        # --- Fix up LBL28 offsets ---
+        f.seek(lbl28_file_pos)
+        for offset in lbl28_offsets:
+            f.write(struct.pack("<I", offset))
+
+        # --- Fix up LBL header's lbl29_size ---
+        # LBL header offset 0x196 (relative to LBL start) contains lbl29_size
+        f.seek(lbl_header_file_pos + 0x196)
+        f.write(struct.pack("<I", actual_lbl29_size))
+
+        # Also update RGN2 records if jpeg_size changed (due to warping)
+        # Only needed when a tile_processor is provided (actual warping may change sizes).
+        # When no processor is used (raw file reads), sizes match TileMetadata.jpeg_size exactly.
+        if tile_processor is not None:
+            # Sizes may have changed — update RGN2 jpeg_size fields
+            _fixup_rgn2_jpeg_sizes(
+                f,
+                subdivisions,
+                img_file,
+                lbl28_offsets,
+                actual_lbl29_size,
+                gmp_layout.start_offset,
+                rgn2_pos,
+            )
+
+        # Seek to end and pad to aligned size
+        f.seek(
+            lbl_header_file_pos
+            + LBL_HEADER_LENGTH
+            + (f.tell() - lbl_header_file_pos - LBL_HEADER_LENGTH)
+        )
+        current_pos = lbl28_file_pos + lbl28_size + actual_lbl29_size
+        f.seek(current_pos)
+        padding = gmp_layout.start_offset + gmp_layout.aligned_size - current_pos
+        if padding > 0:
+            f.write(b"\x00" * padding)
+
+
+def _process_tile_jpeg(
+    tile: TileMetadata,
+    tile_processor: Callable[[Path, int, int, int, str], ProcessedTile | None] | None,
+    source_crs: str,
+    jpeg_quality: int,
+) -> bytes | None:
+    """Get JPEG bytes for a tile from its source path.
+
+    Args:
+        tile: TileMetadata with source_path, x, y, zoom
+        tile_processor: Optional processing callable
+        source_crs: Source CRS string
+        jpeg_quality: JPEG quality
+
+    Returns:
+        JPEG bytes, or None if processing failed
+    """
+    if tile.source_path is None or not tile.source_path.exists():
+        return None
+
+    if tile_processor is not None:
+        result = tile_processor(tile.source_path, tile.x, tile.y, tile.zoom, source_crs)
+        if result is not None:
+            return result[0]  # (jpeg_bytes, bounds)
+        return None
+
+    # No processor: read raw bytes (source already in target CRS)
+    return tile.source_path.read_bytes()
+
+
+def _fixup_rgn2_jpeg_sizes(
+    f: io.BufferedWriter,
+    subdivisions: list[Subdivision],
+    img_file: IMGFile,
+    lbl28_offsets: list[int],
+    total_lbl29_size: int,
+    gmp_start: int,
+    rgn2_pos: int,
+) -> None:
+    """Update RGN2 record jpeg_size fields after actual JPEG sizes are known.
+
+    Called only when a tile_processor is provided (warping may change sizes).
+    """
+    iid_size = _img_id_size(sum(len(sub.tile_entries) for sub in subdivisions))
+    record_size = _rgn2_record_size(iid_size)
+    idx = 0
+    offset = gmp_start + rgn2_pos
+
+    for sub in subdivisions:
+        for _tile_entry in sub.tile_entries:
+            # Compute actual JPEG size from consecutive LBL28 offsets
+            if idx + 1 < len(lbl28_offsets):
+                actual_size = lbl28_offsets[idx + 1] - lbl28_offsets[idx]
+            else:
+                # Last tile: size = total - last offset
+                actual_size = total_lbl29_size - lbl28_offsets[idx]
+
+            # jpeg_size is the last 4 bytes of the RGN2 record
+            jpeg_size_offset = offset + record_size - 4
+            f.seek(jpeg_size_offset)
+            f.write(struct.pack("<I", actual_size))
+
+            offset += record_size
+            idx += 1
 
 
 class MPSWriter:

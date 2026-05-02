@@ -23,6 +23,7 @@ See docs/exporters/garmin-img.md for complete format specification.
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Optional
 
 
@@ -44,6 +45,26 @@ class TileCompressionType(Enum):
     JPEG = 4  # JPEG compression (most common for raster)
     PNG = 5  # PNG compression (lossless, larger)
     NONE = 0  # Uncompressed (rarely used)
+
+
+@dataclass
+class TileMetadata:
+    """Tile metadata for layout computation without loading JPEG data.
+
+    Holds all information needed for IMG layout (subdivisions, section sizes,
+    byte offsets) without requiring JPEG bytes in memory. Bounds are computed
+    deterministically from tile coordinates; jpeg_size comes from source file stat.
+    """
+
+    x: int  # Tile column (Web Mercator)
+    y: int  # Tile row (Web Mercator)
+    zoom: int  # Source zoom level (WMTS)
+    lat_min: float  # South bound (degrees)
+    lon_min: float  # West bound (degrees)
+    lat_max: float  # North bound (degrees)
+    lon_max: float  # East bound (degrees)
+    jpeg_size: int  # Source JPEG file size in bytes
+    source_path: Path | None = None  # Path to source JPEG in cache
 
 
 @dataclass

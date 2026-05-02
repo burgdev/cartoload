@@ -371,6 +371,19 @@ def build(
                             f"Processing tiles{zoom_label}", total=total
                         )
                     progress.update(tasks_dict[task_key], completed=current)
+                elif stage.startswith("writing"):
+                    # Per-zoom writing progress: "writing" or "writing:15"
+                    parts = stage.split(":", 1)
+                    zoom_label = f" (zoom {parts[1]})" if len(parts) > 1 else ""
+                    task_key = f"write_{parts[1] if len(parts) > 1 else 'default'}"
+                    if not hasattr(on_export_progress, "_tasks"):
+                        on_export_progress._tasks = {}  # type: ignore[attr-defined]
+                    tasks_dict = on_export_progress._tasks  # type: ignore[attr-defined]
+                    if task_key not in tasks_dict:
+                        tasks_dict[task_key] = progress.add_task(
+                            f"Writing tiles{zoom_label}", total=total
+                        )
+                    progress.update(tasks_dict[task_key], completed=current)
 
             # Run pipeline
             output_paths = asyncio.run(

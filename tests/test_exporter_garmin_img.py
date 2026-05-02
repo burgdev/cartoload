@@ -18,7 +18,11 @@ import numpy as np
 import pytest
 
 from cartoload.config import LayerConfig
-from cartoload.exporters.garmin_img import generate_subdivisions
+from cartoload.exporters.garmin_img import (
+    generate_subdivisions,
+    generate_subdivisions_from_metadata,
+)
+from cartoload.exporters.garmin_img_model import TileMetadata
 from cartoload.exporters.garmin_img_model import (
     IMGFile,
     IMGHeader,
@@ -39,6 +43,7 @@ from cartoload.exporters.garmin_img_writer import (
     IMGWriter,
     LayoutComputer,
     MAX_TILE_SIZE,
+    StreamingIMGWriter,
     SubfileLayout,
     TileEncoder,
     _blocks_needed,
@@ -1605,6 +1610,101 @@ class TestGenerateSubdivisions:
         assert level0[0].get_tile_count() == 0
 
 
+class TestSubdivisionsFromMetadataEquivalence:
+    """Verify generate_subdivisions_from_metadata produces identical results to generate_subdivisions."""
+
+    def _tiles_to_metadata(self, compressed_tiles):
+        """Convert CompressedTiles to dict[int, list[TileMetadata]]."""
+        metadata = {}
+        for zoom, tiles in compressed_tiles.items():
+            meta_list = []
+            for i, entry in enumerate(tiles):
+                if isinstance(entry, tuple):
+                    _, (lat_min, lon_min, lat_max, lon_max) = entry
+                else:
+                    lat_min, lon_min, lat_max, lon_max = 0, 0, 0, 0
+                meta_list.append(
+                    TileMetadata(
+                        x=i,
+                        y=0,
+                        zoom=zoom,
+                        lat_min=lat_min,
+                        lon_min=lon_min,
+                        lat_max=lat_max,
+                        lon_max=lon_max,
+                        jpeg_size=len(entry[0])
+                        if isinstance(entry, tuple)
+                        else len(entry),
+                    )
+                )
+            metadata[zoom] = meta_list
+        return metadata
+
+    def _compare_subdivisions(self, subs_old, subs_new):
+        """Compare two subdivision lists for structural equivalence."""
+        assert len(subs_old) == len(subs_new), (
+            f"Different subdivision counts: {len(subs_old)} vs {len(subs_new)}"
+        )
+        for i, (old, new) in enumerate(zip(subs_old, subs_new)):
+            assert old.zoom_level_index == new.zoom_level_index, (
+                f"Sub {i}: zoom_level_index mismatch"
+            )
+            assert old.center_lat == pytest.approx(new.center_lat, abs=1e-10), (
+                f"Sub {i}: center_lat mismatch: {old.center_lat} vs {new.center_lat}"
+            )
+            assert old.center_lon == pytest.approx(new.center_lon, abs=1e-10), (
+                f"Sub {i}: center_lon mismatch"
+            )
+            assert old.bounds_north == pytest.approx(new.bounds_north, abs=1e-10)
+            assert old.bounds_south == pytest.approx(new.bounds_south, abs=1e-10)
+            assert old.bounds_west == pytest.approx(new.bounds_west, abs=1e-10)
+            assert old.bounds_east == pytest.approx(new.bounds_east, abs=1e-10)
+            assert old.get_tile_count() == new.get_tile_count(), (
+                f"Sub {i}: tile count mismatch: {old.get_tile_count()} vs {new.get_tile_count()}"
+            )
+            assert old.next_level_index == new.next_level_index
+
+    def test_single_zoom_few_tiles(self):
+        tiles = _make_tiles_with_bounds(4)
+        compressed = {15: tiles}
+        metadata = self._tiles_to_metadata(compressed)
+        bounds = {"north": 47.5, "south": 46.5, "west": 8.0, "east": 9.0}
+
+        subs_old = generate_subdivisions(compressed, [15], bounds)
+        subs_new = generate_subdivisions_from_metadata(metadata, [15], bounds)
+        self._compare_subdivisions(subs_old, subs_new)
+
+    def test_multiple_zoom_levels(self):
+        compressed = {12: _make_tiles_with_bounds(4), 13: _make_tiles_with_bounds(9)}
+        metadata = self._tiles_to_metadata(compressed)
+        bounds = {"north": 47.5, "south": 46.5, "west": 8.0, "east": 9.0}
+
+        subs_old = generate_subdivisions(compressed, [12, 13], bounds)
+        subs_new = generate_subdivisions_from_metadata(metadata, [12, 13], bounds)
+        self._compare_subdivisions(subs_old, subs_new)
+
+    def test_many_tiles_gridded(self):
+        tiles = _make_tiles_with_bounds(25)
+        compressed = {15: tiles}
+        metadata = self._tiles_to_metadata(compressed)
+        bounds = {"north": 47.5, "south": 46.5, "west": 8.0, "east": 9.0}
+
+        subs_old = generate_subdivisions(compressed, [15], bounds)
+        subs_new = generate_subdivisions_from_metadata(metadata, [15], bounds)
+        self._compare_subdivisions(subs_old, subs_new)
+        # All tiles assigned
+        assert sum(s.get_tile_count() for s in subs_new) == 25
+
+    def test_empty_zoom_level(self):
+        compressed = {12: [], 13: _make_tiles_with_bounds(4)}
+        metadata = self._tiles_to_metadata(compressed)
+        bounds = {"north": 47.5, "south": 46.5, "west": 8.0, "east": 9.0}
+
+        subs_old = generate_subdivisions(compressed, [12, 13], bounds)
+        subs_new = generate_subdivisions_from_metadata(metadata, [12, 13], bounds)
+        self._compare_subdivisions(subs_old, subs_new)
+
+
 class TestSubdivisionBinaryWriting:
     """Tests for per-subdivision TRE2/TRE7/RGN2 binary output."""
 
@@ -2459,4 +2559,296 @@ class TestSubdivisionTileDerivedBounds:
         )
         assert abs(sub.center_lon - expected_lon) < 0.01, (
             f"Center lon {sub.center_lon} != tile midpoint {expected_lon}"
+        )
+
+
+class TestLayoutEquivalenceWithMetadata:
+    """Verify LayoutComputer produces identical layouts from TileMetadata vs CompressedTiles."""
+
+    def _tiles_to_metadata(self, compressed_tiles):
+        """Convert CompressedTiles to dict[int, list[TileMetadata]]."""
+        metadata = {}
+        for zoom, tiles in compressed_tiles.items():
+            meta_list = []
+            for i, entry in enumerate(tiles):
+                if isinstance(entry, tuple):
+                    _, (lat_min, lon_min, lat_max, lon_max) = entry
+                    jpeg_size = len(entry[0])
+                else:
+                    lat_min, lon_min, lat_max, lon_max = 0, 0, 0, 0
+                    jpeg_size = len(entry)
+                meta_list.append(
+                    TileMetadata(
+                        x=i,
+                        y=0,
+                        zoom=zoom,
+                        lat_min=lat_min,
+                        lon_min=lon_min,
+                        lat_max=lat_max,
+                        lon_max=lon_max,
+                        jpeg_size=jpeg_size,
+                    )
+                )
+            metadata[zoom] = meta_list
+        return metadata
+
+    def test_layout_identical_single_zoom(self):
+        """Single zoom level: layout from metadata matches layout from JPEG data."""
+        zoom_levels = [
+            ZoomLevel(level_number=15, zoom_code=0x80),
+        ]
+        tiles = _make_tiles_with_bounds(9)
+        compressed = {15: tiles}
+        metadata = self._tiles_to_metadata(compressed)
+        bounds = {"north": 47.5, "south": 46.5, "west": 8.0, "east": 9.0}
+
+        subs_old = generate_subdivisions(compressed, [15], bounds)
+        subs_new = generate_subdivisions_from_metadata(metadata, [15], bounds)
+
+        img_file = _make_img_file(
+            zoom_levels=zoom_levels,
+            bounds_north=47.5,
+            bounds_south=46.5,
+            bounds_west=8.0,
+            bounds_east=9.0,
+        )
+
+        layout_old = LayoutComputer(
+            img_file, compressed, subdivisions=subs_old
+        ).compute()
+        layout_new = LayoutComputer(img_file, subdivisions=subs_new).compute()
+
+        assert len(layout_old) == len(layout_new)
+        for old, new in zip(layout_old, layout_new):
+            assert old.subfile_type == new.subfile_type
+            assert old.data_size == new.data_size, (
+                f"Size mismatch for {old.subfile_type}: {old.data_size} vs {new.data_size}"
+            )
+            assert old.start_offset == new.start_offset
+            assert old.end_offset == new.end_offset
+
+    def test_layout_identical_multiple_zooms(self):
+        """Multiple zoom levels: layout from metadata matches layout from JPEG data."""
+        zoom_levels = [
+            ZoomLevel(level_number=12, zoom_code=0x82),
+            ZoomLevel(level_number=13, zoom_code=0x81),
+            ZoomLevel(level_number=14, zoom_code=0x80),
+        ]
+        compressed = {
+            12: _make_tiles_with_bounds(4),
+            13: _make_tiles_with_bounds(9),
+            14: _make_tiles_with_bounds(16),
+        }
+        metadata = self._tiles_to_metadata(compressed)
+        zoom_keys = [12, 13, 14]
+        bounds = {"north": 47.5, "south": 46.5, "west": 8.0, "east": 9.0}
+
+        subs_old = generate_subdivisions(compressed, zoom_keys, bounds)
+        subs_new = generate_subdivisions_from_metadata(metadata, zoom_keys, bounds)
+
+        img_file = _make_img_file(
+            zoom_levels=zoom_levels,
+            bounds_north=47.5,
+            bounds_south=46.5,
+            bounds_west=8.0,
+            bounds_east=9.0,
+        )
+
+        layout_old = LayoutComputer(
+            img_file, compressed, subdivisions=subs_old
+        ).compute()
+        layout_new = LayoutComputer(img_file, subdivisions=subs_new).compute()
+
+        gmp_old = next(lay for lay in layout_old if lay.subfile_type == SubfileType.GMP)
+        gmp_new = next(lay for lay in layout_new if lay.subfile_type == SubfileType.GMP)
+        assert gmp_old.data_size == gmp_new.data_size, (
+            f"GMP size mismatch: {gmp_old.data_size} vs {gmp_new.data_size}"
+        )
+
+    def test_layout_without_compressed_tiles(self):
+        """LayoutComputer works with only TileMetadata (no compressed_tiles at all)."""
+        zoom_levels = [ZoomLevel(level_number=15, zoom_code=0x80)]
+        metadata = {
+            15: [
+                TileMetadata(
+                    x=0,
+                    y=0,
+                    zoom=15,
+                    lat_min=46.5,
+                    lon_min=8.0,
+                    lat_max=47.0,
+                    lon_max=8.5,
+                    jpeg_size=2048,
+                ),
+                TileMetadata(
+                    x=1,
+                    y=0,
+                    zoom=15,
+                    lat_min=46.5,
+                    lon_min=8.5,
+                    lat_max=47.0,
+                    lon_max=9.0,
+                    jpeg_size=3072,
+                ),
+            ]
+        }
+        bounds = {"north": 47.0, "south": 46.5, "west": 8.0, "east": 9.0}
+        subs = generate_subdivisions_from_metadata(metadata, [15], bounds)
+
+        img_file = _make_img_file(
+            zoom_levels=zoom_levels,
+            bounds_north=47.0,
+            bounds_south=46.5,
+            bounds_west=8.0,
+            bounds_east=9.0,
+        )
+
+        layout = LayoutComputer(img_file, subdivisions=subs).compute()
+        gmp = next(lay for lay in layout if lay.subfile_type == SubfileType.GMP)
+        assert gmp.data_size > 0
+        # The GMP should be large enough to contain both tiles
+        assert gmp.data_size >= 2048 + 3072
+
+
+class TestStreamingWriterEquivalence:
+    """Verify StreamingIMGWriter produces identical output to IMGWriter."""
+
+    def _setup_tiles_on_disk(self, tmp_path, tiles_with_bounds, zoom=15):
+        """Write tile JPEG data to temp files and return TileMetadata list.
+
+        Args:
+            tmp_path: Temporary directory for tile files
+            tiles_with_bounds: List of (jpeg_bytes, (lat_min, lon_min, lat_max, lon_max))
+            zoom: Zoom level for the tiles
+
+        Returns:
+            List of TileMetadata with source_path pointing to temp files
+        """
+        tile_dir = tmp_path / "tiles"
+        tile_dir.mkdir(parents=True, exist_ok=True)
+        metadata = []
+        for i, (jpeg_data, bounds) in enumerate(tiles_with_bounds):
+            tile_path = tile_dir / f"tile_{i}.jpg"
+            tile_path.write_bytes(jpeg_data)
+            lat_min, lon_min, lat_max, lon_max = bounds
+            metadata.append(
+                TileMetadata(
+                    x=i,
+                    y=0,
+                    zoom=zoom,
+                    lat_min=lat_min,
+                    lon_min=lon_min,
+                    lat_max=lat_max,
+                    lon_max=lon_max,
+                    jpeg_size=len(jpeg_data),
+                    source_path=tile_path,
+                )
+            )
+        return metadata
+
+    def test_streaming_matches_legacy_single_zoom(self, tmp_path):
+        """StreamingIMGWriter produces identical output to IMGWriter (single zoom)."""
+        tiles = _make_tiles_with_bounds(4)
+        compressed = {15: tiles}
+        bounds = {"north": 47.5, "south": 46.5, "west": 8.0, "east": 9.0}
+        zoom_levels = [ZoomLevel(level_number=15, zoom_code=0x80)]
+        img_file = _make_img_file(
+            zoom_levels=zoom_levels,
+            bounds_north=47.5,
+            bounds_south=46.5,
+            bounds_west=8.0,
+            bounds_east=9.0,
+        )
+
+        # Generate subdivisions from compressed tiles (legacy)
+        subs_legacy = generate_subdivisions(compressed, [15], bounds)
+
+        # Generate metadata-based subdivisions
+        metadata = self._setup_tiles_on_disk(tmp_path, tiles)
+        subs_streaming = generate_subdivisions_from_metadata(
+            {15: metadata}, [15], bounds
+        )
+
+        # Write with legacy IMGWriter
+        legacy_output = tmp_path / "legacy.img"
+        IMGWriter(legacy_output).write(
+            img_file,
+            compressed,
+            subdivisions=subs_legacy,
+        )
+
+        # Write with StreamingIMGWriter (no processor = raw file reads)
+        streaming_output = tmp_path / "streaming.img"
+        StreamingIMGWriter(streaming_output).write(
+            img_file,
+            subs_streaming,
+        )
+
+        legacy_data = legacy_output.read_bytes()
+        streaming_data = streaming_output.read_bytes()
+
+        assert len(legacy_data) == len(streaming_data), (
+            f"File size mismatch: legacy={len(legacy_data)}, streaming={len(streaming_data)}"
+        )
+        assert legacy_data == streaming_data, (
+            "StreamingIMGWriter output differs from IMGWriter"
+        )
+
+    def test_streaming_matches_legacy_multi_zoom(self, tmp_path):
+        """StreamingIMGWriter produces identical output with multiple zoom levels."""
+        zoom_levels = [
+            ZoomLevel(level_number=12, zoom_code=0x82),
+            ZoomLevel(level_number=13, zoom_code=0x81),
+            ZoomLevel(level_number=14, zoom_code=0x80),
+        ]
+        tiles_12 = _make_tiles_with_bounds(4)
+        tiles_13 = _make_tiles_with_bounds(4)
+        tiles_14 = _make_tiles_with_bounds(9)
+        compressed = {12: tiles_12, 13: tiles_13, 14: tiles_14}
+        zoom_keys = [12, 13, 14]
+        bounds = {"north": 47.5, "south": 46.5, "west": 8.0, "east": 9.0}
+
+        img_file = _make_img_file(
+            zoom_levels=zoom_levels,
+            bounds_north=47.5,
+            bounds_south=46.5,
+            bounds_west=8.0,
+            bounds_east=9.0,
+        )
+
+        subs_legacy = generate_subdivisions(compressed, zoom_keys, bounds)
+
+        # Create metadata with source files
+        meta_12 = self._setup_tiles_on_disk(tmp_path / "z12", tiles_12, zoom=12)
+        meta_13 = self._setup_tiles_on_disk(tmp_path / "z13", tiles_13, zoom=13)
+        meta_14 = self._setup_tiles_on_disk(tmp_path / "z14", tiles_14, zoom=14)
+        metadata = {12: meta_12, 13: meta_13, 14: meta_14}
+        subs_streaming = generate_subdivisions_from_metadata(
+            metadata, zoom_keys, bounds
+        )
+
+        # Write with legacy
+        legacy_output = tmp_path / "legacy_multi.img"
+        IMGWriter(legacy_output).write(
+            img_file,
+            compressed,
+            subdivisions=subs_legacy,
+        )
+
+        # Write with streaming
+        streaming_output = tmp_path / "streaming_multi.img"
+        StreamingIMGWriter(streaming_output).write(
+            img_file,
+            subs_streaming,
+        )
+
+        legacy_data = legacy_output.read_bytes()
+        streaming_data = streaming_output.read_bytes()
+
+        assert len(legacy_data) == len(streaming_data), (
+            f"File size mismatch: legacy={len(legacy_data)}, streaming={len(streaming_data)}"
+        )
+        assert legacy_data == streaming_data, (
+            f"Streaming multi-zoom output differs at first differing byte: "
+            f"{next(i for i, (a, b) in enumerate(zip(legacy_data, streaming_data)) if a != b)}"
         )

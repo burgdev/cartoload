@@ -15,6 +15,7 @@ from .garmin_img_model import (
     IMGFile,
     IMGHeader,
     Subdivision,
+    TileMetadata,
     ZoomLevel,
 )
 from .garmin_img_writer import (
@@ -22,6 +23,7 @@ from .garmin_img_writer import (
     LayoutComputer,
     MAX_FILE_SIZE,
     CompressedTiles,
+    StreamingIMGWriter,
     TileEncoder,
     TileExtractor,
 )
@@ -293,6 +295,137 @@ def _set_subdivision_links(
 MAP_NAME_MAX_LEN = 32
 
 
+def generate_subdivisions_from_metadata(
+    tile_metadata_by_zoom: dict[int, list[TileMetadata]],
+    sorted_zoom_levels: list[int],
+    bounds: dict[str, float],
+) -> list[Subdivision]:
+    """Generate spatial subdivisions from TileMetadata (no JPEG data needed).
+
+    Identical logic to generate_subdivisions() but reads bounds directly
+    from TileMetadata fields instead of unpacking (bytes, bounds) tuples.
+    Produces Subdivision objects with tile_entries populated from metadata.
+
+    Args:
+        tile_metadata_by_zoom: Dict mapping zoom level to list of TileMetadata
+        sorted_zoom_levels: Zoom level numbers in ascending order.
+        bounds: Geographic bounds dict with north, south, west, east keys.
+
+    Returns:
+        Flat list of Subdivision objects across all zoom levels.
+    """
+    if not sorted_zoom_levels:
+        return []
+
+    n_zoom = len(sorted_zoom_levels)
+    subdivisions: list[Subdivision] = []
+
+    for z_idx, zoom_level in enumerate(sorted_zoom_levels):
+        tiles = tile_metadata_by_zoom.get(zoom_level, [])
+        if not tiles:
+            sub = Subdivision(
+                center_lat=(bounds.get("north", 0) + bounds.get("south", 0)) / 2,
+                center_lon=(bounds.get("west", 0) + bounds.get("east", 0)) / 2,
+                zoom_level_index=z_idx,
+            )
+            subdivisions.append(sub)
+            continue
+
+        if z_idx <= 1 or len(tiles) <= 4:
+            _assign_metadata_to_single_subdivision(tiles, z_idx, subdivisions)
+        else:
+            n_tiles = len(tiles)
+            grid_side = max(2, int(n_tiles**0.25))
+            _assign_metadata_to_grid(tiles, z_idx, grid_side, grid_side, subdivisions)
+
+    _set_subdivision_links(subdivisions, n_zoom, bounds)
+    return subdivisions
+
+
+def _assign_metadata_to_single_subdivision(
+    tiles: list[TileMetadata], z_idx: int, subdivisions: list[Subdivision]
+) -> None:
+    """Assign all TileMetadata entries to a single subdivision."""
+    lats = [t.lat_min for t in tiles] + [t.lat_max for t in tiles]
+    lons = [t.lon_min for t in tiles] + [t.lon_max for t in tiles]
+
+    center_lat = (min(lats) + max(lats)) / 2
+    center_lon = (min(lons) + max(lons)) / 2
+
+    sub = Subdivision(
+        center_lat=center_lat,
+        center_lon=center_lon,
+        zoom_level_index=z_idx,
+        tile_entries=list(tiles),
+        bounds_west=min(lons),
+        bounds_east=max(lons),
+        bounds_north=max(lats),
+        bounds_south=min(lats),
+    )
+    subdivisions.append(sub)
+
+
+def _assign_metadata_to_grid(
+    tiles: list[TileMetadata],
+    z_idx: int,
+    grid_cols: int,
+    grid_rows: int,
+    subdivisions: list[Subdivision],
+) -> None:
+    """Assign TileMetadata entries to a grid of subdivisions."""
+    lat_min_all = min(t.lat_min for t in tiles)
+    lat_max_all = max(t.lat_max for t in tiles)
+    lon_min_all = min(t.lon_min for t in tiles)
+    lon_max_all = max(t.lon_max for t in tiles)
+
+    lat_range = lat_max_all - lat_min_all or 1.0
+    lon_range = lon_max_all - lon_min_all or 1.0
+
+    cell_lat = lat_range / grid_rows
+    cell_lon = lon_range / grid_cols
+
+    grid: dict[tuple[int, int], list[TileMetadata]] = {
+        (r, c): [] for r in range(grid_rows) for c in range(grid_cols)
+    }
+
+    for tm in tiles:
+        tile_center_lat = (tm.lat_min + tm.lat_max) / 2
+        tile_center_lon = (tm.lon_min + tm.lon_max) / 2
+
+        row = min(int((tile_center_lat - lat_min_all) / cell_lat), grid_rows - 1)
+        col = min(int((tile_center_lon - lon_min_all) / cell_lon), grid_cols - 1)
+        row = max(0, row)
+        col = max(0, col)
+
+        grid[(row, col)].append(tm)
+
+    for r in range(grid_rows):
+        for c in range(grid_cols):
+            cell_tiles = grid[(r, c)]
+            if not cell_tiles:
+                continue
+
+            cell_lat_min = min(t.lat_min for t in cell_tiles)
+            cell_lat_max = max(t.lat_max for t in cell_tiles)
+            cell_lon_min = min(t.lon_min for t in cell_tiles)
+            cell_lon_max = max(t.lon_max for t in cell_tiles)
+
+            center_lat = (cell_lat_min + cell_lat_max) / 2
+            center_lon = (cell_lon_min + cell_lon_max) / 2
+
+            sub = Subdivision(
+                center_lat=center_lat,
+                center_lon=center_lon,
+                zoom_level_index=z_idx,
+                tile_entries=list(cell_tiles),
+                bounds_west=cell_lon_min,
+                bounds_east=cell_lon_max,
+                bounds_north=cell_lat_max,
+                bounds_south=cell_lat_min,
+            )
+            subdivisions.append(sub)
+
+
 def _generate_map_id(layer_config: "LayerConfig") -> int:
     """Generate a deterministic map ID from layer configuration.
 
@@ -421,6 +554,113 @@ class GarminImgExporter(BaseExporter):
         output_files = self._write_with_splitting(
             img_file, compressed_tiles, output_path
         )
+
+        logger.info("IMG export complete: %d file(s)", len(output_files))
+        return output_files
+
+    def export_from_metadata(
+        self,
+        tile_metadata: dict[int, list[TileMetadata]],
+        layer_config: "LayerConfig",
+        output_path: Path,
+        *,
+        source_crs: str = "EPSG:3857",
+        quality: int = 85,
+        progress_callback: ExportProgressCallback | None = None,
+    ) -> list[Path]:
+        """Export tiles to Garmin IMG using streaming writer from metadata.
+
+        Uses the two-pass streaming writer: computes layout from TileMetadata
+        (no JPEG data in memory), then streams JPEG data from source files
+        during the write pass. Memory bounded to ~12 MB per batch.
+
+        Args:
+            tile_metadata: Dict mapping zoom level to list of TileMetadata
+            layer_config: Layer configuration
+            output_path: Path to output .img file
+            source_crs: Source CRS for tile processing (default EPSG:3857)
+            quality: JPEG quality for warping (1-100, default 85)
+            progress_callback: Called with (stage, current, total) for progress
+
+        Returns:
+            List of created .img files (may be multiple if >4GB)
+        """
+        logger.info(
+            "Streaming export of %d zoom levels to Garmin IMG: %s",
+            len(tile_metadata),
+            output_path,
+        )
+
+        # 1. Resolve attribution and build IMG structure
+        attribution = self._resolve_attribution(layer_config)
+        img_file = self._build_img_structure(layer_config, attribution)
+
+        # 2. Report tile counts
+        total_tiles = sum(len(t) for t in tile_metadata.values())
+        if progress_callback:
+            progress_callback("writing", 0, total_tiles)
+        logger.info(
+            "Writing %d tiles (streaming) across %d zoom levels",
+            total_tiles,
+            len(tile_metadata),
+        )
+
+        # 3. Generate spatial subdivisions from metadata
+        bounds = {
+            "north": img_file.bounds_north,
+            "south": img_file.bounds_south,
+            "west": img_file.bounds_west,
+            "east": img_file.bounds_east,
+        }
+        sorted_zooms = sorted(tile_metadata.keys())
+        subdivisions = generate_subdivisions_from_metadata(
+            tile_metadata,
+            sorted_zooms,
+            bounds,
+        )
+
+        # 4. Build tile processor callable for streaming warping
+        from ..processor.rasterio_warp import warp_tile_to_jpeg
+
+        tile_processor = None
+        if source_crs != "EPSG:4326":
+            tile_processor = warp_tile_to_jpeg
+
+        # 5. Write IMG file using streaming writer
+        output_files: list[Path] = []
+
+        # Check if splitting is needed
+        computer = LayoutComputer(img_file, subdivisions=subdivisions)
+        layouts = computer.compute()
+        total_size = max(lay.end_offset for lay in layouts)
+
+        if total_size <= MAX_FILE_SIZE:
+            writer = StreamingIMGWriter(output_path)
+            writer.write(
+                img_file,
+                subdivisions,
+                tile_processor=tile_processor,
+                source_crs=source_crs,
+                jpeg_quality=quality,
+                progress_callback=progress_callback,
+            )
+            output_files.append(output_path)
+        else:
+            # Split into multiple files by zoom level
+            logger.info(
+                "Output would be %d bytes, splitting into multiple files",
+                total_size,
+            )
+            output_files = self._split_write_metadata(
+                img_file,
+                tile_metadata,
+                subdivisions,
+                output_path,
+                source_crs=source_crs,
+                quality=quality,
+                tile_processor=tile_processor,
+                progress_callback=progress_callback,
+            )
 
         logger.info("IMG export complete: %d file(s)", len(output_files))
         return output_files
@@ -743,5 +983,135 @@ class GarminImgExporter(BaseExporter):
 
         if current_zooms:
             groups.append((list(current_zooms), dict(current_tiles)))
+
+        return groups
+
+    def _split_write_metadata(
+        self,
+        img_file: IMGFile,
+        tile_metadata: dict[int, list[TileMetadata]],
+        subdivisions: list[Subdivision],
+        output_path: Path,
+        *,
+        source_crs: str = "EPSG:3857",
+        quality: int = 85,
+        tile_processor=None,
+        progress_callback: ExportProgressCallback | None = None,
+    ) -> list[Path]:
+        """Split output across multiple IMG files using metadata-based streaming.
+
+        Strategy: assign zoom levels to files, ensuring each stays under 4 GB.
+        """
+        stem = output_path.stem
+        suffix = output_path.suffix
+        parent = output_path.parent
+
+        zoom_groups = self._compute_zoom_splits_metadata(img_file, tile_metadata)
+
+        bounds = {
+            "north": img_file.bounds_north,
+            "south": img_file.bounds_south,
+            "west": img_file.bounds_west,
+            "east": img_file.bounds_east,
+        }
+
+        output_files = []
+        for i, (zooms, meta_for_group) in enumerate(zoom_groups, start=1):
+            if len(zoom_groups) == 1:
+                file_path = output_path
+            else:
+                file_path = parent / f"{stem}_{i}{suffix}"
+
+            file_img = IMGFile(
+                header=IMGHeader(
+                    magic="DSKIMG",
+                    format_version=2,
+                    creation_date=datetime.now(),
+                    creator="GARMIN",
+                    map_name=img_file.header.map_name,
+                ),
+                draw_order=img_file.draw_order,
+                bounds_north=img_file.bounds_north,
+                bounds_south=img_file.bounds_south,
+                bounds_west=img_file.bounds_west,
+                bounds_east=img_file.bounds_east,
+                description=img_file.description,
+                copyright_string=img_file.copyright_string,
+                zoom_levels=[
+                    z
+                    for z in img_file.zoom_levels
+                    if (z.source_zoom or z.level_number) in zooms
+                ],
+            )
+
+            group_subdivs = generate_subdivisions_from_metadata(
+                meta_for_group,
+                zooms,
+                bounds,
+            )
+
+            writer = StreamingIMGWriter(file_path)
+            writer.write(
+                file_img,
+                group_subdivs,
+                tile_processor=tile_processor,
+                source_crs=source_crs,
+                jpeg_quality=quality,
+                progress_callback=progress_callback,
+            )
+            output_files.append(file_path)
+
+            logger.info("Wrote split file %d: %s", i, file_path)
+
+        return output_files
+
+    def _compute_zoom_splits_metadata(
+        self,
+        img_file: IMGFile,
+        tile_metadata: dict[int, list[TileMetadata]],
+    ) -> list[tuple[list[int], dict[int, list[TileMetadata]]]]:
+        """Compute how to split zoom levels across files using metadata sizes.
+
+        Returns list of (zoom_levels, metadata_dict) tuples, one per output file.
+        """
+        groups: list[tuple[list[int], dict[int, list[TileMetadata]]]] = []
+        current_zooms: list[int] = []
+        current_meta: dict[int, list[TileMetadata]] = {}
+
+        for zoom in sorted(tile_metadata.keys()):
+            trial_meta = {**current_meta, zoom: tile_metadata[zoom]}
+            trial_img = IMGFile(
+                header=img_file.header,
+                zoom_levels=[
+                    z
+                    for z in img_file.zoom_levels
+                    if (z.source_zoom or z.level_number) in list(current_zooms) + [zoom]
+                ],
+            )
+            bounds = {
+                "north": trial_img.bounds_north,
+                "south": trial_img.bounds_south,
+                "west": trial_img.bounds_west,
+                "east": trial_img.bounds_east,
+            }
+            trial_subdivs = generate_subdivisions_from_metadata(
+                trial_meta,
+                sorted(trial_meta.keys()),
+                bounds,
+            )
+            computer = LayoutComputer(trial_img, subdivisions=trial_subdivs)
+            layouts = computer.compute()
+            trial_size = max(lay.end_offset for lay in layouts)
+
+            if trial_size > MAX_FILE_SIZE and current_zooms:
+                groups.append((list(current_zooms), dict(current_meta)))
+                current_zooms = [zoom]
+                current_meta = {zoom: tile_metadata[zoom]}
+            else:
+                current_zooms.append(zoom)
+                current_meta = dict(trial_meta)
+
+        if current_zooms:
+            groups.append((list(current_zooms), dict(current_meta)))
 
         return groups

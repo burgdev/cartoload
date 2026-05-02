@@ -185,29 +185,39 @@ class TestBuildLayerMocked:
     """Exercise the full pipeline with all stages mocked."""
 
     @patch("cartoload.pipeline.get_exporter")
-    @patch("cartoload.pipeline.BatchTileProcessor")
+    @patch("cartoload.pipeline.compute_tile_metadata")
     @patch("cartoload.pipeline.get_downloader")
     def test_happy_path(
         self,
         mock_get_dl,
-        mock_btp_cls,
+        mock_compute_metadata,
         mock_get_exp,
         layer,
         sources,
         tmp_path,
     ):
+        from cartoload.exporters.garmin_img_model import TileMetadata
+
         # --- download mock (spec=GeoTIFFDownloader so isinstance passes) ---
         mock_dl = MagicMock(spec=GeoTIFFDownloader)
         mock_dl.run.return_value = [tmp_path / "tile1.tif"]
         mock_get_dl.return_value = mock_dl
 
-        # --- batch processor mock ---
-        mock_processor = MagicMock()
+        # --- metadata mock ---
         jpeg_bytes = _make_jpeg()
-        mock_processor.process_zoom_level.return_value = [
-            (jpeg_bytes, (46.0, 7.0, 47.0, 8.0)),
+        mock_compute_metadata.return_value = [
+            TileMetadata(
+                x=0,
+                y=0,
+                zoom=12,
+                lat_min=46.0,
+                lon_min=7.0,
+                lat_max=47.0,
+                lon_max=8.0,
+                jpeg_size=len(jpeg_bytes),
+                source_path=None,
+            ),
         ]
-        mock_btp_cls.return_value = mock_processor
 
         # --- exporter mock ---
         mock_exporter = MagicMock()
@@ -218,7 +228,7 @@ class TestBuildLayerMocked:
             output_img.write_bytes(b"fake-img")
             return [output_img]
 
-        mock_exporter.export_from_tiles.side_effect = _create_on_export
+        mock_exporter.export_from_metadata.side_effect = _create_on_export
         mock_get_exp.return_value = mock_exporter
 
         cache_dir = tmp_path / "cache"
@@ -236,31 +246,41 @@ class TestBuildLayerMocked:
 
         assert result == [output_img]
         mock_dl.run.assert_called_once()
-        mock_btp_cls.assert_called_once()
-        mock_exporter.export_from_tiles.assert_called_once()
+        mock_compute_metadata.assert_called()
+        mock_exporter.export_from_metadata.assert_called_once()
 
     @patch("cartoload.pipeline.get_exporter")
-    @patch("cartoload.pipeline.BatchTileProcessor")
+    @patch("cartoload.pipeline.compute_tile_metadata")
     @patch("cartoload.pipeline.get_downloader")
     def test_progress_callback(
         self,
         mock_get_dl,
-        mock_btp_cls,
+        mock_compute_metadata,
         mock_get_exp,
         layer,
         sources,
         tmp_path,
     ):
+        from cartoload.exporters.garmin_img_model import TileMetadata
+
         mock_dl = MagicMock(spec=GeoTIFFDownloader)
         mock_dl.run.return_value = [tmp_path / "tile.tif"]
         mock_get_dl.return_value = mock_dl
 
-        mock_processor = MagicMock()
         jpeg_bytes = _make_jpeg()
-        mock_processor.process_zoom_level.return_value = [
-            (jpeg_bytes, (46.0, 7.0, 47.0, 8.0)),
+        mock_compute_metadata.return_value = [
+            TileMetadata(
+                x=0,
+                y=0,
+                zoom=12,
+                lat_min=46.0,
+                lon_min=7.0,
+                lat_max=47.0,
+                lon_max=8.0,
+                jpeg_size=len(jpeg_bytes),
+                source_path=None,
+            ),
         ]
-        mock_btp_cls.return_value = mock_processor
 
         mock_exporter = MagicMock()
         out = tmp_path / "output" / "test_layer.img"
@@ -270,7 +290,7 @@ class TestBuildLayerMocked:
             out.write_bytes(b"x")
             return [out]
 
-        mock_exporter.export_from_tiles.side_effect = _create_on_export
+        mock_exporter.export_from_metadata.side_effect = _create_on_export
         mock_get_exp.return_value = mock_exporter
 
         stages: list[tuple[str, str]] = []
@@ -300,24 +320,34 @@ class TestBuildLayerMocked:
 
 class TestNoDownload:
     @patch("cartoload.pipeline.get_exporter")
-    @patch("cartoload.pipeline.BatchTileProcessor")
+    @patch("cartoload.pipeline.compute_tile_metadata")
     @patch("cartoload.pipeline.get_downloader")
     def test_download_skipped(
         self,
         mock_get_dl,
-        mock_btp_cls,
+        mock_compute_metadata,
         mock_get_exp,
         layer,
         sources,
         tmp_path,
     ):
-        # --- batch processor mock ---
-        mock_processor = MagicMock()
+        from cartoload.exporters.garmin_img_model import TileMetadata
+
+        # --- metadata mock ---
         jpeg_bytes = _make_jpeg()
-        mock_processor.process_zoom_level.return_value = [
-            (jpeg_bytes, (46.0, 7.0, 47.0, 8.0)),
+        mock_compute_metadata.return_value = [
+            TileMetadata(
+                x=0,
+                y=0,
+                zoom=12,
+                lat_min=46.0,
+                lon_min=7.0,
+                lat_max=47.0,
+                lon_max=8.0,
+                jpeg_size=len(jpeg_bytes),
+                source_path=None,
+            ),
         ]
-        mock_btp_cls.return_value = mock_processor
 
         # --- exporter mock ---
         mock_exporter = MagicMock()
@@ -328,7 +358,7 @@ class TestNoDownload:
             out.write_bytes(b"x")
             return [out]
 
-        mock_exporter.export_from_tiles.side_effect = _create_on_export
+        mock_exporter.export_from_metadata.side_effect = _create_on_export
         mock_get_exp.return_value = mock_exporter
 
         asyncio.run(
@@ -343,8 +373,8 @@ class TestNoDownload:
 
         # get_downloader should have been called for cache path resolution
         # (in no-download mode, it's called during the process stage)
-        mock_btp_cls.assert_called_once()
-        mock_exporter.export_from_tiles.assert_called_once()
+        mock_compute_metadata.assert_called()
+        mock_exporter.export_from_metadata.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -374,10 +404,8 @@ class TestErrorPropagation:
         mock_dl.run.return_value = [tmp_path / "tile.tif"]
         mock_get_dl.return_value = mock_dl
 
-        with patch("cartoload.pipeline.BatchTileProcessor") as mock_btp:
-            mock_btp.return_value.process_zoom_level.side_effect = RuntimeError(
-                "gdal fail"
-            )
+        with patch("cartoload.pipeline.compute_tile_metadata") as mock_compute:
+            mock_compute.side_effect = RuntimeError("gdal fail")
             with pytest.raises(ProcessingError, match="gdal fail"):
                 asyncio.run(
                     build_layer(
@@ -389,22 +417,33 @@ class TestErrorPropagation:
                 )
 
     @patch("cartoload.pipeline.get_exporter")
-    @patch("cartoload.pipeline.BatchTileProcessor")
+    @patch("cartoload.pipeline.compute_tile_metadata")
     @patch("cartoload.pipeline.get_downloader")
     def test_export_error(
-        self, mock_get_dl, mock_btp_cls, mock_get_exp, layer, sources, tmp_path
+        self, mock_get_dl, mock_compute_metadata, mock_get_exp, layer, sources, tmp_path
     ):
+        from cartoload.exporters.garmin_img_model import TileMetadata
+
         mock_dl = MagicMock(spec=GeoTIFFDownloader)
         mock_dl.run.return_value = [tmp_path / "tile.tif"]
         mock_get_dl.return_value = mock_dl
 
-        mock_processor = MagicMock()
-        mock_processor.process_zoom_level.return_value = [
-            (_make_jpeg(), (46.0, 7.0, 47.0, 8.0)),
+        jpeg_bytes = _make_jpeg()
+        mock_compute_metadata.return_value = [
+            TileMetadata(
+                x=0,
+                y=0,
+                zoom=12,
+                lat_min=46.0,
+                lon_min=7.0,
+                lat_max=47.0,
+                lon_max=8.0,
+                jpeg_size=len(jpeg_bytes),
+                source_path=None,
+            ),
         ]
-        mock_btp_cls.return_value = mock_processor
 
-        mock_get_exp.return_value.export_from_tiles.side_effect = RuntimeError(
+        mock_get_exp.return_value.export_from_metadata.side_effect = RuntimeError(
             "disk full"
         )
 
@@ -438,20 +477,18 @@ class TestErrorPropagation:
                 )
             )
 
-    @patch("cartoload.pipeline.BatchTileProcessor")
+    @patch("cartoload.pipeline.compute_tile_metadata")
     @patch("cartoload.pipeline.get_downloader")
     def test_no_tiles_raises_processing_error(
-        self, mock_get_dl, mock_btp_cls, layer, sources, tmp_path
+        self, mock_get_dl, mock_compute_metadata, layer, sources, tmp_path
     ):
         """When no tiles are processed, processing should fail."""
         mock_dl = MagicMock(spec=GeoTIFFDownloader)
         mock_dl.run.return_value = []
         mock_get_dl.return_value = mock_dl
 
-        # BatchTileProcessor returns empty results for both zoom levels
-        mock_processor = MagicMock()
-        mock_processor.process_zoom_level.return_value = []
-        mock_btp_cls.return_value = mock_processor
+        # compute_tile_metadata returns empty results for both zoom levels
+        mock_compute_metadata.return_value = []
 
         with pytest.raises(ProcessingError, match="No tiles available"):
             asyncio.run(

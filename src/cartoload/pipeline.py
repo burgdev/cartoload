@@ -12,7 +12,6 @@ from .downloader.base import BaseDownloader
 from .downloader.geotiff import GeoTIFFDownloader
 from .downloader.wmts import WMTSDownloader
 from .exporters.garmin_img import GarminImgExporter
-from .processor.batch import BatchTileProcessor
 from .processor.checkpoint import (
     CheckpointData,
     delete_checkpoint,
@@ -20,6 +19,7 @@ from .processor.checkpoint import (
     read_checkpoint,
     write_checkpoint,
 )
+from .processor.tile_metadata import compute_tile_metadata
 
 # Legacy import — kept for backward compatibility and debug use
 from .processor.raster import RasterProcessor  # noqa: F401
@@ -194,9 +194,9 @@ async def build_layer(
 ) -> list[Path]:
     """Orchestrate download → batch process → export for a single layer.
 
-    Uses the fast pipeline: downloads tiles to cache, then reads them
-    directly via BatchTileProcessor (no intermediate GeoTIFF), and
-    writes to Garmin IMG via export_from_tiles.
+    Uses the fast pipeline: downloads tiles to cache, computes tile
+    metadata (no JPEG data in memory), then streams JPEG data to
+    Garmin IMG via the two-pass streaming writer.
 
     Args:
         layer: Layer configuration
@@ -318,9 +318,9 @@ async def build_layer(
     else:
         logger.info("Skipping download stage (--no-download)")
 
-    # --- Process stage: batch read tiles from cache ---
+    # --- Process stage: compute tile metadata from cache ---
     if progress_callback:
-        progress_callback("process", "Processing tiles from cache...")
+        progress_callback("process", "Computing tile metadata from cache...")
 
     # Get the downloader for cache path resolution (create if not set)
     if downloader is None:
@@ -333,66 +333,45 @@ async def build_layer(
         except Exception as e:
             raise ProcessingError(layer.id, str(e), cause=e) from e
 
-    # Compute tile coordinates for each zoom level
-    compressed_tiles: dict[int, list] = {}
+    # Compute tile metadata for each zoom level (no JPEG data loaded)
+    tile_metadata: dict[int, list] = {}
     try:
-        processor = BatchTileProcessor(
-            source_crs=source_crs,
-            target_crs="EPSG:4326",
-            quality=quality,
-        )
-
         for zoom in remaining_zooms:
             tile_coords = _compute_tile_coords(effective_layer, zoom)
 
-            # Wrap progress callback to include zoom level in stage name
-            zoom_progress_cb: ExportProgressCallback | None = None
-            if export_progress_callback is not None:
-
-                def _make_zoom_cb(z: int) -> ExportProgressCallback:
-                    def _cb(stage: str, current: int, total: int) -> None:
-                        if stage == "processing":
-                            export_progress_callback(f"processing:{z}", current, total)
-                        else:
-                            export_progress_callback(stage, current, total)
-
-                    return _cb
-
-                zoom_progress_cb = _make_zoom_cb(zoom)
-
             if tile_coords:
-                tiles = processor.process_zoom_level(
-                    downloader,
+                metadata = compute_tile_metadata(
                     tile_coords,
                     zoom,
-                    progress_callback=zoom_progress_cb,
+                    source_crs,
+                    downloader,
                 )
-                compressed_tiles[zoom] = tiles
+                tile_metadata[zoom] = metadata
             else:
-                compressed_tiles[zoom] = []
+                tile_metadata[zoom] = []
                 logger.debug(f"No tile coordinates for zoom level {zoom}")
 
             # Write checkpoint after each zoom level
             if checkpoint and cp_data is not None:
                 mark_zoom_complete(
-                    cache_dir, cp_data, zoom, len(compressed_tiles.get(zoom, []))
+                    cache_dir, cp_data, zoom, len(tile_metadata.get(zoom, []))
                 )
     except PipelineError:
         raise
     except Exception as e:
         raise ProcessingError(layer.id, str(e), cause=e) from e
 
-    total_tiles = sum(len(t) for t in compressed_tiles.values())
+    total_tiles = sum(len(t) for t in tile_metadata.values())
     if total_tiles == 0:
         raise ProcessingError(layer.id, "No tiles available for processing")
 
     logger.info(
-        "Processed %d tiles across %d zoom levels",
+        "Computed metadata for %d tiles across %d zoom levels",
         total_tiles,
-        len(compressed_tiles),
+        len(tile_metadata),
     )
 
-    # Warmup mode: stop after processing, skip export
+    # Warmup mode: stop after metadata computation, skip export
     if warmup_only:
         logger.info(
             "Warmup complete for layer '%s': %d tiles cached", layer.id, total_tiles
@@ -402,9 +381,17 @@ async def build_layer(
             delete_checkpoint(cache_dir, effective_layer.id)
         return []
 
-    # --- Export stage: write directly to IMG ---
+    # --- Export stage: streaming write to IMG ---
     if progress_callback:
-        progress_callback("export", "Exporting to Garmin IMG...")
+        from .exporters.garmin_img_writer import _get_worker_count
+
+        workers = _get_worker_count()
+        if workers > 1:
+            progress_callback(
+                "export", f"Exporting to Garmin IMG ({workers}x parallel)..."
+            )
+        else:
+            progress_callback("export", "Exporting to Garmin IMG...")
 
     output_paths: list[Path]
     try:
@@ -422,10 +409,12 @@ async def build_layer(
                     f"Use --force to overwrite.",
                 )
 
-        output_paths = exporter.export_from_tiles(
-            compressed_tiles,
+        output_paths = exporter.export_from_metadata(
+            tile_metadata,
             effective_layer,
             output_file,
+            source_crs=source_crs or "EPSG:3857",
+            quality=quality,
             progress_callback=export_progress_callback,
         )
     except ExportError:
