@@ -177,7 +177,7 @@ def _warp_to_jpeg(
     dst_rgb = np.moveaxis(dst_data, 0, -1)  # (C, H, W) → (H, W, C)
     img = Image.fromarray(dst_rgb)
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=quality)
+    img.save(buf, format="JPEG", quality=quality, optimize=True)
     jpeg_bytes = buf.getvalue()
 
     # Compute bounds from tile coordinates (WGS84)

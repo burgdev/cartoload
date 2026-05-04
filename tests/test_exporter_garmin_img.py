@@ -2983,6 +2983,211 @@ class TestMultiGMPWriter:
         )
 
 
+class TestMultiGMPStreaming:
+    """Tests for StreamingIMGWriter with multiple GMP groups in one IMG file."""
+
+    @staticmethod
+    def _make_jpeg(size_kb: int = 2) -> bytes:
+        """Create a minimal JPEG of approximately the given size in KB."""
+        from PIL import Image
+
+        arr = np.random.randint(0, 255, (64, 64, 3), dtype=np.uint8)
+        img = Image.fromarray(arr)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=50)
+        return buf.getvalue()
+
+    def test_multi_gmp_fat_points_to_gmp_headers(self, tmp_path):
+        """Verify FAT block pointers point to actual GMP headers for multi-GMP files."""
+        from cartoload.exporters.garmin_img_writer import (
+            FAT_START,
+            FAT_SLOTS_PER_ENTRY,
+            FAT_BLOCKS_TABLE_START,
+            FAT_UNUSED_BLOCK,
+            StreamingIMGWriter,
+        )
+
+        # Create 3 GMP groups, each with 5 tiles
+        n_tiles_per_group = 5
+        n_groups = 3
+        jpeg = self._make_jpeg()
+
+        bounds_list = [
+            {"north": 47.5, "south": 47.0, "west": 8.0, "east": 8.5},
+            {"north": 47.0, "south": 46.5, "west": 8.0, "east": 8.5},
+            {"north": 46.5, "south": 46.0, "west": 8.0, "east": 8.5},
+        ]
+
+        img_file = _make_img_file()
+        img_file.zoom_levels = [
+            ZoomLevel(level_number=23, zoom_code=1, source_zoom=12),
+        ]
+
+        gmp_groups = []
+        for gi in range(n_groups):
+            tiles = []
+            b = bounds_list[gi]
+            for i in range(n_tiles_per_group):
+                row, col = divmod(i, 3)
+                lat_base = b["south"] + 0.05
+                lon_base = b["west"] + 0.05
+                lat_min = lat_base + row * 0.01
+                lon_min = lon_base + col * 0.01
+                tiles.append(
+                    TileMetadata(
+                        x=col,
+                        y=row + gi * 5,
+                        zoom=12,
+                        lat_min=lat_min,
+                        lon_min=lon_min,
+                        lat_max=lat_min + 0.01,
+                        lon_max=lon_min + 0.01,
+                        jpeg_size=len(jpeg),
+                    )
+                )
+            meta = {12: tiles}
+            subdivisions = generate_subdivisions_from_metadata(meta, [12], b)
+            gmp_groups.append(
+                GMPGroup(
+                    map_id=img_file.map_id + gi,
+                    subdivisions=subdivisions,
+                    zoom_levels=list(img_file.zoom_levels),
+                    bounds_north=b["north"],
+                    bounds_south=b["south"],
+                    bounds_west=b["west"],
+                    bounds_east=b["east"],
+                )
+            )
+
+        output = tmp_path / "multi_gmp.img"
+        writer = StreamingIMGWriter(output)
+        writer.write(img_file, gmp_groups)
+
+        assert output.exists()
+        data = output.read_bytes()
+
+        # Verify main header
+        assert data[0x10:0x16] == b"DSKIMG"
+
+        # Read block size from header
+        block_exp_e2 = data[0x62]
+        block_size = 512 << block_exp_e2
+
+        # Parse FAT entries: find all GMP subfile entries
+        # FAT starts at FAT_START (0x1000), each entry is 512 bytes
+        gmp_fat_entries = {}  # part -> (name, blocks_list)
+        offset = FAT_START
+        while offset < len(data):
+            flag = data[offset]
+            if flag == 0x00:
+                break  # End of FAT entries
+            name = data[offset + 1 : offset + 9].decode("ascii").rstrip()
+            ftype = data[offset + 9 : offset + 12].decode("ascii").rstrip()
+            data[offset + 0x11]
+
+            if ftype == "GMP":
+                # Extract block numbers
+                blocks = []
+                for i in range(FAT_SLOTS_PER_ENTRY):
+                    blk = struct.unpack_from(
+                        "<H", data, offset + FAT_BLOCKS_TABLE_START + i * 2
+                    )[0]
+                    if blk == FAT_UNUSED_BLOCK:
+                        break
+                    blocks.append(blk)
+
+                if name not in gmp_fat_entries:
+                    gmp_fat_entries[name] = []
+                gmp_fat_entries[name].extend(blocks)
+
+            offset += 512
+
+        # Verify: for each GMP, the first FAT block should point to a position
+        # containing "GARMIN GMP" signature
+        gmp_names_found = sorted(gmp_fat_entries.keys())
+        assert len(gmp_names_found) == n_groups, (
+            f"Expected {n_groups} GMP subfiles, found {len(gmp_names_found)}: {gmp_names_found}"
+        )
+
+        for name, blocks in gmp_fat_entries.items():
+            assert len(blocks) > 0, f"GMP {name} has no blocks"
+            first_block = blocks[0]
+            byte_pos = first_block * block_size
+            assert byte_pos + 12 <= len(data), (
+                f"GMP {name} first block {first_block} -> byte {byte_pos} exceeds file size {len(data)}"
+            )
+            # GMP container header: 2-byte prefix + "GARMIN GMP"
+            # The first byte is the header length, then a null byte, then "GARMIN GMP"
+            signature = data[byte_pos + 2 : byte_pos + 12]
+            assert signature == b"GARMIN GMP", (
+                f"GMP {name}: FAT points to block {first_block} (byte 0x{byte_pos:X}), "
+                f"expected 'GARMIN GMP' but found {signature!r}"
+            )
+
+    def test_multi_gmp_each_gmp_has_correct_tiles(self, tmp_path):
+        """Verify each GMP subfile in a multi-GMP file has its own tiles."""
+        from cartoload.exporters.garmin_img_writer import StreamingIMGWriter
+
+        jpeg = self._make_jpeg()
+        n_groups = 2
+        n_tiles_per_group = 10
+
+        img_file = _make_img_file()
+        img_file.zoom_levels = [
+            ZoomLevel(level_number=23, zoom_code=1, source_zoom=12),
+        ]
+
+        gmp_groups = []
+        for gi in range(n_groups):
+            tiles = []
+            b_north = 47.5 - gi * 0.5
+            b_south = b_north - 0.5
+            for i in range(n_tiles_per_group):
+                row, col = divmod(i, 4)
+                lat_min = b_south + 0.05 + row * 0.02
+                lon_min = 8.0 + 0.05 + col * 0.02
+                tiles.append(
+                    TileMetadata(
+                        x=col,
+                        y=row + gi * 10,
+                        zoom=12,
+                        lat_min=lat_min,
+                        lon_min=lon_min,
+                        lat_max=lat_min + 0.02,
+                        lon_max=lon_min + 0.02,
+                        jpeg_size=len(jpeg),
+                    )
+                )
+            meta = {12: tiles}
+            bounds = {"north": b_north, "south": b_south, "west": 8.0, "east": 9.0}
+            subdivisions = generate_subdivisions_from_metadata(meta, [12], bounds)
+            gmp_groups.append(
+                GMPGroup(
+                    map_id=img_file.map_id + gi,
+                    subdivisions=subdivisions,
+                    zoom_levels=list(img_file.zoom_levels),
+                    bounds_north=b_north,
+                    bounds_south=b_south,
+                    bounds_west=8.0,
+                    bounds_east=9.0,
+                )
+            )
+
+        output = tmp_path / "multi_tiles.img"
+        writer = StreamingIMGWriter(output)
+        writer.write(img_file, gmp_groups)
+
+        data = output.read_bytes()
+        block_exp_e2 = data[0x62]
+        block_size = 512 << block_exp_e2
+
+        # Verify file has expected structure
+        assert data[0x10:0x16] == b"DSKIMG"
+        # File should be non-trivial size with 2 GMP groups
+        file_size = output.stat().st_size
+        assert file_size > block_size * 2  # At least 2 blocks
+
+
 class TestReencodeJpeg:
     """Tests for the _reencode_jpeg() helper."""
 

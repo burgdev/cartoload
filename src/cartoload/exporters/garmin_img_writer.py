@@ -2163,8 +2163,24 @@ class StreamingIMGWriter:
                         total_original_jpeg += len(tile_entry)
 
         # Estimate conservative total to determine block size.
-        # Add overhead for GMP/MPS headers, subdivision metadata, etc.
-        overhead_per_group = 4096  # generous overhead for headers
+        # This MUST be an upper bound on the actual file size so that the block
+        # size computed from it is always sufficient. Per-tile overhead includes:
+        # RGN2 record (~42 bytes), LBL28 entry (4 bytes), LBL label (~12 bytes).
+        total_tiles = sum(
+            len(s.tile_entries) for g in gmp_groups for s in g.subdivisions
+        )
+        per_tile_overhead = 60  # RGN2 + LBL28 + label (upper bound)
+        fixed_headers = (
+            GMP_CONTAINER_HEADER_SIZE
+            + TRE_HEADER_LENGTH
+            + RGN_HEADER_LENGTH
+            + LBL_HEADER_LENGTH
+            + NET_HEADER_LENGTH
+            + 100  # copyright, map info, TRE data sections
+        )
+        overhead_per_group = (
+            fixed_headers + total_tiles * per_tile_overhead + 4096
+        )  # +padding
         estimated_overhead = overhead_per_group * len(gmp_groups) + MPS_SUBFILE_SIZE
         conservative_total = total_original_jpeg + estimated_overhead
         block_exp_e2 = _compute_block_exp_e2(conservative_total)
@@ -2228,6 +2244,11 @@ class StreamingIMGWriter:
                 gmp_actual.append((gmp_name, start_offset, actual_size))
                 # Next GMP starts at block-aligned end of this one
                 aligned_end = _align_to_block(start_offset + actual_size, block_size)
+                logger.info(
+                    f"  Phase1 GMP {group_idx}: start=0x{start_offset:X}, "
+                    f"actual_size={actual_size:,}, aligned_end=0x{aligned_end:X}, "
+                    f"f.tell()=0x{f.tell():X}"
+                )
                 current_offset = aligned_end
 
             # Write MPS subfile
@@ -2242,31 +2263,36 @@ class StreamingIMGWriter:
             )
 
             # --- Phase 2: Compute actual layout and write IMG header + FAT ---
-            # Verify the conservative block size is sufficient
-            actual_block_exp_e2 = _compute_block_exp_e2(actual_total)
-            if actual_block_exp_e2 != block_exp_e2:
-                logger.warning(
-                    "Block size mismatch: conservative e2=%d, actual e2=%d. "
-                    "This should not happen — conservative estimate may be too low.",
-                    block_exp_e2,
-                    actual_block_exp_e2,
+            # CRITICAL: We MUST use the same block_size that Phase 1 used for data
+            # positioning. Phase 1 wrote data aligned to `block_size`, so Phase 2's
+            # FAT must point to those exact positions. Changing block_size here would
+            # cause all FAT block pointers to be wrong → GPXSee "Invalid map tile".
+            #
+            # If the actual total exceeds what our conservative block_size can address
+            # (65535 * block_size), that's a fatal error — we can't retroactively
+            # change the alignment of already-written data.
+            max_addressable = 65535 * block_size
+            if actual_total > max_addressable:
+                raise ValueError(
+                    f"Actual data ({actual_total:,} bytes) exceeds what block_size "
+                    f"{block_size:,} (e2={block_exp_e2}) can address "
+                    f"({max_addressable:,} bytes). Conservative estimate was too low."
                 )
-                block_exp_e2 = actual_block_exp_e2
-                block_size = 512 << block_exp_e2
 
-            # Build layouts from actual positions
+            # Build layouts using actual start_offset positions from Phase 1.
+            # This guarantees FAT block pointers match where data was actually written.
             layouts: list[SubfileLayout] = []
-            pos = data_start
 
-            for gmp_name, _, data_size in gmp_actual:
+            for gmp_name, start_offset, data_size in gmp_actual:
                 layout = SubfileLayout(
-                    SubfileType.GMP, gmp_name, pos, data_size, block_size
+                    SubfileType.GMP, gmp_name, start_offset, data_size, block_size
                 )
                 layouts.append(layout)
-                pos = layout.end_offset
 
+            # MPS follows after the last GMP's aligned end
+            last_end = layouts[-1].end_offset if layouts else data_start
             mps_layout = SubfileLayout(
-                SubfileType.MPS, "MAPSOURC", pos, MPS_SUBFILE_SIZE, block_size
+                SubfileType.MPS, "MAPSOURC", last_end, MPS_SUBFILE_SIZE, block_size
             )
             layouts.append(mps_layout)
 
@@ -2736,6 +2762,13 @@ class StreamingIMGWriter:
 
         # Seek to end of actual data
         current_pos = lbl28_file_pos + lbl28_size + actual_lbl29_size
+        logger.debug(
+            f"  _write_gmp_data done: start=0x{start_offset:X}, "
+            f"lbl28_file_pos=0x{lbl28_file_pos:X}, lbl28_size={lbl28_size}, "
+            f"actual_lbl29_size={actual_lbl29_size:,}, "
+            f"current_pos=0x{current_pos:X}, f.tell()=0x{f.tell():X}, "
+            f"return_size={current_pos - start_offset:,}"
+        )
         f.seek(current_pos)
 
         return current_pos - start_offset
@@ -2748,7 +2781,7 @@ def _reencode_jpeg(jpeg_bytes: bytes, quality: int) -> bytes:
     """
     img = Image.open(io.BytesIO(jpeg_bytes))
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=quality)
+    img.save(buf, format="JPEG", quality=quality, optimize=True)
     return buf.getvalue()
 
 
