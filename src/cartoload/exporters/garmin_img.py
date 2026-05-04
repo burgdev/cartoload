@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Callable
 from .base import BaseExporter
 from .garmin_img_model import (
     DrawOrderEntry,
+    GMPGroup,
     IMGFile,
     IMGHeader,
     Subdivision,
@@ -22,6 +23,7 @@ from .garmin_img_writer import (
     IMGWriter,
     LayoutComputer,
     MAX_FILE_SIZE,
+    MAX_GMP_SIZE,
     CompressedTiles,
     StreamingIMGWriter,
     TileEncoder,
@@ -112,8 +114,8 @@ def generate_subdivisions(
         # SwissTopo pattern: subdiv_counts=[1, 3, 138, 156, 300] for 5 levels.
         # For overview levels (z_idx=0,1): 1 subdivision
         # For detail levels: subdivide proportionally to tile count.
-        if z_idx <= 1 or len(tiles) <= 4:
-            # Few tiles or overview level: one subdivision for all tiles
+        if len(tiles) <= 4:
+            # Few tiles: one subdivision for all tiles
             _assign_tiles_to_single_subdivision(tiles, z_idx, subdivisions)
         else:
             # Subdivide into a regular grid
@@ -331,7 +333,7 @@ def generate_subdivisions_from_metadata(
             subdivisions.append(sub)
             continue
 
-        if z_idx <= 1 or len(tiles) <= 4:
+        if len(tiles) <= 4:
             _assign_metadata_to_single_subdivision(tiles, z_idx, subdivisions)
         else:
             n_tiles = len(tiles)
@@ -424,6 +426,133 @@ def _assign_metadata_to_grid(
                 bounds_south=cell_lat_min,
             )
             subdivisions.append(sub)
+
+
+def _split_into_gmp_groups(
+    tile_metadata: dict[int, list[TileMetadata]],
+    img_file: IMGFile,
+    bounds: dict[str, float],
+) -> list[GMPGroup]:
+    """Split tiles into GMP groups, handling both multi-zoom and within-zoom splits.
+
+    Each group's estimated JPEG data stays under MAX_GMP_SIZE * 0.85.
+    Zoom levels are grouped contiguously. When a single zoom level exceeds the
+    target, its tiles are split into geographic latitude bands.
+
+    Each group gets:
+    - A unique map_id derived from base map_id + group index
+    - Its own set of spatial subdivisions
+    - The full map bounds (ensures zoom level filtering works)
+    - The zoom levels that belong to this group
+
+    Returns:
+        List of GMPGroup objects.
+    """
+    sorted_zooms = sorted(tile_metadata.keys())
+
+    # Calculate JPEG size per zoom level
+    zoom_jpeg_sizes: dict[int, int] = {}
+    for z in sorted_zooms:
+        zoom_jpeg_sizes[z] = sum(t.jpeg_size for t in tile_metadata[z])
+
+    # Target per-group JPEG size: 85% of MAX_GMP_SIZE (leave room for headers)
+    target_jpeg_per_group = int(MAX_GMP_SIZE * 0.85)
+
+    # First pass: group zoom levels contiguously, splitting oversized zoom levels
+    # Each entry is (zoom_levels: list[int], tile_metadata_subset, jpeg_size)
+    raw_groups: list[tuple[list[int], dict[int, list[TileMetadata]], int]] = []
+
+    remaining_zooms = list(sorted_zooms)
+    while remaining_zooms:
+        group_zooms: list[int] = []
+        group_meta: dict[int, list[TileMetadata]] = {}
+        group_jpeg = 0
+
+        while remaining_zooms:
+            z = remaining_zooms[0]
+            z_size = zoom_jpeg_sizes[z]
+
+            if z_size > target_jpeg_per_group and not group_zooms:
+                # Single zoom level exceeds target — split by latitude bands
+                n_bands = (z_size + target_jpeg_per_group - 1) // target_jpeg_per_group
+                tiles = tile_metadata[z]
+                # Sort by latitude (south to north) for band splitting
+                tiles_sorted = sorted(tiles, key=lambda t: t.lat_min)
+                band_size = (len(tiles_sorted) + n_bands - 1) // n_bands
+                for i in range(n_bands):
+                    band_tiles = tiles_sorted[i * band_size : (i + 1) * band_size]
+                    band_jpeg = sum(t.jpeg_size for t in band_tiles)
+                    raw_groups.append(([z], {z: band_tiles}, band_jpeg))
+                remaining_zooms.pop(0)
+                group_zooms = []  # signal we consumed this zoom already
+                break
+
+            if group_zooms and group_jpeg + z_size > target_jpeg_per_group:
+                # Adding this zoom would overflow — start a new group
+                break
+
+            group_zooms.append(z)
+            group_meta[z] = tile_metadata[z]
+            group_jpeg += z_size
+            remaining_zooms.pop(0)
+
+        if group_zooms:
+            raw_groups.append((group_zooms, group_meta, group_jpeg))
+
+    logger.info(
+        "Split %d zoom levels into %d GMP groups: %s",
+        len(sorted_zooms),
+        len(raw_groups),
+        ", ".join(
+            f"[{zs[0]}{'-' + str(zs[-1]) if len(zs) > 1 else ''}]: {sz / 1e9:.1f} GB"
+            for (zs, _, sz) in raw_groups
+        ),
+    )
+
+    # Create GMPGroup objects
+    result: list[GMPGroup] = []
+    base_map_id = img_file.map_id
+
+    for group_idx, (group_zooms, group_meta, group_jpeg_size) in enumerate(raw_groups):
+        # Generate subdivisions for this group
+        group_subdivisions = generate_subdivisions_from_metadata(
+            group_meta, sorted(group_zooms), bounds
+        )
+
+        # Build zoom levels for this group (from img_file's zoom_levels)
+        zoom_set = set(group_zooms)
+        group_zoom_levels = [
+            zl
+            for zl in img_file.zoom_levels
+            if (zl.source_zoom or zl.level_number) in zoom_set
+        ]
+
+        # Derive unique map_id
+        group_map_id = (base_map_id + group_idx + 1) & 0x7FFFFFFF
+
+        result.append(
+            GMPGroup(
+                map_id=group_map_id,
+                subdivisions=group_subdivisions,
+                zoom_levels=group_zoom_levels,
+                bounds_north=bounds.get("north", 0.0),
+                bounds_south=bounds.get("south", 0.0),
+                bounds_west=bounds.get("west", 0.0),
+                bounds_east=bounds.get("east", 0.0),
+            )
+        )
+        logger.info(
+            "  GMP group %d: zooms %s, %d tiles, %.1f GB, map_id=0x%08X",
+            group_idx,
+            f"{group_zooms[0]}-{group_zooms[-1]}"
+            if len(group_zooms) > 1
+            else str(group_zooms[0]),
+            sum(len(s.tile_entries) for s in group_subdivisions),
+            group_jpeg_size / 1e9,
+            group_map_id,
+        )
+
+    return result
 
 
 def _generate_map_id(layer_config: "LayerConfig") -> int:
@@ -565,7 +694,7 @@ class GarminImgExporter(BaseExporter):
         output_path: Path,
         *,
         source_crs: str = "EPSG:3857",
-        quality: int = 85,
+        quality: int | None = None,
         progress_callback: ExportProgressCallback | None = None,
     ) -> list[Path]:
         """Export tiles to Garmin IMG using streaming writer from metadata.
@@ -579,7 +708,7 @@ class GarminImgExporter(BaseExporter):
             layer_config: Layer configuration
             output_path: Path to output .img file
             source_crs: Source CRS for tile processing (default EPSG:3857)
-            quality: JPEG quality for warping (1-100, default 85)
+            quality: JPEG quality for warping (1-100), or None for passthrough
             progress_callback: Called with (stage, current, total) for progress
 
         Returns:
@@ -605,62 +734,68 @@ class GarminImgExporter(BaseExporter):
             len(tile_metadata),
         )
 
-        # 3. Generate spatial subdivisions from metadata
+        # 3. Determine bounds and tile processor
         bounds = {
             "north": img_file.bounds_north,
             "south": img_file.bounds_south,
             "west": img_file.bounds_west,
             "east": img_file.bounds_east,
         }
-        sorted_zooms = sorted(tile_metadata.keys())
-        subdivisions = generate_subdivisions_from_metadata(
-            tile_metadata,
-            sorted_zooms,
-            bounds,
-        )
+        from functools import partial
 
-        # 4. Build tile processor callable for streaming warping
         from ..processor.rasterio_warp import warp_tile_to_jpeg
 
         tile_processor = None
         if source_crs != "EPSG:4326":
-            tile_processor = warp_tile_to_jpeg
+            tile_processor = partial(warp_tile_to_jpeg, target_crs="EPSG:4326")
+
+        # 4. Check if we need multiple GMP subfiles (uint32 section size limit)
+        total_jpeg_size = sum(
+            t.jpeg_size for tiles in tile_metadata.values() for t in tiles
+        )
+        sorted_zooms = sorted(tile_metadata.keys())
+
+        # Rough estimate: JPEG is ~85% of total GMP size (rest is headers/RGN2/LBL)
+        estimated_gmp_size = total_jpeg_size / 0.85 if total_jpeg_size > 0 else 0
+
+        if estimated_gmp_size > MAX_GMP_SIZE:
+            # Split into multiple GMP groups by zoom level bands
+            gmp_groups = _split_into_gmp_groups(tile_metadata, img_file, bounds)
+            logger.info(
+                "Split %d tiles (%.1f GB) into %d GMP groups",
+                total_tiles,
+                total_jpeg_size / 1e9,
+                len(gmp_groups),
+            )
+        else:
+            # Single GMP — normal path
+            subdivisions = generate_subdivisions_from_metadata(
+                tile_metadata, sorted_zooms, bounds
+            )
+            gmp_groups = [
+                GMPGroup(
+                    map_id=img_file.map_id,
+                    subdivisions=subdivisions,
+                    zoom_levels=list(img_file.zoom_levels),
+                    bounds_north=bounds.get("north", 0.0),
+                    bounds_south=bounds.get("south", 0.0),
+                    bounds_west=bounds.get("west", 0.0),
+                    bounds_east=bounds.get("east", 0.0),
+                )
+            ]
 
         # 5. Write IMG file using streaming writer
-        output_files: list[Path] = []
+        writer = StreamingIMGWriter(output_path)
+        writer.write(
+            img_file,
+            gmp_groups,
+            tile_processor=tile_processor,
+            source_crs=source_crs,
+            jpeg_quality=quality,
+            progress_callback=progress_callback,
+        )
 
-        # Check if splitting is needed
-        computer = LayoutComputer(img_file, subdivisions=subdivisions)
-        layouts = computer.compute()
-        total_size = max(lay.end_offset for lay in layouts)
-
-        if total_size <= MAX_FILE_SIZE:
-            writer = StreamingIMGWriter(output_path)
-            writer.write(
-                img_file,
-                subdivisions,
-                tile_processor=tile_processor,
-                source_crs=source_crs,
-                jpeg_quality=quality,
-                progress_callback=progress_callback,
-            )
-            output_files.append(output_path)
-        else:
-            # Split into multiple files by zoom level
-            logger.info(
-                "Output would be %d bytes, splitting into multiple files",
-                total_size,
-            )
-            output_files = self._split_write_metadata(
-                img_file,
-                tile_metadata,
-                subdivisions,
-                output_path,
-                source_crs=source_crs,
-                quality=quality,
-                tile_processor=tile_processor,
-                progress_callback=progress_callback,
-            )
+        output_files = [output_path]
 
         logger.info("IMG export complete: %d file(s)", len(output_files))
         return output_files
@@ -983,135 +1118,5 @@ class GarminImgExporter(BaseExporter):
 
         if current_zooms:
             groups.append((list(current_zooms), dict(current_tiles)))
-
-        return groups
-
-    def _split_write_metadata(
-        self,
-        img_file: IMGFile,
-        tile_metadata: dict[int, list[TileMetadata]],
-        subdivisions: list[Subdivision],
-        output_path: Path,
-        *,
-        source_crs: str = "EPSG:3857",
-        quality: int = 85,
-        tile_processor=None,
-        progress_callback: ExportProgressCallback | None = None,
-    ) -> list[Path]:
-        """Split output across multiple IMG files using metadata-based streaming.
-
-        Strategy: assign zoom levels to files, ensuring each stays under 4 GB.
-        """
-        stem = output_path.stem
-        suffix = output_path.suffix
-        parent = output_path.parent
-
-        zoom_groups = self._compute_zoom_splits_metadata(img_file, tile_metadata)
-
-        bounds = {
-            "north": img_file.bounds_north,
-            "south": img_file.bounds_south,
-            "west": img_file.bounds_west,
-            "east": img_file.bounds_east,
-        }
-
-        output_files = []
-        for i, (zooms, meta_for_group) in enumerate(zoom_groups, start=1):
-            if len(zoom_groups) == 1:
-                file_path = output_path
-            else:
-                file_path = parent / f"{stem}_{i}{suffix}"
-
-            file_img = IMGFile(
-                header=IMGHeader(
-                    magic="DSKIMG",
-                    format_version=2,
-                    creation_date=datetime.now(),
-                    creator="GARMIN",
-                    map_name=img_file.header.map_name,
-                ),
-                draw_order=img_file.draw_order,
-                bounds_north=img_file.bounds_north,
-                bounds_south=img_file.bounds_south,
-                bounds_west=img_file.bounds_west,
-                bounds_east=img_file.bounds_east,
-                description=img_file.description,
-                copyright_string=img_file.copyright_string,
-                zoom_levels=[
-                    z
-                    for z in img_file.zoom_levels
-                    if (z.source_zoom or z.level_number) in zooms
-                ],
-            )
-
-            group_subdivs = generate_subdivisions_from_metadata(
-                meta_for_group,
-                zooms,
-                bounds,
-            )
-
-            writer = StreamingIMGWriter(file_path)
-            writer.write(
-                file_img,
-                group_subdivs,
-                tile_processor=tile_processor,
-                source_crs=source_crs,
-                jpeg_quality=quality,
-                progress_callback=progress_callback,
-            )
-            output_files.append(file_path)
-
-            logger.info("Wrote split file %d: %s", i, file_path)
-
-        return output_files
-
-    def _compute_zoom_splits_metadata(
-        self,
-        img_file: IMGFile,
-        tile_metadata: dict[int, list[TileMetadata]],
-    ) -> list[tuple[list[int], dict[int, list[TileMetadata]]]]:
-        """Compute how to split zoom levels across files using metadata sizes.
-
-        Returns list of (zoom_levels, metadata_dict) tuples, one per output file.
-        """
-        groups: list[tuple[list[int], dict[int, list[TileMetadata]]]] = []
-        current_zooms: list[int] = []
-        current_meta: dict[int, list[TileMetadata]] = {}
-
-        for zoom in sorted(tile_metadata.keys()):
-            trial_meta = {**current_meta, zoom: tile_metadata[zoom]}
-            trial_img = IMGFile(
-                header=img_file.header,
-                zoom_levels=[
-                    z
-                    for z in img_file.zoom_levels
-                    if (z.source_zoom or z.level_number) in list(current_zooms) + [zoom]
-                ],
-            )
-            bounds = {
-                "north": trial_img.bounds_north,
-                "south": trial_img.bounds_south,
-                "west": trial_img.bounds_west,
-                "east": trial_img.bounds_east,
-            }
-            trial_subdivs = generate_subdivisions_from_metadata(
-                trial_meta,
-                sorted(trial_meta.keys()),
-                bounds,
-            )
-            computer = LayoutComputer(trial_img, subdivisions=trial_subdivs)
-            layouts = computer.compute()
-            trial_size = max(lay.end_offset for lay in layouts)
-
-            if trial_size > MAX_FILE_SIZE and current_zooms:
-                groups.append((list(current_zooms), dict(current_meta)))
-                current_zooms = [zoom]
-                current_meta = {zoom: tile_metadata[zoom]}
-            else:
-                current_zooms.append(zoom)
-                current_meta = dict(trial_meta)
-
-        if current_zooms:
-            groups.append((list(current_zooms), dict(current_meta)))
 
         return groups

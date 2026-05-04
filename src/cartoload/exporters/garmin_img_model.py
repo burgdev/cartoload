@@ -467,6 +467,35 @@ class Subdivision:
 
 
 @dataclass
+class GMPGroup:
+    """A group of tiles assigned to one GMP subfile within a multi-GMP IMG file.
+
+    When total tile data exceeds MAX_GMP_SIZE (~1.8 GB), tiles are partitioned
+    into geographic latitude bands, each becoming a GMPGroup. Each group gets
+    its own GMP container with TRE/RGN/LBL/NET sub-headers within the single
+    IMG file.
+
+    GPXSee creates one VectorTile per unique FAT name, inserting each into
+    its R-tree for rendering — all tiles from all GMP groups render correctly.
+    """
+
+    # Unique identifier for this GMP subfile
+    map_id: int  # Derived from base map_id + group index
+
+    # Spatial subdivisions containing tile entries for this group
+    subdivisions: list[Subdivision] = field(default_factory=list)
+
+    # Zoom levels used by this group (same across all groups, but needed for layout)
+    zoom_levels: list[ZoomLevel] = field(default_factory=list)
+
+    # Full map bounds (same for all groups — ensures zoom level filtering works)
+    bounds_north: float = 0.0
+    bounds_south: float = 0.0
+    bounds_west: float = 0.0
+    bounds_east: float = 0.0
+
+
+@dataclass
 class IMGFile:
     """
     Top-level container representing a complete Garmin .img file.

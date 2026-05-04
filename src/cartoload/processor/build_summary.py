@@ -74,7 +74,7 @@ class BuildSummary:
 
 def _sample_tile_size(
     cached_paths: list[Path],
-    quality: int,
+    quality: int | None,
 ) -> int:
     """Sample cached tiles re-encoded at the target quality to estimate output size.
 
@@ -83,7 +83,7 @@ def _sample_tile_size(
 
     Args:
         cached_paths: Paths to cached tile files
-        quality: Target JPEG quality (1-100)
+        quality: Target JPEG quality (1-100), or None for passthrough (use original sizes)
 
     Returns:
         Average encoded tile size in bytes
@@ -95,14 +95,18 @@ def _sample_tile_size(
         if len(samples) >= _MAX_SAMPLES:
             break
         try:
-            img = Image.open(path)
-            if img.mode == "RGBA":
-                img = img.convert("RGB")
-            elif img.mode != "RGB":
-                img = img.convert("RGB")
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=quality)
-            samples.append(buf.tell())
+            if quality is None:
+                # Passthrough: use original file size
+                samples.append(path.stat().st_size)
+            else:
+                img = Image.open(path)
+                if img.mode == "RGBA":
+                    img = img.convert("RGB")
+                elif img.mode != "RGB":
+                    img = img.convert("RGB")
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=quality)
+                samples.append(buf.tell())
         except Exception:
             logger.debug("Failed to sample tile %s", path)
             continue
@@ -116,18 +120,19 @@ def _download_sample_tile(
     downloader: WMTSDownloader,
     coords: list[tuple[int, int]],
     zoom: int,
-    quality: int,
+    quality: int | None,
 ) -> int:
-    """Download a single tile and re-encode at target quality to estimate size.
+    """Download a single tile and estimate its output size.
 
-    Picks the middle tile from the grid, downloads it, re-encodes as JPEG
-    at the given quality, and returns the encoded size.
+    Picks the middle tile from the grid, downloads it, and returns
+    the encoded size. When quality is None (passthrough), uses the
+    raw file size. Otherwise re-encodes at the target quality.
 
     Args:
         downloader: WMTS downloader to use for downloading
         coords: Tile coordinate list for this zoom
         zoom: Zoom level
-        quality: Target JPEG quality (1-100)
+        quality: Target JPEG quality (1-100), or None for passthrough
 
     Returns:
         Encoded tile size in bytes, or fallback if download fails
@@ -151,16 +156,20 @@ def _download_sample_tile(
         if data is None:
             return _FALLBACK_TILE_SIZE_BYTES
 
+        # Also write to cache so the download wasn't wasted
+        cache_path = downloader._cache_path(x, y, zoom)
+        downloader._write_to_cache(cache_path, data)
+        downloader._write_world_file(cache_path, x, y, zoom)
+
+        if quality is None:
+            # Passthrough: use raw downloaded size
+            return len(data)
+
         img = Image.open(io.BytesIO(data))
         if img.mode != "RGB":
             img = img.convert("RGB")
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=quality)
-
-        # Also write to cache so the download wasn't wasted
-        cache_path = downloader._cache_path(x, y, zoom)
-        downloader._write_to_cache(cache_path, data)
-        downloader._write_world_file(cache_path, x, y, zoom)
 
         return buf.tell()
     except Exception:
@@ -172,16 +181,17 @@ def compute_build_summary(
     layer: LayerConfig,
     downloader: BaseDownloader,
     *,
-    quality: int = 85,
+    quality: int | None = None,
 ) -> BuildSummary:
     """Pre-compute tile grid and scan cache status for each zoom level.
 
     Samples cached tiles to estimate output size at the target JPEG quality.
+    When quality is None (passthrough), uses original tile sizes.
 
     Args:
         layer: Layer configuration with bounds and zoom levels
         downloader: Downloader instance for cache path resolution
-        quality: Target JPEG quality for size estimation
+        quality: Target JPEG quality for size estimation, or None for passthrough
 
     Returns:
         BuildSummary with per-zoom tile counts and quality-aware size estimate

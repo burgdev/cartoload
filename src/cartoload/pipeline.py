@@ -186,7 +186,7 @@ async def build_layer(
     force: bool = False,
     bounds_override: dict[str, float] | None = None,
     zoom_override: list[int] | None = None,
-    quality: int = 85,
+    quality: int | None = None,
     progress_callback: ProgressCallback | None = None,
     export_progress_callback: ExportProgressCallback | None = None,
     checkpoint: bool = True,
@@ -207,7 +207,7 @@ async def build_layer(
         force: If True, overwrite existing output files
         bounds_override: Override the layer bounds
         zoom_override: Override the layer zoom levels
-        quality: JPEG quality for tile encoding
+        quality: JPEG quality for tile encoding, or None for passthrough (no re-encoding)
         progress_callback: Called with (stage_id, description) at each stage
         export_progress_callback: Called with (stage, current, total) for export progress
         checkpoint: If True, write checkpoint after each zoom level for resume support

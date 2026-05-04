@@ -1,20 +1,20 @@
 """In-process tile reprojection using rasterio.
 
 Replaces the gdalwarp subprocess approach. Warps tiles from source CRS
-to EPSG:4326 using rasterio's reproject() and outputs JPEG bytes directly
-via MemoryFile — no TIFF intermediate on disk.
+to EPSG:4326 using rasterio's reproject() and outputs JPEG bytes via PIL.
 """
 
 from __future__ import annotations
 
+import io
 import logging
 import math
 from pathlib import Path
 
 import numpy as np
 import rasterio
+from PIL import Image
 from rasterio.crs import CRS
-from rasterio.io import MemoryFile
 from rasterio.transform import Affine
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 
@@ -173,19 +173,12 @@ def _warp_to_jpeg(
             resampling=Resampling.bilinear,
         )
 
-    # Encode to JPEG via MemoryFile
-    with MemoryFile() as memfile:
-        with memfile.open(
-            driver="JPEG",
-            width=dst_width,
-            height=dst_height,
-            count=3,
-            dtype="uint8",
-            crs=dst_crs,
-            transform=dst_transform,
-        ) as dst:
-            dst.write(dst_data)
-        jpeg_bytes = memfile.read()
+    # Encode to JPEG via PIL (rasterio's MemoryFile ignores JPEG_QUALITY)
+    dst_rgb = np.moveaxis(dst_data, 0, -1)  # (C, H, W) → (H, W, C)
+    img = Image.fromarray(dst_rgb)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=quality)
+    jpeg_bytes = buf.getvalue()
 
     # Compute bounds from tile coordinates (WGS84)
     bounds = compute_bounds_4326(x, y, zoom)

@@ -24,6 +24,7 @@ from cartoload.exporters.garmin_img import (
 )
 from cartoload.exporters.garmin_img_model import TileMetadata
 from cartoload.exporters.garmin_img_model import (
+    GMPGroup,
     IMGFile,
     IMGHeader,
     SubfileHeader,
@@ -32,7 +33,7 @@ from cartoload.exporters.garmin_img_model import (
     ZoomLevel,
 )
 from cartoload.exporters.garmin_img_writer import (
-    BLOCK_SIZE,
+    BLOCK_SIZE_DEFAULT,
     FAT_BLOCK_NUMBER,
     FAT_START,
     FAT_FLAG_ACTIVE,
@@ -49,6 +50,7 @@ from cartoload.exporters.garmin_img_writer import (
     _blocks_needed,
     _deg_to_garmin,
     _fat_blocks_for_data_blocks,
+    _reencode_jpeg,
 )
 
 
@@ -216,7 +218,7 @@ class TestFATEntrySerialization:
         layout = SubfileLayout(
             subfile_type=SubfileType.GMP,
             name="09C102B0",
-            start_offset=BLOCK_SIZE * 10,
+            start_offset=BLOCK_SIZE_DEFAULT * 10,
             data_size=12345,
         )
         buf = io.BytesIO()
@@ -239,7 +241,7 @@ class TestFATEntrySerialization:
         layout = SubfileLayout(
             subfile_type=SubfileType.GMP,
             name="09C102B0",
-            start_offset=BLOCK_SIZE * start_block,
+            start_offset=BLOCK_SIZE_DEFAULT * start_block,
             data_size=data_size,
         )
         buf = io.BytesIO()
@@ -264,8 +266,8 @@ class TestFATEntrySerialization:
         layout = SubfileLayout(
             subfile_type=SubfileType.GMP,
             name="TEST",
-            start_offset=BLOCK_SIZE * 10,
-            data_size=BLOCK_SIZE * 3,
+            start_offset=BLOCK_SIZE_DEFAULT * 10,
+            data_size=BLOCK_SIZE_DEFAULT * 3,
         )
         buf = io.BytesIO()
         FATWriter._write_subfile_entries(buf, layout)
@@ -287,7 +289,7 @@ class TestFATEntrySerialization:
         layout = SubfileLayout(
             subfile_type=SubfileType.MPS,
             name="MAPSOURC",
-            start_offset=BLOCK_SIZE * 100,
+            start_offset=BLOCK_SIZE_DEFAULT * 100,
             data_size=98,
         )
         buf = io.BytesIO()
@@ -302,11 +304,11 @@ class TestFATEntrySerialization:
     def test_multi_part_fat_entry(self):
         # Create a subfile needing >240 blocks (32KB each)
         # 300 blocks will need 2 FAT entries (240 blocks in first, 60 in second)
-        large_size = BLOCK_SIZE * 300
+        large_size = BLOCK_SIZE_DEFAULT * 300
         layout = SubfileLayout(
             subfile_type=SubfileType.GMP,
             name="BIGFILE",
-            start_offset=BLOCK_SIZE * 50,
+            start_offset=BLOCK_SIZE_DEFAULT * 50,
             data_size=large_size,
         )
         assert layout.num_fat_entries == 2
@@ -331,13 +333,13 @@ class TestFATEntrySerialization:
         gmp_layout = SubfileLayout(
             subfile_type=SubfileType.GMP,
             name="09C102B0",
-            start_offset=BLOCK_SIZE * 10,
-            data_size=BLOCK_SIZE * 5,
+            start_offset=BLOCK_SIZE_DEFAULT * 10,
+            data_size=BLOCK_SIZE_DEFAULT * 5,
         )
         mps_layout = SubfileLayout(
             subfile_type=SubfileType.MPS,
             name="MAPSOURC",
-            start_offset=BLOCK_SIZE * 20,
+            start_offset=BLOCK_SIZE_DEFAULT * 20,
             data_size=98,
         )
         layouts = [gmp_layout, mps_layout]
@@ -625,8 +627,8 @@ class TestCoordinateConversion:
 class TestFATBlockCalculation:
     def test_blocks_needed(self):
         assert _blocks_needed(1) == 1
-        assert _blocks_needed(BLOCK_SIZE) == 1
-        assert _blocks_needed(BLOCK_SIZE + 1) == 2
+        assert _blocks_needed(BLOCK_SIZE_DEFAULT) == 1
+        assert _blocks_needed(BLOCK_SIZE_DEFAULT + 1) == 2
 
     def test_fat_blocks_for_data_blocks(self):
         # 1 data block needs 1 FAT entry
@@ -1490,18 +1492,24 @@ def _make_tiles_with_bounds(
     lon_max: float = 9.0,
 ) -> list[tuple[bytes, tuple[float, float, float, float]]]:
     """Create tiles with geographic bounds spread across the given extent."""
+    from PIL import Image
+
     n_side = int(n_tiles**0.5)
     lat_step = (lat_max - lat_min) / n_side
     lon_step = (lon_max - lon_min) / n_side
     tiles = []
-    jpeg_stub = b"\xff\xd8\xff\xe0" + b"\x00" * 100
+    # Generate a real JPEG tile (valid for decode/re-encode)
+    arr = np.full((256, 256, 3), 128, dtype=np.uint8)
+    buf = io.BytesIO()
+    Image.fromarray(arr).save(buf, format="JPEG", quality=85)
+    jpeg_data = buf.getvalue()
     for r in range(n_side):
         for c in range(n_side):
             t_lat_min = lat_min + r * lat_step
             t_lat_max = t_lat_min + lat_step
             t_lon_min = lon_min + c * lon_step
             t_lon_max = t_lon_min + lon_step
-            tiles.append((jpeg_stub, (t_lat_min, t_lon_min, t_lat_max, t_lon_max)))
+            tiles.append((jpeg_data, (t_lat_min, t_lon_min, t_lat_max, t_lon_max)))
     return tiles
 
 
@@ -2779,9 +2787,20 @@ class TestStreamingWriterEquivalence:
 
         # Write with StreamingIMGWriter (no processor = raw file reads)
         streaming_output = tmp_path / "streaming.img"
+        gmp_groups = [
+            GMPGroup(
+                map_id=img_file.map_id,
+                subdivisions=subs_streaming,
+                zoom_levels=list(img_file.zoom_levels),
+                bounds_north=bounds["north"],
+                bounds_south=bounds["south"],
+                bounds_west=bounds["west"],
+                bounds_east=bounds["east"],
+            )
+        ]
         StreamingIMGWriter(streaming_output).write(
             img_file,
-            subs_streaming,
+            gmp_groups,
         )
 
         legacy_data = legacy_output.read_bytes()
@@ -2837,9 +2856,20 @@ class TestStreamingWriterEquivalence:
 
         # Write with streaming
         streaming_output = tmp_path / "streaming_multi.img"
+        gmp_groups = [
+            GMPGroup(
+                map_id=img_file.map_id,
+                subdivisions=subs_streaming,
+                zoom_levels=list(img_file.zoom_levels),
+                bounds_north=bounds["north"],
+                bounds_south=bounds["south"],
+                bounds_west=bounds["west"],
+                bounds_east=bounds["east"],
+            )
+        ]
         StreamingIMGWriter(streaming_output).write(
             img_file,
-            subs_streaming,
+            gmp_groups,
         )
 
         legacy_data = legacy_output.read_bytes()
@@ -2852,3 +2882,191 @@ class TestStreamingWriterEquivalence:
             f"Streaming multi-zoom output differs at first differing byte: "
             f"{next(i for i, (a, b) in enumerate(zip(legacy_data, streaming_data)) if a != b)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Multi-GMP subfile support
+# ---------------------------------------------------------------------------
+
+
+def _make_tile_metadata(
+    n_tiles: int, zoom: int, lat_base: float = 46.5, lon_base: float = 8.0
+) -> list[TileMetadata]:
+    """Create n_tiles TileMetadata entries arranged in a grid."""
+    tiles = []
+    side = int(n_tiles**0.5) + 1
+    for i in range(n_tiles):
+        row, col = divmod(i, side)
+        lat_min = lat_base + row * 0.001
+        lon_min = lon_base + col * 0.001
+        tiles.append(
+            TileMetadata(
+                x=col,
+                y=row,
+                zoom=zoom,
+                lat_min=lat_min,
+                lon_min=lon_min,
+                lat_max=lat_min + 0.001,
+                lon_max=lon_min + 0.001,
+                jpeg_size=2048,  # 2 KB per tile
+            )
+        )
+    return tiles
+
+
+class TestMultiGMPWriter:
+    """Tests for multi-IMG file output (separate IMG per geographic band)."""
+
+    def test_single_img_when_data_fits(self, tmp_path):
+        """When data fits in one IMG, only one file is produced."""
+        img_file = _make_img_file()
+        img_file.zoom_levels = [
+            ZoomLevel(level_number=23, zoom_code=1, source_zoom=12),
+        ]
+
+        meta = {12: _make_tile_metadata(5, zoom=12)}
+        bounds = {"north": 47.5, "south": 46.5, "west": 8.0, "east": 9.0}
+
+        output = tmp_path / "single.img"
+        writer = StreamingIMGWriter(output)
+        subdivisions = generate_subdivisions_from_metadata(meta, [12], bounds)
+        gmp_groups = [
+            GMPGroup(
+                map_id=img_file.map_id,
+                subdivisions=subdivisions,
+                zoom_levels=list(img_file.zoom_levels),
+                bounds_north=bounds["north"],
+                bounds_south=bounds["south"],
+                bounds_west=bounds["west"],
+                bounds_east=bounds["east"],
+            )
+        ]
+        writer.write(img_file, gmp_groups)
+
+        assert output.exists()
+        data = output.read_bytes()
+        assert data[0x10:0x16] == b"DSKIMG"
+
+    def test_single_img_file_size_matches_layout(self, tmp_path):
+        """Output file size matches the computed layout."""
+        img_file = _make_img_file()
+        img_file.zoom_levels = [
+            ZoomLevel(level_number=23, zoom_code=1, source_zoom=12),
+        ]
+
+        meta = {12: _make_tile_metadata(4, zoom=12)}
+        bounds = {"north": 47.5, "south": 46.5, "west": 8.0, "east": 9.0}
+        subdivisions = generate_subdivisions_from_metadata(meta, [12], bounds)
+
+        computer = LayoutComputer(img_file, subdivisions=subdivisions)
+        layouts = computer.compute()
+        expected_size = max(lay.end_offset for lay in layouts)
+
+        output = tmp_path / "sized.img"
+        writer = StreamingIMGWriter(output)
+        gmp_groups = [
+            GMPGroup(
+                map_id=img_file.map_id,
+                subdivisions=subdivisions,
+                zoom_levels=list(img_file.zoom_levels),
+                bounds_north=bounds["north"],
+                bounds_south=bounds["south"],
+                bounds_west=bounds["west"],
+                bounds_east=bounds["east"],
+            )
+        ]
+        writer.write(img_file, gmp_groups)
+
+        actual_size = output.stat().st_size
+        assert actual_size == expected_size, (
+            f"File size {actual_size} != expected {expected_size}"
+        )
+
+
+class TestReencodeJpeg:
+    """Tests for the _reencode_jpeg() helper."""
+
+    @staticmethod
+    def _make_jpeg() -> bytes:
+        """Create a real JPEG for testing."""
+        from PIL import Image
+
+        arr = np.random.randint(0, 255, (256, 256, 3), dtype=np.uint8)
+        img = Image.fromarray(arr)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        return buf.getvalue()
+
+    def test_reencode_lower_quality_produces_smaller_output(self):
+        """Re-encoding at lower quality should produce smaller bytes."""
+        jpeg = self._make_jpeg()
+        result_85 = _reencode_jpeg(jpeg, 85)
+        result_50 = _reencode_jpeg(jpeg, 50)
+        result_20 = _reencode_jpeg(jpeg, 20)
+        assert len(result_20) < len(result_50) < len(result_85)
+
+    def test_reencode_produces_valid_jpeg(self):
+        """Re-encoded output should be valid JPEG."""
+        from PIL import Image
+
+        jpeg = self._make_jpeg()
+        result = _reencode_jpeg(jpeg, 75)
+        img = Image.open(io.BytesIO(result))
+        assert img.size == (256, 256)
+        assert img.format == "JPEG"
+
+    def test_reencode_different_quality_different_sizes(self):
+        """Different quality levels should produce different byte sizes."""
+        jpeg = self._make_jpeg()
+        sizes = set()
+        for q in [20, 40, 60, 80, 95]:
+            result = _reencode_jpeg(jpeg, q)
+            sizes.add(len(result))
+        # All 5 quality levels should produce at least 3 distinct sizes
+        assert len(sizes) >= 3
+
+
+class TestWarpTileQuality:
+    """Tests for warp_tile_to_jpeg quality parameter."""
+
+    @staticmethod
+    def _make_3857_jpeg(
+        tmp_path: Path, x: int = 34178, y: int = 23118, zoom: int = 16
+    ) -> Path:
+        """Create a small EPSG:3857 JPEG tile for warp testing."""
+        from PIL import Image
+
+        arr = np.random.randint(0, 255, (256, 256, 3), dtype=np.uint8)
+        img = Image.fromarray(arr)
+        p = tmp_path / f"{x}_{y}_{zoom}.jpeg"
+        img.save(p, format="JPEG", quality=85)
+        return p
+
+    def test_quality_affects_warp_output_size(self, tmp_path):
+        """Different quality levels should produce different sized warp output."""
+        from cartoload.processor.rasterio_warp import warp_tile_to_jpeg
+
+        tile_path = self._make_3857_jpeg(tmp_path)
+
+        result_85 = warp_tile_to_jpeg(
+            tile_path, 34178, 23118, 16, "EPSG:3857", quality=85
+        )
+        result_20 = warp_tile_to_jpeg(
+            tile_path, 34178, 23118, 16, "EPSG:3857", quality=20
+        )
+
+        assert result_85 is not None
+        assert result_20 is not None
+        assert len(result_20[0]) < len(result_85[0])
+
+    def test_warp_output_is_valid_jpeg(self, tmp_path):
+        """Warped output should be valid JPEG regardless of quality."""
+        from PIL import Image
+        from cartoload.processor.rasterio_warp import warp_tile_to_jpeg
+
+        tile_path = self._make_3857_jpeg(tmp_path)
+        result = warp_tile_to_jpeg(tile_path, 34178, 23118, 16, "EPSG:3857", quality=50)
+
+        assert result is not None
+        img = Image.open(io.BytesIO(result[0]))
+        assert img.format == "JPEG"

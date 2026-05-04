@@ -44,6 +44,7 @@ import numpy as np
 from PIL import Image
 
 from .garmin_img_model import (
+    GMPGroup,
     IMGFile,
     IMGHeader,
     Subdivision,
@@ -66,7 +67,7 @@ TileData = Union[bytes, tuple[bytes, tuple[float, float, float, float]]]
 CompressedTiles = dict[int, list[TileData]]
 
 # Garmin IMG constants
-BLOCK_SIZE = 32768  # 32 KB data blocks
+BLOCK_SIZE_DEFAULT = 32768  # 32 KB data blocks (e2=6)
 HEADER_SIZE = 512  # Main header is 512 bytes
 PHYSICAL_BLOCK_SIZE = 512  # FAT/header blocks are 512 bytes
 FAT_BLOCK_NUMBER = 8  # FAT starts at physical block 8 (= 8*512 = 0x1000)
@@ -85,9 +86,9 @@ FAT_FLAG_SPECIAL = 0x03  # Special directory entry
 
 # Block size exponents: BLOCK_SIZE = 512 * 2^E2, where 512 = 2^9
 BLOCK_SIZE_EXP_E1 = 0x09  # Always 0x09 (512 bytes base)
-BLOCK_SIZE_EXP_E2 = 0x06  # 512 * 2^6 = 32768
+BLOCK_SIZE_EXP_E2_DEFAULT = 0x06  # 512 * 2^6 = 32768 (default, for maps under ~2 GB)
 
-# GMP subfile internal structure sizes
+# Subfile header sizes
 GMP_CONTAINER_HEADER_SIZE = 53  # "GARMIN GMP" container header
 GMP_COMMON_HEADER_SIZE = (
     21  # Common sub-header: len(2) + type(10) + ver(1) + lock(1) + date(7)
@@ -98,6 +99,37 @@ LBL_HEADER_LENGTH = 596  # LBL sub-header length
 NET_HEADER_LENGTH = 100  # NET sub-header length
 TILE_INDEX_ENTRY_SIZE = 4  # Tile index: one uint32 per tile
 MPS_SUBFILE_SIZE = 98
+
+# Maximum size of a single GMP subfile in bytes.
+# Limited by uint32 section size fields (RGN2, LBL28, LBL29 offsets/sizes).
+# Keep conservative to leave room for headers and metadata.
+MAX_GMP_SIZE = 3_500_000_000  # ~3.5 GB per GMP
+
+
+def _compute_block_exp_e2(total_data_size: int) -> int:
+    """Compute the minimum block size exponent e2 for the total data size.
+
+    Block numbers in the FAT are uint16, so max addressable bytes =
+    65535 * (512 << e2). We need e2 large enough that the total file size
+    fits within this range.
+
+    Returns the minimum e2 value (0-12) that can address the given size.
+    """
+    # 65535 blocks * block_size must >= total_data_size
+    # block_size = 512 << e2
+    # So: 65535 * 512 * 2^e2 >= total_data_size
+    # => 2^e2 >= total_data_size / (65535 * 512)
+    # => e2 >= ceil(log2(total_data_size / (65535 * 512)))
+    base_addressable = 65535 * 512  # = 33,553,920 bytes per e2 increment
+    if total_data_size <= base_addressable:
+        return BLOCK_SIZE_EXP_E2_DEFAULT  # Use default for small maps
+
+    import math
+
+    ratio = total_data_size / base_addressable
+    e2 = max(BLOCK_SIZE_EXP_E2_DEFAULT, math.ceil(math.log2(ratio)))
+    # Cap at e2=12 (2MB blocks) — should handle maps up to ~128 GB
+    return min(e2, 12)
 
 
 def _get_worker_count() -> int:
@@ -123,7 +155,7 @@ def _warp_tile_worker(
     zoom: int,
     source_crs: str,
     target_crs: str,
-    quality: int,
+    quality: int | None,
 ) -> tuple[int, int, int, bytes | None]:
     """Top-level worker for parallel tile warping via ProcessPoolExecutor.
 
@@ -134,6 +166,10 @@ def _warp_tile_worker(
 
     if not source_path.exists():
         return (x, y, zoom, None)
+
+    if quality is None:
+        # Passthrough: read raw file bytes without re-encoding
+        return (x, y, zoom, source_path.read_bytes())
 
     result = warp_tile_to_jpeg(source_path, x, y, zoom, source_crs, target_crs, quality)
     if result is not None:
@@ -226,14 +262,14 @@ def _encode_garmin_date_7(dt: datetime) -> bytes:
     )
 
 
-def _blocks_needed(byte_count: int) -> int:
-    """Calculate number of 32KB blocks needed for given byte count."""
-    return math.ceil(byte_count / BLOCK_SIZE)
+def _blocks_needed(byte_count: int, block_size: int = BLOCK_SIZE_DEFAULT) -> int:
+    """Calculate number of blocks needed for given byte count."""
+    return math.ceil(byte_count / block_size)
 
 
-def _align_to_block(size: int) -> int:
+def _align_to_block(size: int, block_size: int = BLOCK_SIZE_DEFAULT) -> int:
     """Align a byte count up to the next block boundary."""
-    return _blocks_needed(size) * BLOCK_SIZE
+    return _blocks_needed(size, block_size) * block_size
 
 
 def _fat_blocks_for_data_blocks(data_block_count: int) -> int:
@@ -255,16 +291,17 @@ class SubfileLayout:
         name: str,
         start_offset: int,
         data_size: int,
+        block_size: int = BLOCK_SIZE_DEFAULT,
     ):
         self.subfile_type = subfile_type
         self.name = name
         self.start_offset = start_offset
         self.data_size = data_size
-        self.aligned_size = _align_to_block(data_size)
-        # FAT block chains use 32KB logical blocks, not 512-byte physical blocks
-        self.num_data_blocks = _blocks_needed(data_size)  # 32KB blocks
+        self.block_size = block_size
+        self.aligned_size = _align_to_block(data_size, block_size)
+        self.num_data_blocks = _blocks_needed(data_size, block_size)
         self.num_fat_entries = _fat_blocks_for_data_blocks(self.num_data_blocks)
-        self.start_block = start_offset // BLOCK_SIZE  # 32KB logical block number
+        self.start_block = start_offset // block_size
 
     @property
     def end_offset(self) -> int:
@@ -288,53 +325,169 @@ class LayoutComputer:
         img_file: IMGFile,
         compressed_tiles: CompressedTiles | None = None,
         subdivisions: list[Subdivision] | None = None,
+        jpeg_quality: int | None = None,
     ):
         self.img_file = img_file
         self.compressed_tiles: CompressedTiles = compressed_tiles or {}
         self.subdivisions = subdivisions
+        self.jpeg_quality = jpeg_quality
         self.layouts: list[SubfileLayout] = []
+        self.block_size = BLOCK_SIZE_DEFAULT
+        self.block_exp_e2 = BLOCK_SIZE_EXP_E2_DEFAULT
 
     def compute(self) -> list[SubfileLayout]:
         """Compute layout for all subfiles and return ordered list."""
         self.layouts = []
 
-        # First compute the subfile sizes to know how many FAT entries we need
-        gmp_size = self._compute_gmp_size()
+        # Compute GMP data size first (before knowing block size)
+        gmp_size = self._compute_gmp_size_for(
+            subdivisions=self.subdivisions,
+            compressed_tiles=self.compressed_tiles,
+            img_file=self.img_file,
+            jpeg_quality=self.jpeg_quality,
+        )
 
-        # Calculate FAT entries needed
-        gmp_data_blocks = _blocks_needed(gmp_size)
-        mps_data_blocks = _blocks_needed(MPS_SUBFILE_SIZE)
+        # Estimate total file size to determine block size exponent
+        # Rough estimate: GMP + MPS + FAT overhead + header
+        estimated_total = gmp_size + MPS_SUBFILE_SIZE + FAT_START + 1024 * 1024
+        self.block_exp_e2 = _compute_block_exp_e2(estimated_total)
+        self.block_size = 512 << self.block_exp_e2
+        logger.info(
+            f"Block size: {self.block_size:,} bytes (e2={self.block_exp_e2}), "
+            f"estimated total: {estimated_total:,} bytes"
+        )
 
-        # +1 for special directory FAT entry
+        # Calculate FAT entries needed (using dynamic block size)
+        gmp_data_blocks = _blocks_needed(gmp_size, self.block_size)
+        mps_data_blocks = _blocks_needed(MPS_SUBFILE_SIZE, self.block_size)
+
         total_fat_entries = (
-            1  # special directory entry
+            1
             + _fat_blocks_for_data_blocks(gmp_data_blocks)
             + _fat_blocks_for_data_blocks(mps_data_blocks)
         )
         fat_region_size = total_fat_entries * PHYSICAL_BLOCK_SIZE
-
-        # Data starts after FAT region (aligned to BLOCK_SIZE)
-        data_start = _align_to_block(FAT_START + fat_region_size)
+        data_start = _align_to_block(FAT_START + fat_region_size, self.block_size)
 
         current_offset = data_start
 
-        # GMP subfile — name is the map ID as 8-char uppercase hex (e.g., "09C102B0")
         gmp_name = f"{self.img_file.map_id:08X}"[:8]
-        gmp_layout = SubfileLayout(SubfileType.GMP, gmp_name, current_offset, gmp_size)
+        gmp_layout = SubfileLayout(
+            SubfileType.GMP, gmp_name, current_offset, gmp_size, self.block_size
+        )
         self.layouts.append(gmp_layout)
         current_offset = gmp_layout.end_offset
 
-        # MPS subfile
         mps_layout = SubfileLayout(
-            SubfileType.MPS, "MAPSOURC", current_offset, MPS_SUBFILE_SIZE
+            SubfileType.MPS,
+            "MAPSOURC",
+            current_offset,
+            MPS_SUBFILE_SIZE,
+            self.block_size,
         )
         self.layouts.append(mps_layout)
         current_offset = mps_layout.end_offset
 
         return self.layouts
 
-    def _compute_gmp_size(self) -> int:
-        """Compute the total size of the GMP subfile.
+    def compute_multi_gmp(
+        self,
+        gmp_groups: list[GMPGroup],
+    ) -> list[SubfileLayout]:
+        """Compute layout for multiple GMP subfiles + one MPS within a single IMG.
+
+        Each GMPGroup gets its own GMP subfile with a unique FAT name derived
+        from the group's map_id. All GMPs share the same block size and IMG header.
+
+        Args:
+            gmp_groups: List of GMPGroup objects, each with subdivisions and zoom_levels.
+
+        Returns:
+            Ordered list of SubfileLayout objects (multiple GMPs + one MPS).
+        """
+
+        self.layouts = []
+
+        # Compute size of each GMP subfile
+        gmp_sizes: list[int] = []
+        for group in gmp_groups:
+            # Create a temporary IMGFile for this group to compute its GMP size
+            group_img = IMGFile(
+                header=self.img_file.header,
+                map_id=group.map_id,
+                copyright_string=self.img_file.copyright_string,
+                zoom_levels=group.zoom_levels,
+                bounds_north=group.bounds_north,
+                bounds_south=group.bounds_south,
+                bounds_west=group.bounds_west,
+                bounds_east=group.bounds_east,
+            )
+            gmp_size = self._compute_gmp_size_for(
+                subdivisions=group.subdivisions,
+                compressed_tiles={},
+                img_file=group_img,
+                jpeg_quality=self.jpeg_quality,
+            )
+            gmp_sizes.append(gmp_size)
+
+        # Estimate total file size for block size exponent
+        total_data = sum(gmp_sizes) + MPS_SUBFILE_SIZE + FAT_START + 1024 * 1024
+        self.block_exp_e2 = _compute_block_exp_e2(total_data)
+        self.block_size = 512 << self.block_exp_e2
+        logger.info(
+            f"Block size: {self.block_size:,} bytes (e2={self.block_exp_e2}), "
+            f"estimated total: {total_data:,} bytes ({total_data / 1e9:.1f} GB)"
+        )
+
+        # Calculate total FAT entries (1 special + N GMPs + 1 MPS)
+        total_fat_entries = 1  # special directory entry
+        for gmp_size in gmp_sizes:
+            total_fat_entries += _fat_blocks_for_data_blocks(
+                _blocks_needed(gmp_size, self.block_size)
+            )
+        total_fat_entries += _fat_blocks_for_data_blocks(
+            _blocks_needed(MPS_SUBFILE_SIZE, self.block_size)
+        )
+
+        fat_region_size = total_fat_entries * PHYSICAL_BLOCK_SIZE
+        data_start = _align_to_block(FAT_START + fat_region_size, self.block_size)
+
+        current_offset = data_start
+
+        # Create layout for each GMP subfile
+        for group_idx, (group, gmp_size) in enumerate(zip(gmp_groups, gmp_sizes)):
+            gmp_name = f"{group.map_id:08X}"[:8]
+            gmp_layout = SubfileLayout(
+                SubfileType.GMP, gmp_name, current_offset, gmp_size, self.block_size
+            )
+            self.layouts.append(gmp_layout)
+            current_offset = gmp_layout.end_offset
+            logger.info(
+                f"  GMP layout {group_idx}: name={gmp_name}, "
+                f"size={gmp_size:,} bytes ({gmp_size / 1e9:.1f} GB), "
+                f"FAT entries={gmp_layout.num_fat_entries}"
+            )
+
+        # MPS subfile (one shared MPS at the end)
+        mps_layout = SubfileLayout(
+            SubfileType.MPS,
+            "MAPSOURC",
+            current_offset,
+            MPS_SUBFILE_SIZE,
+            self.block_size,
+        )
+        self.layouts.append(mps_layout)
+
+        return self.layouts
+
+    @staticmethod
+    def _compute_gmp_size_for(
+        subdivisions: list[Subdivision] | None,
+        compressed_tiles: CompressedTiles,
+        img_file: IMGFile,
+        jpeg_quality: int | None = None,
+    ) -> int:
+        """Compute the total size of a single GMP subfile.
 
         Layout:
           GMP container header (53 bytes)
@@ -351,20 +504,19 @@ class LayoutComputer:
           LBL29 section (image storage - concatenated JPEG files)
         """
         # Compute total tiles from subdivisions (if available) or compressed_tiles
-        if self.subdivisions is not None and len(self.subdivisions) > 0:
-            total_tiles = sum(len(sub.tile_entries) for sub in self.subdivisions)
-            # Validate against compressed_tiles if both have data
-            ct_count = sum(len(tiles) for tiles in self.compressed_tiles.values())
+        if subdivisions is not None and len(subdivisions) > 0:
+            total_tiles = sum(len(sub.tile_entries) for sub in subdivisions)
+            ct_count = sum(len(tiles) for tiles in compressed_tiles.values())
             if ct_count > 0 and total_tiles != ct_count:
                 raise ValueError(
                     f"Subdivision tile count ({total_tiles}) != "
                     f"compressed_tiles count ({ct_count})"
                 )
         else:
-            total_tiles = sum(len(tiles) for tiles in self.compressed_tiles.values())
+            total_tiles = sum(len(tiles) for tiles in compressed_tiles.values())
 
         # Container header + copyright strings
-        copyright_str = self.img_file.copyright_string or "Copyright GARMIN."
+        copyright_str = img_file.copyright_string or "Copyright GARMIN."
         copyright_bytes = copyright_str.encode("cp1252") + b"\x00"
         # Pad to align to TRE start (TRE follows copyright strings)
         # We need copyright to end at a position where TRE can start
@@ -386,15 +538,15 @@ class LayoutComputer:
         net_section = NET_HEADER_LENGTH
 
         # TRE data sections
-        n_zoom_levels = len(self.img_file.zoom_levels)
+        n_zoom_levels = len(img_file.zoom_levels)
         map_levels_size = n_zoom_levels * 4  # 4 bytes per zoom level
 
         # Subdivisions: non-last levels use 16-byte records, last level uses 14-byte
         # Plus 4 trailing bytes (total RGN2 extent marker)
-        n_subdivisions = len(self.subdivisions) if self.subdivisions else n_zoom_levels
-        if self.subdivisions:
+        n_subdivisions = len(subdivisions) if subdivisions else n_zoom_levels
+        if subdivisions:
             by_level: dict[int, int] = {}
-            for sub in self.subdivisions:
+            for sub in subdivisions:
                 by_level[sub.zoom_level_index] = (
                     by_level.get(sub.zoom_level_index, 0) + 1
                 )
@@ -408,7 +560,7 @@ class LayoutComputer:
         tre_data = 6 + subdiv_size + map_levels_size  # copyright + subdiv + map_levels
 
         # TRE extended sections (needed for GMT bitmap detection)
-        if self.subdivisions:
+        if subdivisions:
             tre7_rec_size = 5  # SwissTopo format: uint32 offset + flag byte
             tre7_size = (n_subdivisions + 1) * tre7_rec_size  # +1 sentinel
         else:
@@ -432,13 +584,18 @@ class LayoutComputer:
         lbl28_size = total_tiles * 4  # uint32 offset per tile
 
         # LBL29 section (image storage - JPEG tile data)
+        # When jpeg_quality is set, estimate the re-encoded size
+        quality_ratio = 1.0
+        if subdivisions and jpeg_quality is not None:
+            quality_ratio = _estimate_quality_ratio(subdivisions, jpeg_quality)
+
         lbl29_size = 0
-        if self.subdivisions:
+        if subdivisions:
             # When using subdivisions, tiles are stored in subdivision objects
-            for sub in self.subdivisions:
+            for sub in subdivisions:
                 for tile_entry in sub.tile_entries:
                     if isinstance(tile_entry, TileMetadata):
-                        lbl29_size += tile_entry.jpeg_size
+                        lbl29_size += int(tile_entry.jpeg_size * quality_ratio)
                     else:
                         jpeg_data = (
                             tile_entry[0]
@@ -448,10 +605,10 @@ class LayoutComputer:
                         lbl29_size += len(jpeg_data)
         else:
             # Legacy: tiles are in compressed_tiles dict
-            for tiles in self.compressed_tiles.values():
+            for tiles in compressed_tiles.values():
                 for tile_entry in tiles:
                     if isinstance(tile_entry, TileMetadata):
-                        lbl29_size += tile_entry.jpeg_size
+                        lbl29_size += int(tile_entry.jpeg_size * quality_ratio)
                     else:
                         jpeg_size = (
                             len(tile_entry[0])
@@ -459,6 +616,9 @@ class LayoutComputer:
                             else len(tile_entry)
                         )
                         lbl29_size += jpeg_size
+
+        # Clamp to uint32 max — LBL header stores this as uint32
+        lbl29_size = min(lbl29_size, 0xFFFFFFFF)
 
         size = (
             GMP_CONTAINER_HEADER_SIZE
@@ -488,8 +648,10 @@ class IMGHeaderWriter:
         f: io.BufferedIOBase,
         header: IMGHeader,
         layouts: list[SubfileLayout] | None = None,
+        block_exp_e2: int = BLOCK_SIZE_EXP_E2_DEFAULT,
     ) -> None:
         """Write the 512-byte IMG header at current file position."""
+        block_size = 512 << block_exp_e2
         buf = bytearray(HEADER_SIZE)
 
         # Offset 0x00: XOR byte
@@ -544,11 +706,11 @@ class IMGHeaderWriter:
         buf[0x61] = BLOCK_SIZE_EXP_E1
 
         # Offset 0x62: Block size exponent E2
-        buf[0x62] = BLOCK_SIZE_EXP_E2
+        buf[0x62] = block_exp_e2
 
         # Offset 0x63-0x64: Total block count (or 0xFFFF if overflow)
         if layouts:
-            total_blocks = max(lay.end_offset for lay in layouts) // BLOCK_SIZE
+            total_blocks = max(lay.end_offset for lay in layouts) // block_size
             if total_blocks <= 0xFFFE:
                 struct.pack_into("<H", buf, 0x63, total_blocks)
             else:
@@ -642,8 +804,10 @@ class FATWriter:
         # Size: total header+FAT region size
         if layouts:
             data_start = layouts[0].start_offset
+            block_size = layouts[0].block_size
         else:
-            data_start = BLOCK_SIZE  # minimum
+            block_size = BLOCK_SIZE_DEFAULT
+            data_start = block_size  # minimum
         struct.pack_into("<I", entry, 0x0C, data_start)
 
         # Flag2: special directory
@@ -654,10 +818,9 @@ class FATWriter:
 
         # Reserved: zeros (0x12-0x1F already zero)
 
-        # Block sequence: cover blocks 0 through (data_start/BLOCK_SIZE - 1)
-        # These are the 32KB logical blocks occupied by header + FAT region
-        # FAT uses 32KB blocks for the block list, not 512-byte physical blocks!
-        header_blocks = data_start // BLOCK_SIZE
+        # Block sequence: cover blocks 0 through (data_start/block_size - 1)
+        # These are the logical blocks occupied by header + FAT region
+        header_blocks = data_start // block_size
         num_to_write = min(header_blocks, FAT_SLOTS_PER_ENTRY)
         for i in range(num_to_write):
             struct.pack_into("<H", entry, FAT_BLOCKS_TABLE_START + i * 2, i)
@@ -680,6 +843,13 @@ class FATWriter:
         num_fat_entries = layout.num_fat_entries
         start_block = layout.start_block
 
+        if num_fat_entries > 256:
+            raise ValueError(
+                f"GMP subfile '{layout.name}' needs {num_fat_entries} FAT entries "
+                f"(max 256). Data size {layout.data_size:,} bytes exceeds the "
+                f"FAT part number limit. Split into multiple GMP subfiles."
+            )
+
         for part in range(num_fat_entries):
             entry = bytearray(PHYSICAL_BLOCK_SIZE)
 
@@ -694,9 +864,10 @@ class FATWriter:
             type_str = layout.subfile_type.value
             entry[0x09:0x0C] = type_str.encode("ascii")
 
-            # Size: only in part 0
+            # Size: only in part 0 (clamp to uint32 max for large subfiles;
+            # GPXSee uses block chain for actual data access, not this field)
             if part == 0:
-                struct.pack_into("<I", entry, 0x0C, layout.data_size)
+                struct.pack_into("<I", entry, 0x0C, min(layout.data_size, 0xFFFFFFFF))
 
             # Flag2: normal subfile
             entry[0x10] = 0x00
@@ -907,6 +1078,8 @@ class GMPWriter:
                         if isinstance(tile_entry, tuple)
                         else len(tile_entry)
                     )
+        # Clamp to uint32 max — LBL header stores this as uint32
+        lbl29_size = min(lbl29_size, 0xFFFFFFFF)
         pos += lbl29_size
 
         # --- Fill TRE1 map levels data ---
@@ -970,13 +1143,9 @@ class GMPWriter:
                 rec_size = 14 if is_last_level else 16
                 shift = zoom_shifts.get(sub.zoom_level_index, 0)
 
-                # RGN offset (3 bytes LE)
-                rgn_off_bytes = sub.rgn2_offset.to_bytes(3, "little")
-                subdiv_data[off] = rgn_off_bytes[0]
-                subdiv_data[off + 1] = rgn_off_bytes[1]
-                subdiv_data[off + 2] = rgn_off_bytes[2]
-                # Object types: 0x00 (no traditional vector objects for raster)
-                subdiv_data[off + 3] = 0x00
+                # RGN offset (4 bytes LE uint32, lower 28 bits = offset)
+                rgn2_offset_u32 = sub.rgn2_offset & 0x0FFFFFFF
+                struct.pack_into("<I", subdiv_data, off, rgn2_offset_u32)
                 # Center longitude (3-byte signed map units)
                 lon_mu = int(sub.center_lon * (2**24) / 360)
                 subdiv_data[off + 4 : off + 7] = _put3s(lon_mu)
@@ -1026,11 +1195,9 @@ class GMPWriter:
                 shift = max(0, 24 - zoom.level_number)
                 mask = (1 << shift) - 1
 
-                rgn_off_bytes = rgn_tile_offset.to_bytes(3, "little")
-                subdiv_data[off] = rgn_off_bytes[0]
-                subdiv_data[off + 1] = rgn_off_bytes[1]
-                subdiv_data[off + 2] = rgn_off_bytes[2]
-                subdiv_data[off + 3] = 0x00
+                # RGN offset (4 bytes LE uint32, lower 28 bits = offset)
+                rgn2_offset_u32 = rgn_tile_offset & 0x0FFFFFFF
+                struct.pack_into("<I", subdiv_data, off, rgn2_offset_u32)
                 subdiv_data[off + 4 : off + 7] = _put3s(map_center_lon)
                 subdiv_data[off + 7 : off + 10] = _put3s(map_center_lat)
                 # Width: encoded extent with bit 15 for has-children
@@ -1955,97 +2122,211 @@ class StreamingIMGWriter:
     def write(
         self,
         img_file: IMGFile,
-        subdivisions: list[Subdivision],
-        tile_processor: Callable[[Path, int, int, int, str], ProcessedTile | None]
+        gmp_groups: list[GMPGroup],
+        tile_processor: Callable[[Path, int, int, int, str, int], ProcessedTile | None]
         | None = None,
         source_crs: str = "EPSG:3857",
-        jpeg_quality: int = 85,
+        jpeg_quality: int | None = None,
         progress_callback: Callable[[str, int, int], None] | None = None,
     ) -> None:
         """Write complete IMG file streaming JPEG data from source files.
 
+        Uses a write-data-first approach: writes all GMP data sequentially
+        without pre-computing JPEG sizes, then fixes up IMG header and FAT
+        with actual sizes. This eliminates file size bloat from estimation
+        inaccuracies.
+
+        Memory usage is bounded to ~12 MB per batch of tiles.
+
         Args:
-            img_file: IMGFile data structure to serialize
-            subdivisions: Subdivisions with TileMetadata entries (must have
-                source_path set for all tiles that need JPEG data)
+            img_file: IMGFile data structure (provides header, map_name, etc.)
+            gmp_groups: List of GMPGroup objects, each with subdivisions and zoom_levels.
             tile_processor: Optional callable to process source tiles.
-                Signature: (source_path, x, y, zoom, source_crs) -> (jpeg_bytes, bounds) | None
-                If None, reads raw bytes from source_path.
             source_crs: Source CRS for tile processing (default EPSG:3857)
-            jpeg_quality: JPEG quality for warping (1-100, default 85)
+            jpeg_quality: JPEG quality for warping (1-100), or None for passthrough
             progress_callback: Called with (stage, current, total) for progress.
-                Stage is "writing" for overall or "writing:ZOOM" for per-zoom.
         """
         logger.info(f"Streaming write IMG file: {self.output_path}")
 
-        # --- Pass 1: Compute layout from TileMetadata ---
-        computer = LayoutComputer(img_file, subdivisions=subdivisions)
-        layouts = computer.compute()
+        # Compute a conservative block size from original JPEG sizes (upper bound).
+        # Actual data will be <= original (quality reduces or passes through),
+        # so this block size is always sufficient.
+        total_original_jpeg = 0
+        for group in gmp_groups:
+            for sub in group.subdivisions:
+                for tile_entry in sub.tile_entries:
+                    if isinstance(tile_entry, TileMetadata):
+                        total_original_jpeg += tile_entry.jpeg_size
+                    elif isinstance(tile_entry, tuple):
+                        total_original_jpeg += len(tile_entry[0])
+                    else:
+                        total_original_jpeg += len(tile_entry)
 
-        # Update subfile headers
-        img_file.subfiles = []
-        for layout in layouts:
-            img_file.subfiles.append(
-                SubfileHeader(
-                    subfile_type=layout.subfile_type,
-                    name=layout.name,
-                    start_block_offset=layout.start_block,
-                    length=layout.data_size,
-                )
-            )
+        # Estimate conservative total to determine block size.
+        # Add overhead for GMP/MPS headers, subdivision metadata, etc.
+        overhead_per_group = 4096  # generous overhead for headers
+        estimated_overhead = overhead_per_group * len(gmp_groups) + MPS_SUBFILE_SIZE
+        conservative_total = total_original_jpeg + estimated_overhead
+        block_exp_e2 = _compute_block_exp_e2(conservative_total)
+        block_size = 512 << block_exp_e2
 
-        # --- Pass 2: Write binary data ---
-        gmp_layout = next(lay for lay in layouts if lay.subfile_type == SubfileType.GMP)
-        mps_layout = next(lay for lay in layouts if lay.subfile_type == SubfileType.MPS)
+        # Compute dynamic FAT reservation: FAT needs 1 special entry + per-subfile
+        # entries. Each FAT entry = 512 bytes, holds 240 block pointers.
+        num_subfiles = len(gmp_groups) + 1  # GMP groups + MPS
+        estimated_blocks = math.ceil(conservative_total / block_size)
+        fat_entries_per_subfile = max(
+            1, math.ceil(estimated_blocks / FAT_SLOTS_PER_ENTRY)
+        )
+        total_fat_entries = 1 + fat_entries_per_subfile * num_subfiles
+        fat_reserved = total_fat_entries * PHYSICAL_BLOCK_SIZE
+
+        logger.info(
+            f"Conservative block size: {block_size:,} bytes (e2={block_exp_e2}), "
+            f"original JPEG total: {total_original_jpeg:,} bytes, "
+            f"FAT reserved: {fat_reserved:,} bytes"
+        )
+
+        # Compute data start: aligned after FAT region
+        # FAT region starts at FAT_START (0x1000), occupies fat_reserved bytes
+        data_start = _align_to_block(FAT_START + fat_reserved, block_size)
+
+        # --- Phase 1: Write data sections (GMP groups + MPS) sequentially ---
+        gmp_actual: list[tuple[str, int, int]] = []  # (name, start_offset, data_size)
 
         with open(self.output_path, "wb") as f:
-            # Write main header
-            f.seek(0)
-            IMGHeaderWriter.write(f, img_file.header, layouts)
+            current_offset = data_start
 
-            # Write FAT entries
+            for group_idx, group in enumerate(gmp_groups):
+                gmp_name = f"{group.map_id:08X}"[:8]
+                start_offset = current_offset
+
+                group_img = IMGFile(
+                    header=img_file.header,
+                    map_id=group.map_id,
+                    copyright_string=img_file.copyright_string,
+                    zoom_levels=group.zoom_levels,
+                    bounds_north=group.bounds_north,
+                    bounds_south=group.bounds_south,
+                    bounds_west=group.bounds_west,
+                    bounds_east=group.bounds_east,
+                )
+                logger.info(
+                    f"Writing GMP {group_idx}/{len(gmp_groups)}: "
+                    f"{len(group.subdivisions)} subdivisions"
+                )
+                actual_size = self._write_gmp_data(
+                    f,
+                    start_offset,
+                    group_img,
+                    group.subdivisions,
+                    tile_processor,
+                    source_crs,
+                    jpeg_quality,
+                    progress_callback,
+                )
+
+                gmp_actual.append((gmp_name, start_offset, actual_size))
+                # Next GMP starts at block-aligned end of this one
+                aligned_end = _align_to_block(start_offset + actual_size, block_size)
+                current_offset = aligned_end
+
+            # Write MPS subfile
+            mps_start = current_offset
+            f.seek(mps_start)
+            _write_mps_data(f, img_file)
+            current_offset = mps_start + MPS_SUBFILE_SIZE
+
+            actual_total = current_offset
+            logger.info(
+                f"Actual data size: {actual_total:,} bytes ({actual_total / 1e9:.1f} GB)"
+            )
+
+            # --- Phase 2: Compute actual layout and write IMG header + FAT ---
+            # Verify the conservative block size is sufficient
+            actual_block_exp_e2 = _compute_block_exp_e2(actual_total)
+            if actual_block_exp_e2 != block_exp_e2:
+                logger.warning(
+                    "Block size mismatch: conservative e2=%d, actual e2=%d. "
+                    "This should not happen — conservative estimate may be too low.",
+                    block_exp_e2,
+                    actual_block_exp_e2,
+                )
+                block_exp_e2 = actual_block_exp_e2
+                block_size = 512 << block_exp_e2
+
+            # Build layouts from actual positions
+            layouts: list[SubfileLayout] = []
+            pos = data_start
+
+            for gmp_name, _, data_size in gmp_actual:
+                layout = SubfileLayout(
+                    SubfileType.GMP, gmp_name, pos, data_size, block_size
+                )
+                layouts.append(layout)
+                pos = layout.end_offset
+
+            mps_layout = SubfileLayout(
+                SubfileType.MPS, "MAPSOURC", pos, MPS_SUBFILE_SIZE, block_size
+            )
+            layouts.append(mps_layout)
+
+            # Verify FAT fits within reserved space
+            fat_needed_entries = 1  # special directory
+            for layout in layouts:
+                fat_needed_entries += layout.num_fat_entries
+            fat_needed_bytes = fat_needed_entries * PHYSICAL_BLOCK_SIZE
+            if fat_needed_bytes > fat_reserved:
+                raise ValueError(
+                    f"FAT region overflow: need {fat_needed_bytes:,} bytes, "
+                    f"reserved {fat_reserved:,} bytes"
+                )
+
+            # Update subfile headers
+            img_file.subfiles = []
+            for layout in layouts:
+                img_file.subfiles.append(
+                    SubfileHeader(
+                        subfile_type=layout.subfile_type,
+                        name=layout.name,
+                        start_block_offset=layout.start_block,
+                        length=layout.data_size,
+                    )
+                )
+
+            # Write main header at offset 0
+            f.seek(0)
+            IMGHeaderWriter.write(f, img_file.header, layouts, block_exp_e2)
+
+            # Write FAT entries at FAT_START
             f.seek(FAT_START)
             FATWriter.write(f, layouts, FAT_START)
 
-            # Write GMP subfile (streaming)
-            self._write_gmp_streaming(
-                f,
-                img_file,
-                subdivisions,
-                gmp_layout,
-                tile_processor,
-                source_crs,
-                jpeg_quality,
-                progress_callback,
-            )
-
-            # Write MPS subfile
-            MPSWriter.write(f, mps_layout, img_file)
-
-            # Pad file to full size
-            total_size = max(lay.end_offset for lay in layouts)
-            current = f.tell()
-            if current < total_size:
-                f.seek(total_size - 1)
-                f.write(b"\x00")
+            # Truncate file to actual end
+            total_end = max(lay.end_offset for lay in layouts)
+            f.seek(total_end - 1)
+            f.write(b"\x00")
+            f.truncate()
 
         actual_size = self.output_path.stat().st_size
         logger.info(f"IMG file written: {self.output_path} ({actual_size:,} bytes)")
 
     @staticmethod
-    def _write_gmp_streaming(
+    def _write_gmp_data(
         f: io.BufferedWriter,
+        start_offset: int,
         img_file: IMGFile,
         subdivisions: list[Subdivision],
-        gmp_layout: SubfileLayout,
-        tile_processor: Callable[[Path, int, int, int, str], ProcessedTile | None]
+        tile_processor: Callable[[Path, int, int, int, str, int], ProcessedTile | None]
         | None,
         source_crs: str,
-        jpeg_quality: int,
+        jpeg_quality: int | None,
         progress_callback: Callable[[str, int, int], None] | None = None,
-    ) -> None:
-        """Write GMP subfile with streaming LBL29 section."""
-        f.seek(gmp_layout.start_offset)
+    ) -> int:
+        """Write GMP subfile with streaming LBL29 section.
+
+        Returns the actual data size in bytes.
+        """
+        f.seek(start_offset)
 
         total_tiles = sum(len(sub.tile_entries) for sub in subdivisions)
         n_zoom = len(img_file.zoom_levels)
@@ -2118,18 +2399,9 @@ class StreamingIMGWriter:
         pos += lbl28_size
 
         lbl29_pos = pos
-        # Estimate lbl29_size from TileMetadata.jpeg_size (source file sizes)
-        # Actual size may differ after warping; we'll fix up the header later
+        # LBL29 size is unknown until streaming — use 0 as placeholder.
+        # The actual value is fixed up after LBL29 data is written.
         estimated_lbl29_size = 0
-        for sub in subdivisions:
-            for tile_entry in sub.tile_entries:
-                if isinstance(tile_entry, TileMetadata):
-                    estimated_lbl29_size += tile_entry.jpeg_size
-                else:
-                    jpeg_data = (
-                        tile_entry[0] if isinstance(tile_entry, tuple) else tile_entry
-                    )
-                    estimated_lbl29_size += len(jpeg_data)
 
         # --- Build subdivision binary data ---
         map_levels_data = bytearray(map_levels_size)
@@ -2177,11 +2449,10 @@ class StreamingIMGWriter:
             rec_size = 14 if is_last_level else 16
             shift = zoom_shifts.get(sub.zoom_level_index, 0)
 
-            rgn_off_bytes = sub.rgn2_offset.to_bytes(3, "little")
-            subdiv_data[off] = rgn_off_bytes[0]
-            subdiv_data[off + 1] = rgn_off_bytes[1]
-            subdiv_data[off + 2] = rgn_off_bytes[2]
-            subdiv_data[off + 3] = 0x00
+            # RGN2 offset: lower 28 bits of uint32 (GPXSee reads readUInt32,
+            # extracts offset as oo & 0xfffffff, upper 4 bits → objects)
+            rgn2_offset_u32 = sub.rgn2_offset & 0x0FFFFFFF
+            struct.pack_into("<I", subdiv_data, off, rgn2_offset_u32)
             lon_mu = int(sub.center_lon * (2**24) / 360)
             subdiv_data[off + 4 : off + 7] = _put3s(lon_mu)
             lat_mu = int(sub.center_lat * (2**24) / 360)
@@ -2433,10 +2704,18 @@ class StreamingIMGWriter:
         # --- Fix up LBL28 offsets ---
         f.seek(lbl28_file_pos)
         for offset in lbl28_offsets:
+            if offset < 0 or offset > 0xFFFFFFFF:
+                raise ValueError(
+                    f"LBL28 offset out of range: {offset} (tile index {lbl28_offsets.index(offset)})"
+                )
             f.write(struct.pack("<I", offset))
 
         # --- Fix up LBL header's lbl29_size ---
         # LBL header offset 0x196 (relative to LBL start) contains lbl29_size
+        if actual_lbl29_size < 0 or actual_lbl29_size > 0xFFFFFFFF:
+            raise ValueError(
+                f"LBL29 size out of uint32 range: {actual_lbl29_size:,} bytes"
+            )
         f.seek(lbl_header_file_pos + 0x196)
         f.write(struct.pack("<I", actual_lbl29_size))
 
@@ -2451,28 +2730,97 @@ class StreamingIMGWriter:
                 img_file,
                 lbl28_offsets,
                 actual_lbl29_size,
-                gmp_layout.start_offset,
+                start_offset,
                 rgn2_pos,
             )
 
-        # Seek to end and pad to aligned size
-        f.seek(
-            lbl_header_file_pos
-            + LBL_HEADER_LENGTH
-            + (f.tell() - lbl_header_file_pos - LBL_HEADER_LENGTH)
-        )
+        # Seek to end of actual data
         current_pos = lbl28_file_pos + lbl28_size + actual_lbl29_size
         f.seek(current_pos)
-        padding = gmp_layout.start_offset + gmp_layout.aligned_size - current_pos
-        if padding > 0:
-            f.write(b"\x00" * padding)
+
+        return current_pos - start_offset
+
+
+def _reencode_jpeg(jpeg_bytes: bytes, quality: int) -> bytes:
+    """Re-encode JPEG bytes at the specified quality level.
+
+    Uses PIL (backed by libjpeg-turbo) for fast in-memory re-encoding.
+    """
+    img = Image.open(io.BytesIO(jpeg_bytes))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=quality)
+    return buf.getvalue()
+
+
+def _estimate_quality_ratio(
+    subdivisions: list[Subdivision],
+    jpeg_quality: int | None,
+    max_samples: int = 5,
+    tile_processor: Callable[[Path, int, int, int, str, int], ProcessedTile | None]
+    | None = None,
+    source_crs: str = "EPSG:3857",
+) -> float:
+    """Estimate the JPEG size ratio when re-encoding at the target quality.
+
+    When a tile_processor is provided (e.g. warp_tile_to_jpeg), samples are
+    processed through the full pipeline (warp + re-encode) for an accurate
+    ratio. Otherwise, a simple re-encode is used.
+
+    Returns 1.0 if no samples can be taken or quality is None (passthrough).
+    """
+    if jpeg_quality is None:
+        return 1.0
+
+    samples: list[float] = []
+    for sub in subdivisions:
+        for tile_entry in sub.tile_entries:
+            if len(samples) >= max_samples:
+                break
+            if (
+                isinstance(tile_entry, TileMetadata)
+                and tile_entry.source_path
+                and tile_entry.source_path.exists()
+            ):
+                raw_size = tile_entry.source_path.stat().st_size
+                if raw_size == 0:
+                    continue
+                if tile_processor is not None:
+                    # Full pipeline: warp + re-encode
+                    result = tile_processor(
+                        tile_entry.source_path,
+                        tile_entry.x,
+                        tile_entry.y,
+                        tile_entry.zoom,
+                        source_crs,
+                        jpeg_quality,
+                    )
+                    if result is not None:
+                        samples.append(len(result[0]) / raw_size)
+                else:
+                    # Simple re-encode (no warp)
+                    raw = tile_entry.source_path.read_bytes()
+                    reencoded = _reencode_jpeg(raw, jpeg_quality)
+                    if len(raw) > 0:
+                        samples.append(len(reencoded) / len(raw))
+        if len(samples) >= max_samples:
+            break
+
+    if not samples:
+        logger.warning("No sample tiles found for quality ratio estimation, using 1.0")
+        return 1.0
+
+    samples.sort()
+    ratio = samples[len(samples) // 2]  # median
+    logger.info("Quality ratio estimate: %.3f (from %d samples)", ratio, len(samples))
+    return ratio
 
 
 def _process_tile_jpeg(
     tile: TileMetadata,
-    tile_processor: Callable[[Path, int, int, int, str], ProcessedTile | None] | None,
+    tile_processor: Callable[[Path, int, int, int, str, int], ProcessedTile | None]
+    | None,
     source_crs: str,
-    jpeg_quality: int,
+    jpeg_quality: int | None,
 ) -> bytes | None:
     """Get JPEG bytes for a tile from its source path.
 
@@ -2480,7 +2828,7 @@ def _process_tile_jpeg(
         tile: TileMetadata with source_path, x, y, zoom
         tile_processor: Optional processing callable
         source_crs: Source CRS string
-        jpeg_quality: JPEG quality
+        jpeg_quality: JPEG quality, or None for passthrough
 
     Returns:
         JPEG bytes, or None if processing failed
@@ -2489,13 +2837,31 @@ def _process_tile_jpeg(
         return None
 
     if tile_processor is not None:
-        result = tile_processor(tile.source_path, tile.x, tile.y, tile.zoom, source_crs)
+        # When quality is None (passthrough) with a processor, we still call it
+        # but the processor receives quality=None and should return raw bytes
+        if jpeg_quality is None:
+            # Passthrough: read raw bytes without re-encoding
+            return tile.source_path.read_bytes()
+        result = tile_processor(
+            tile.source_path,
+            tile.x,
+            tile.y,
+            tile.zoom,
+            source_crs,
+            jpeg_quality,
+        )
         if result is not None:
             return result[0]  # (jpeg_bytes, bounds)
         return None
 
-    # No processor: read raw bytes (source already in target CRS)
-    return tile.source_path.read_bytes()
+    # No processor: read raw bytes
+    if jpeg_quality is None:
+        # Passthrough: return raw bytes without re-encoding
+        return tile.source_path.read_bytes()
+
+    # Re-encode at target quality
+    raw = tile.source_path.read_bytes()
+    return _reencode_jpeg(raw, jpeg_quality)
 
 
 def _fixup_rgn2_jpeg_sizes(
@@ -2525,6 +2891,13 @@ def _fixup_rgn2_jpeg_sizes(
                 # Last tile: size = total - last offset
                 actual_size = total_lbl29_size - lbl28_offsets[idx]
 
+            if actual_size < 0 or actual_size > 0xFFFFFFFF:
+                raise ValueError(
+                    f"RGN2 jpeg_size out of range: {actual_size} "
+                    f"(tile {idx}, total_lbl29={total_lbl29_size:,}, "
+                    f"offset={lbl28_offsets[idx]:,})"
+                )
+
             # jpeg_size is the last 4 bytes of the RGN2 record
             jpeg_size_offset = offset + record_size - 4
             f.seek(jpeg_size_offset)
@@ -2532,6 +2905,29 @@ def _fixup_rgn2_jpeg_sizes(
 
             offset += record_size
             idx += 1
+
+
+def _write_mps_data(f: io.BufferedWriter, img_file: IMGFile) -> None:
+    """Write MPS subfile data at current file position.
+
+    Standalone helper that writes the 98-byte MPS data without needing a layout.
+    Used by the write-data-first approach.
+    """
+    buf = bytearray(MPS_SUBFILE_SIZE)
+    buf[0x00:0x02] = b"LE"
+    struct.pack_into("<I", buf, 7, img_file.map_id)
+    map_name = img_file.header.map_name or "Raster Map"
+    name_bytes = map_name.encode("ascii")[:21]
+    name_slot = (name_bytes + b"\x00")[:22].ljust(22, b"\x00")
+    buf[0x0B : 0x0B + 22] = name_slot
+    hex_id = f"{img_file.map_id:08X}"[:8].encode("ascii")
+    buf[0x21 : 0x21 + 8] = hex_id
+    buf[0x29] = 0x00
+    buf[0x2A : 0x2A + 22] = name_slot
+    struct.pack_into("<I", buf, 0x40, img_file.map_id)
+    struct.pack_into("<H", buf, 0x48, 0x1756)
+    buf[0x4B : 0x4B + 22] = name_slot
+    f.write(buf)
 
 
 class MPSWriter:
@@ -2940,7 +3336,7 @@ class IMGWriter:
         with open(self.output_path, "wb") as f:
             # Write main header (512 bytes)
             f.seek(0)
-            IMGHeaderWriter.write(f, img_file.header, layouts)
+            IMGHeaderWriter.write(f, img_file.header, layouts, computer.block_exp_e2)
 
             # Write FAT entries at FAT_START
             f.seek(FAT_START)

@@ -740,30 +740,90 @@ def info(
                 )
             return
 
-        # Select subfile
-        gmp_key = None
+        # Select subfile(s)
         if subfile:
-            for key in parser.subfiles:
-                if subfile.upper() in key.upper():
-                    gmp_key = key
-                    break
-            if not gmp_key:
+            gmp_keys = [
+                key for key in parser.subfiles if subfile.upper() in key.upper()
+            ]
+            if not gmp_keys:
                 console.print(f"[red]Subfile '{subfile}' not found.[/] Available:")
                 for key in parser.subfiles:
                     console.print(f"  {key}")
                 return
         else:
-            for key in parser.subfiles:
-                if parser.subfiles[key]["type"] == "GMP":
-                    gmp_key = key
-                    break
+            gmp_keys = [
+                key for key in parser.subfiles if parser.subfiles[key]["type"] == "GMP"
+            ]
 
-        if not gmp_key:
+        if not gmp_keys:
             console.print("[red]No GMP subfile found![/]")
             return
 
+        # Multi-GMP: show summary for all, detail for first (or specified)
+        if len(gmp_keys) > 1:
+            console.print(
+                f"  [dim]Found {len(gmp_keys)} GMP subfiles: "
+                f"{', '.join(k.split('.')[0] for k in gmp_keys)}[/]"
+            )
+
         # Show spinner for large files, clear before output
         use_spinner = parser.filesize > LARGE_FILE_THRESHOLD
+
+        # --summary: concise overview for all GMPs
+        if show_summary:
+            for gmp_key in gmp_keys:
+                if use_spinner:
+                    with Status(
+                        f"Parsing GMP {gmp_key.split('.')[0]}...", console=console
+                    ):
+                        gmp = parser.parse_gmp_container(gmp_key)
+                        tre = parser.parse_tre(gmp)
+                        rgn_parsed = parser.parse_rgn(gmp)
+                        lbl = parser.parse_lbl(gmp)
+                else:
+                    gmp = parser.parse_gmp_container(gmp_key)
+                    tre = parser.parse_tre(gmp)
+                    rgn_parsed = parser.parse_rgn(gmp)
+                    lbl = parser.parse_lbl(gmp)
+
+                console.print(
+                    Rule(
+                        _styled_path("IMG", "Summary", gmp_key.split(".")[0]),
+                        style="bold cyan",
+                        align="left",
+                    )
+                )
+                console.print(f"  File: {img_file} ({_human_size(parser.filesize)})")
+                console.print(f"  Mapset: {parser.header['description']}")
+                console.print(f"  Subfile: {gmp_key}")
+                console.print(f"  Date: {gmp['date']}")
+                console.print(
+                    f"  Bounds: N={tre['north_deg']:.6f}, S={tre['south_deg']:.6f}, "
+                    f"W={tre['west_deg']:.6f}, E={tre['east_deg']:.6f}"
+                )
+                console.print("  Projection: WGS 84 (geographic, lat/lon)")
+                if "display_priority" in tre:
+                    console.print(f"  Priority: {tre['display_priority']}")
+                if "levels" in tre:
+                    levels = tre["levels"]
+                    console.print(
+                        f"  Levels: {[lvl['level_number'] for lvl in levels]}, "
+                        f"zoom: {[lvl['zoom_code'] for lvl in levels]}"
+                    )
+                if "map_name" in tre:
+                    console.print(f"  Map name: {tre['map_name']}")
+                if "map_id" in tre:
+                    console.print(f"  Map ID: [cyan]0x{tre['map_id']:08X}[/]")
+                _print_bitmap_stats(rgn_parsed, console)
+                if lbl and "encoding" in lbl:
+                    enc_name = ENCODING_NAMES.get(
+                        lbl["encoding"], f"unknown ({lbl['encoding']})"
+                    )
+                    console.print(f"  Encoding: {enc_name}")
+            return
+
+        # For detailed views, parse first GMP
+        gmp_key = gmp_keys[0]
         if use_spinner:
             with Status("Parsing IMG file...", console=console):
                 gmp = parser.parse_gmp_container(gmp_key)
@@ -775,40 +835,6 @@ def info(
             tre = parser.parse_tre(gmp)
             rgn_parsed = parser.parse_rgn(gmp)
             lbl = parser.parse_lbl(gmp)
-
-        # --summary: concise overview
-        if show_summary:
-            console.print(
-                Rule(_styled_path("IMG", "Summary"), style="bold cyan", align="left")
-            )
-            console.print(f"  File: {img_file} ({_human_size(parser.filesize)})")
-            console.print(f"  Mapset: {parser.header['description']}")
-            console.print(f"  Subfile: {gmp_key}")
-            console.print(f"  Date: {gmp['date']}")
-            console.print(
-                f"  Bounds: N={tre['north_deg']:.6f}, S={tre['south_deg']:.6f}, "
-                f"W={tre['west_deg']:.6f}, E={tre['east_deg']:.6f}"
-            )
-            console.print("  Projection: WGS 84 (geographic, lat/lon)")
-            if "display_priority" in tre:
-                console.print(f"  Priority: {tre['display_priority']}")
-            if "levels" in tre:
-                levels = tre["levels"]
-                console.print(
-                    f"  Levels: {[lvl['level_number'] for lvl in levels]}, "
-                    f"zoom: {[lvl['zoom_code'] for lvl in levels]}"
-                )
-            if "map_name" in tre:
-                console.print(f"  Map name: {tre['map_name']}")
-            if "map_id" in tre:
-                console.print(f"  Map ID: [cyan]0x{tre['map_id']:08X}[/]")
-            _print_bitmap_stats(rgn_parsed, console)
-            if lbl and "encoding" in lbl:
-                enc_name = ENCODING_NAMES.get(
-                    lbl["encoding"], f"unknown ({lbl['encoding']})"
-                )
-                console.print(f"  Encoding: {enc_name}")
-            return
 
         # --hex / --dump: raw section output
         if hex_section:

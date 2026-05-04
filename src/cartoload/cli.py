@@ -141,9 +141,24 @@ def _human_size(size: int) -> str:
     return f"{size:.1f} TB"
 
 
-def _handle_pipeline_error(error: PipelineError) -> None:
+def _handle_pipeline_error(error: PipelineError, *, verbose: bool = False) -> None:
     """Convert a PipelineError to a Click exception."""
-    raise click.ClickException(str(error))
+    msg = str(error)
+    if error.__cause__ is not None:
+        if verbose:
+            from rich.console import Console
+            from rich.traceback import Traceback
+
+            console = Console(stderr=True)
+            tb = Traceback.from_exception(
+                type(error.__cause__),
+                error.__cause__,
+                error.__cause__.__traceback__,
+            )
+            console.print(tb)
+        else:
+            msg += "\n  Use -v for full traceback."
+    raise click.ClickException(msg)
 
 
 def _handle_unexpected_error(error: Exception) -> None:
@@ -232,9 +247,15 @@ main.add_command(analyze)
 @click.option(
     "-q",
     "--quality",
-    default=85,
+    default=None,
     type=click.IntRange(1, 100),
-    help="JPEG quality 1-100 (default: 85)",
+    help="JPEG quality 1-100 (default: passthrough, no re-encoding)",
+)
+@click.option(
+    "-v",
+    "--verbose",
+    is_flag=True,
+    help="Show detailed tracebacks on errors",
 )
 def build(
     sources: tuple[str, ...],
@@ -256,7 +277,8 @@ def build(
     preview: bool,
     preview_tiles: int,
     preview_center: tuple[float, ...] | None,
-    quality: int,
+    quality: int | None,
+    verbose: bool,
 ) -> None:
     """Build one or more layers into output files."""
     if not layer:
@@ -423,7 +445,7 @@ def build(
                         dl,
                         out_dir,
                         max_tiles_per_zoom=preview_tiles,
-                        quality=quality,
+                        quality=quality or 85,
                     )
                     for pp in preview_paths:
                         click.echo(f"Preview: {pp}")
@@ -435,7 +457,7 @@ def build(
     except click.ClickException:
         raise
     except (PipelineError, DownloadError, ProcessingError, ExportError) as e:
-        _handle_pipeline_error(e)
+        _handle_pipeline_error(e, verbose=verbose)
     except Exception as e:
         _handle_unexpected_error(e)
 
