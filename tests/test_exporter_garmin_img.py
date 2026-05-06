@@ -3275,3 +3275,143 @@ class TestWarpTileQuality:
         assert result is not None
         img = Image.open(io.BytesIO(result[0]))
         assert img.format == "JPEG"
+
+
+class TestGetExecutorMode:
+    """Tests for _get_executor_mode() environment variable parsing."""
+
+    def test_default_is_process(self, monkeypatch):
+        from cartoload.exporters.garmin_img_writer import _get_executor_mode
+
+        monkeypatch.delenv("CARTOLOAD_EXECUTOR", raising=False)
+        assert _get_executor_mode() == "process"
+
+    def test_thread_mode_from_env(self, monkeypatch):
+        from cartoload.exporters.garmin_img_writer import _get_executor_mode
+
+        monkeypatch.setenv("CARTOLOAD_EXECUTOR", "thread")
+        assert _get_executor_mode() == "thread"
+
+    def test_process_mode_from_env(self, monkeypatch):
+        from cartoload.exporters.garmin_img_writer import _get_executor_mode
+
+        monkeypatch.setenv("CARTOLOAD_EXECUTOR", "process")
+        assert _get_executor_mode() == "process"
+
+    def test_case_insensitive(self, monkeypatch):
+        from cartoload.exporters.garmin_img_writer import _get_executor_mode
+
+        monkeypatch.setenv("CARTOLOAD_EXECUTOR", "THREAD")
+        assert _get_executor_mode() == "thread"
+
+    def test_invalid_value_defaults_to_process(self, monkeypatch):
+        from cartoload.exporters.garmin_img_writer import _get_executor_mode
+
+        monkeypatch.setenv("CARTOLOAD_EXECUTOR", "invalid")
+        assert _get_executor_mode() == "process"
+
+
+class TestBatchedLBL28Write:
+    """Tests for batched LBL28 offset write via streaming writer."""
+
+    def test_lbl28_offsets_correct_after_streaming_write(self, tmp_path):
+        """LBL28 offsets in output file should match running JPEG sizes."""
+        img_file = _make_img_file()
+        img_file.zoom_levels = [
+            ZoomLevel(level_number=23, zoom_code=1, source_zoom=12),
+        ]
+
+        # Create tiles with known JPEG sizes
+        jpeg_a = b"\xff\xd8\xff\xe0" + b"\x00" * 100
+        jpeg_b = b"\xff\xd8\xff\xe0" + b"\x00" * 200
+        jpeg_c = b"\xff\xd8\xff\xe0" + b"\x00" * 50
+
+        meta = {12: _make_tile_metadata(3, zoom=12)}
+        # Override source_path to point to real files
+        for i, tile in enumerate(meta[12]):
+            p = tmp_path / f"tile_{i}.jpg"
+            p.write_bytes([jpeg_a, jpeg_b, jpeg_c][i])
+            tile.source_path = p
+            tile.jpeg_size = len([jpeg_a, jpeg_b, jpeg_c][i])
+
+        bounds = {"north": 47.5, "south": 46.5, "west": 8.0, "east": 9.0}
+        subdivisions = generate_subdivisions_from_metadata(meta, [12], bounds)
+        gmp_groups = [
+            GMPGroup(
+                map_id=img_file.map_id,
+                subdivisions=subdivisions,
+                zoom_levels=list(img_file.zoom_levels),
+                bounds_north=bounds["north"],
+                bounds_south=bounds["south"],
+                bounds_west=bounds["west"],
+                bounds_east=bounds["east"],
+            )
+        ]
+
+        output = tmp_path / "lbl28_test.img"
+        writer = StreamingIMGWriter(output)
+        writer.write(
+            img_file,
+            gmp_groups,
+            tile_processor=lambda path, x, y, z, crs, q: (
+                path.read_bytes(),
+                (46.5, 8.0, 46.501, 8.001),
+            ),
+            source_crs="EPSG:3857",
+            jpeg_quality=30,
+        )
+
+        assert output.exists()
+        data = output.read_bytes()
+        assert data[0x10:0x16] == b"DSKIMG"
+
+
+class TestFixupRgn2WithDirectSizes:
+    """Tests for _fixup_rgn2_jpeg_sizes with direct jpeg_sizes parameter."""
+
+    def test_fixup_writes_correct_sizes(self, tmp_path):
+        """RGN2 jpeg_size fields should be updated with actual JPEG sizes."""
+        from cartoload.exporters.garmin_img_writer import (
+            _fixup_rgn2_jpeg_sizes,
+            _img_id_size,
+            _rgn2_record_size,
+        )
+
+        img_file = _make_img_file()
+        img_file.zoom_levels = [
+            ZoomLevel(level_number=23, zoom_code=1, source_zoom=12),
+        ]
+
+        meta = {12: _make_tile_metadata(3, zoom=12)}
+        bounds = {"north": 47.5, "south": 46.5, "west": 8.0, "east": 9.0}
+        subdivisions = generate_subdivisions_from_metadata(meta, [12], bounds)
+
+        n_tiles = 3
+        iid_size = _img_id_size(n_tiles)
+        record_size = _rgn2_record_size(iid_size)
+
+        # Create a file with RGN2 records (placeholder jpeg_size=0)
+        rgn2_size = record_size * n_tiles
+        output = tmp_path / "rgn2_test.bin"
+        output.write_bytes(b"\x00" * rgn2_size)
+
+        jpeg_sizes = [1000, 2000, 500]
+
+        with open(output, "r+b") as f:
+            _fixup_rgn2_jpeg_sizes(
+                f,
+                subdivisions,
+                img_file,
+                jpeg_sizes,
+                gmp_start=0,
+                rgn2_pos=0,
+            )
+
+        data = output.read_bytes()
+        # Verify each record's last 4 bytes contain the correct size
+        for i, expected_size in enumerate(jpeg_sizes):
+            offset = i * record_size + record_size - 4
+            actual_size = struct.unpack_from("<I", data, offset)[0]
+            assert actual_size == expected_size, (
+                f"Tile {i}: expected jpeg_size={expected_size}, got {actual_size}"
+            )

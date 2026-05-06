@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
 import shutil
 import subprocess
 import sys
@@ -252,6 +253,13 @@ main.add_command(analyze)
     help="JPEG quality 1-100 (default: passthrough, no re-encoding)",
 )
 @click.option(
+    "--executor",
+    "executor_mode",
+    default=None,
+    type=click.Choice(["process", "thread"], case_sensitive=False),
+    help="Parallel executor mode: 'process' (default, fastest) or 'thread' (less memory)",
+)
+@click.option(
     "-v",
     "--verbose",
     is_flag=True,
@@ -278,11 +286,16 @@ def build(
     preview_tiles: int,
     preview_center: tuple[float, ...] | None,
     quality: int | None,
+    executor_mode: str | None,
     verbose: bool,
 ) -> None:
     """Build one or more layers into output files."""
     if not layer:
         raise click.ClickException("--layer is required")
+
+    # Apply executor mode to environment (read by garmin_img_writer._get_executor_mode)
+    if executor_mode is not None:
+        os.environ["CARTOLOAD_EXECUTOR"] = executor_mode
 
     try:
         # Load config

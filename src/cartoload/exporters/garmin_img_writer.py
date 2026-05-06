@@ -35,7 +35,12 @@ import os
 import struct
 import subprocess
 import tempfile
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import (
+    Executor,
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    as_completed,
+)
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Union
@@ -148,6 +153,33 @@ def _get_worker_count() -> int:
     return max(1, math.ceil(cpu_count / 2))
 
 
+def _get_executor_mode() -> str:
+    """Get executor mode from environment or default.
+
+    Default: "process" (ProcessPoolExecutor, fastest).
+    Override: CARTOLOAD_EXECUTOR environment variable ("process" or "thread").
+    """
+    env_val = os.environ.get("CARTOLOAD_EXECUTOR", "process").lower().strip()
+    if env_val not in ("process", "thread"):
+        logger.warning(
+            "Invalid CARTOLOAD_EXECUTOR value '%s', using 'process'", env_val
+        )
+        return "process"
+    return env_val
+
+
+# Module-level global for pre-loaded warp function in worker processes
+_warp_func: Callable | None = None
+
+
+def _init_worker() -> None:
+    """Pre-load heavy libraries (rasterio, numpy) once per worker process."""
+    global _warp_func
+    from cartoload.processor.rasterio_warp import warp_tile_to_jpeg
+
+    _warp_func = warp_tile_to_jpeg
+
+
 def _warp_tile_worker(
     source_path: Path,
     x: int,
@@ -161,9 +193,8 @@ def _warp_tile_worker(
 
     Returns (x, y, zoom, jpeg_bytes_or_none) for result mapping.
     Must be top-level (not a method) for pickling.
+    Uses pre-loaded _warp_func if available (set by _init_worker).
     """
-    from ..processor.rasterio_warp import warp_tile_to_jpeg
-
     if not source_path.exists():
         return (x, y, zoom, None)
 
@@ -171,7 +202,14 @@ def _warp_tile_worker(
         # Passthrough: read raw file bytes without re-encoding
         return (x, y, zoom, source_path.read_bytes())
 
-    result = warp_tile_to_jpeg(source_path, x, y, zoom, source_crs, target_crs, quality)
+    warp_fn = _warp_func
+    if warp_fn is None:
+        # Fallback: import on first call if initializer wasn't used
+        from ..processor.rasterio_warp import warp_tile_to_jpeg
+
+        warp_fn = warp_tile_to_jpeg
+
+    result = warp_fn(source_path, x, y, zoom, source_crs, target_crs, quality)
     if result is not None:
         return (x, y, zoom, result[0])
     return (x, y, zoom, None)
@@ -2109,11 +2147,11 @@ class StreamingIMGWriter:
     Pass 1 (layout): Compute all section positions from TileMetadata only.
     Pass 2 (write): Write the IMG file, streaming JPEG data in batches.
 
-    Memory is bounded to ~12 MB per batch of tiles regardless of total tile count.
+    Memory is bounded to ~60 MB per batch of tiles regardless of total tile count.
     """
 
     # Number of tiles to process in one batch during the LBL29 streaming write
-    BATCH_SIZE = 500
+    BATCH_SIZE = 5000
 
     def __init__(self, output_path: Path):
         self.output_path = output_path
@@ -2615,12 +2653,22 @@ class StreamingIMGWriter:
         max_workers = _get_worker_count() if use_parallel else 1
         batch_size = StreamingIMGWriter.BATCH_SIZE
 
+        # Create persistent executor (reused across all batches, not recreated)
+        executor: Executor | None = None
         if use_parallel:
+            executor_mode = _get_executor_mode()
+            executor_cls = (
+                ProcessPoolExecutor
+                if executor_mode == "process"
+                else ThreadPoolExecutor
+            )
+            executor = executor_cls(max_workers=max_workers, initializer=_init_worker)
             logger.info(
-                "LBL29 streaming: %d tiles, batch_size=%d, workers=%d (parallel warp)",
+                "LBL29 streaming: %d tiles, batch_size=%d, workers=%d (%s, persistent)",
                 len(all_tiles),
                 batch_size,
                 max_workers,
+                executor_mode,
             )
         else:
             logger.info(
@@ -2631,16 +2679,17 @@ class StreamingIMGWriter:
 
         actual_lbl29_size = 0
         lbl28_offsets: list[int] = []  # Accumulate offsets for fixup
+        jpeg_sizes: list[int] = []  # Track actual JPEG sizes for RGN2 fixup
         running_offset = 0
         tiles_processed = 0
 
-        for batch_start in range(0, len(all_tiles), batch_size):
-            batch = all_tiles[batch_start : batch_start + batch_size]
-            batch_jpegs: list[bytes] = [b""] * len(batch)
+        try:
+            for batch_start in range(0, len(all_tiles), batch_size):
+                batch = all_tiles[batch_start : batch_start + batch_size]
+                batch_jpegs: list[bytes] = [b""] * len(batch)
 
-            if use_parallel:
-                # Parallel warp: submit TileMetadata tiles to ProcessPoolExecutor
-                with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                if executor is not None:
+                    # Parallel warp: submit to persistent executor
                     future_to_idx: dict = {}
                     for i, tile_entry in enumerate(batch):
                         if (
@@ -2672,69 +2721,79 @@ class StreamingIMGWriter:
                                 batch_jpegs[idx] = jpeg_data
                         except Exception as e:
                             logger.warning("Parallel tile warp failed: %s", e)
-            else:
-                # Sequential processing
-                for i, tile_entry in enumerate(batch):
-                    if isinstance(tile_entry, TileMetadata):
-                        jpeg_data = _process_tile_jpeg(
-                            tile_entry,
-                            tile_processor,
-                            source_crs,
-                            jpeg_quality,
-                        )
-                        if jpeg_data is None:
-                            logger.warning(
-                                "Failed to process tile (%d, %d, z=%d), skipping",
-                                tile_entry.x,
-                                tile_entry.y,
-                                tile_entry.zoom,
+                else:
+                    # Sequential processing
+                    for i, tile_entry in enumerate(batch):
+                        if isinstance(tile_entry, TileMetadata):
+                            jpeg_data = _process_tile_jpeg(
+                                tile_entry,
+                                tile_processor,
+                                source_crs,
+                                jpeg_quality,
                             )
-                            jpeg_data = b""
-                        batch_jpegs[i] = jpeg_data
-                    elif isinstance(tile_entry, tuple):
-                        batch_jpegs[i] = tile_entry[0]
-                    else:
-                        batch_jpegs[i] = tile_entry
+                            if jpeg_data is None:
+                                logger.warning(
+                                    "Failed to process tile (%d, %d, z=%d), skipping",
+                                    tile_entry.x,
+                                    tile_entry.y,
+                                    tile_entry.zoom,
+                                )
+                                jpeg_data = b""
+                            batch_jpegs[i] = jpeg_data
+                        elif isinstance(tile_entry, tuple):
+                            batch_jpegs[i] = tile_entry[0]
+                        else:
+                            batch_jpegs[i] = tile_entry
 
-            # Write batch results sequentially (preserving order)
-            for i, jpeg_data in enumerate(batch_jpegs):
-                lbl28_offsets.append(running_offset)
-                actual_lbl29_size += len(jpeg_data)
-                running_offset += len(jpeg_data)
-                f.write(jpeg_data)
-                tiles_processed += 1
+                # Write batch results sequentially (preserving order)
+                for i, jpeg_data in enumerate(batch_jpegs):
+                    lbl28_offsets.append(running_offset)
+                    jpeg_sizes.append(len(jpeg_data))
+                    actual_lbl29_size += len(jpeg_data)
+                    running_offset += len(jpeg_data)
+                    f.write(jpeg_data)
+                    tiles_processed += 1
 
-                # Per-zoom progress reporting
-                tile_entry = batch[i]
-                if isinstance(tile_entry, TileMetadata):
-                    z = tile_entry.zoom
-                    zoom_progress[z] = zoom_progress.get(z, 0) + 1
-                    if progress_callback is not None:
-                        progress_callback(
-                            f"writing:{z}",
-                            zoom_progress[z],
-                            zoom_tile_counts.get(z, 0),
-                        )
+                    # Per-zoom progress reporting
+                    tile_entry = batch[i]
+                    if isinstance(tile_entry, TileMetadata):
+                        z = tile_entry.zoom
+                        zoom_progress[z] = zoom_progress.get(z, 0) + 1
+                        if progress_callback is not None:
+                            progress_callback(
+                                f"writing:{z}",
+                                zoom_progress[z],
+                                zoom_tile_counts.get(z, 0),
+                            )
 
-            # Overall progress after each batch
-            if progress_callback is not None:
-                progress_callback("writing", tiles_processed, total_tiles)
+                # Overall progress after each batch
+                if progress_callback is not None:
+                    progress_callback("writing", tiles_processed, total_tiles)
 
-            if tiles_processed % 500 == 0 or batch_start + batch_size >= len(all_tiles):
-                logger.info(f"  LBL29: {tiles_processed}/{total_tiles} tiles streamed")
+                if tiles_processed % 5000 == 0 or batch_start + batch_size >= len(
+                    all_tiles
+                ):
+                    logger.info(
+                        f"  LBL29: {tiles_processed}/{total_tiles} tiles streamed"
+                    )
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True)
 
         logger.info(
             f"  LBL29 complete: {tiles_processed} tiles, {actual_lbl29_size:,} bytes"
         )
 
-        # --- Fix up LBL28 offsets ---
+        # --- Fix up LBL28 offsets (batched single write) ---
         f.seek(lbl28_file_pos)
-        for offset in lbl28_offsets:
+        buf = bytearray(len(lbl28_offsets) * 4)
+        for i, offset in enumerate(lbl28_offsets):
             if offset < 0 or offset > 0xFFFFFFFF:
                 raise ValueError(
-                    f"LBL28 offset out of range: {offset} (tile index {lbl28_offsets.index(offset)})"
+                    f"LBL28 offset out of range: {offset} (tile index {i})"
                 )
-            f.write(struct.pack("<I", offset))
+            struct.pack_into("<I", buf, i * 4, offset)
+        f.write(buf)
 
         # --- Fix up LBL header's lbl29_size ---
         # LBL header offset 0x196 (relative to LBL start) contains lbl29_size
@@ -2754,8 +2813,7 @@ class StreamingIMGWriter:
                 f,
                 subdivisions,
                 img_file,
-                lbl28_offsets,
-                actual_lbl29_size,
+                jpeg_sizes,
                 start_offset,
                 rgn2_pos,
             )
@@ -2901,14 +2959,14 @@ def _fixup_rgn2_jpeg_sizes(
     f: io.BufferedWriter,
     subdivisions: list[Subdivision],
     img_file: IMGFile,
-    lbl28_offsets: list[int],
-    total_lbl29_size: int,
+    jpeg_sizes: list[int],
     gmp_start: int,
     rgn2_pos: int,
 ) -> None:
     """Update RGN2 record jpeg_size fields after actual JPEG sizes are known.
 
     Called only when a tile_processor is provided (warping may change sizes).
+    Receives actual JPEG sizes tracked inline during LBL29 streaming.
     """
     iid_size = _img_id_size(sum(len(sub.tile_entries) for sub in subdivisions))
     record_size = _rgn2_record_size(iid_size)
@@ -2917,18 +2975,11 @@ def _fixup_rgn2_jpeg_sizes(
 
     for sub in subdivisions:
         for _tile_entry in sub.tile_entries:
-            # Compute actual JPEG size from consecutive LBL28 offsets
-            if idx + 1 < len(lbl28_offsets):
-                actual_size = lbl28_offsets[idx + 1] - lbl28_offsets[idx]
-            else:
-                # Last tile: size = total - last offset
-                actual_size = total_lbl29_size - lbl28_offsets[idx]
+            actual_size = jpeg_sizes[idx]
 
             if actual_size < 0 or actual_size > 0xFFFFFFFF:
                 raise ValueError(
-                    f"RGN2 jpeg_size out of range: {actual_size} "
-                    f"(tile {idx}, total_lbl29={total_lbl29_size:,}, "
-                    f"offset={lbl28_offsets[idx]:,})"
+                    f"RGN2 jpeg_size out of range: {actual_size} (tile {idx})"
                 )
 
             # jpeg_size is the last 4 bytes of the RGN2 record
