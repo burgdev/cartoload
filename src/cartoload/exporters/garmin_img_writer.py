@@ -1174,6 +1174,12 @@ class GMPWriter:
             for z_idx, zoom in enumerate(img_file.zoom_levels):
                 zoom_shifts[z_idx] = max(0, 24 - zoom.level_number)
 
+            # Determine the last subdivision index at each zoom level
+            # (for setting the "end of chain" bit 15 on width)
+            last_sub_at_level: dict[int, int] = {}
+            for i, sub in enumerate(subdivisions):
+                last_sub_at_level[sub.zoom_level_index] = i
+
             # Write per-subdivision TRE2 records with variable size
             off = 0
             for i, sub in enumerate(subdivisions):
@@ -1190,17 +1196,27 @@ class GMPWriter:
                 # Center latitude (3-byte signed map units)
                 lat_mu = int(sub.center_lat * (2**24) / 360)
                 subdiv_data[off + 7 : off + 10] = _put3s(lat_mu)
-                # Width: encoded horizontal extent with bit 15 = has children
+                # Width: encoded horizontal extent with bit 15 = end of chain
+                # Bit 15 marks the last subdivision in a chain (PDF spec:
+                # "marks the end of chain referred by parent subdivision").
+                # Set on the last subdivision at each non-last zoom level.
                 w = sub.encode_tre2_width(shift)
-                if not is_last_level:
-                    w |= 0x8000  # bit 15 = has children
+                if (
+                    not is_last_level
+                    and last_sub_at_level.get(sub.zoom_level_index) == i
+                ):
+                    w |= 0x8000  # bit 15 = end of chain
                 struct.pack_into("<H", subdiv_data, off + 10, w)
                 # Height: encoded vertical extent
                 h = sub.encode_tre2_height(shift)
                 struct.pack_into("<H", subdiv_data, off + 12, h)
-                # Next level index (only for non-last levels)
+                # Next level index (only for non-last levels, 1-based per
+                # mkgmap and PDF spec: "1-based index of the first subdivision
+                # in chain for the next zoom level")
                 if not is_last_level:
-                    struct.pack_into("<H", subdiv_data, off + 14, sub.next_level_index)
+                    struct.pack_into(
+                        "<H", subdiv_data, off + 14, sub.next_level_index + 1
+                    )
 
                 off += rec_size
 
@@ -1238,7 +1254,8 @@ class GMPWriter:
                 struct.pack_into("<I", subdiv_data, off, rgn2_offset_u32)
                 subdiv_data[off + 4 : off + 7] = _put3s(map_center_lon)
                 subdiv_data[off + 7 : off + 10] = _put3s(map_center_lat)
-                # Width: encoded extent with bit 15 for has-children
+                # Width: encoded extent with bit 15 = end of chain
+                # (only subdivision at this level, so it IS the last in chain)
                 w = ((map_w_mu + 1) // 2 + mask) >> shift
                 if not is_last_level:
                     w |= 0x8000
@@ -1246,8 +1263,11 @@ class GMPWriter:
                 # Height: encoded extent
                 h = ((map_h_mu + 1) // 2 + mask) >> shift
                 struct.pack_into("<H", subdiv_data, off + 12, h)
+                # Next level: 1-based global subdivision number.
+                # Each legacy level has 1 subdiv; level Z+1's first subdiv
+                # is at 0-based index Z+1, so 1-based = Z+2.
                 if not is_last_level:
-                    struct.pack_into("<H", subdiv_data, off + 14, z_idx + 1)
+                    struct.pack_into("<H", subdiv_data, off + 14, z_idx + 2)
                 rgn_tile_offset += tile_count * legacy_record_size
                 off += rec_size
 
@@ -1564,7 +1584,9 @@ def _build_rgn_subheader(
     After common header (21 bytes):
       RGN1: position(4) + size(4) at offset 0x15
       RGN2: position(4) + size(4) at offset 0x1D
-      Remaining: zeros
+      Extended fields at 0x25-0x7C: local flag bitmasks for each section,
+      critical for Garmin device rendering. Values taken from SwissTopo
+      reference files (SwissTopo_West.img, SwissTopo_Est.img).
     """
     buf = bytearray(RGN_HEADER_LENGTH)
 
@@ -1579,6 +1601,38 @@ def _build_rgn_subheader(
     # RGN2 section (extended types / raster data): position(4) + size(4) at offset 0x1D
     struct.pack_into("<I", buf, 0x1D, rgn2_pos)
     struct.pack_into("<I", buf, 0x21, rgn2_size)
+
+    # RGN2 extended polygon descriptor (0x25-0x38)
+    # 0x25: uint32 = 2 (known values: 0, 2; 2 = extended polygon encoding)
+    struct.pack_into("<I", buf, 0x25, 2)
+    # 0x29: uint32 = 0 (global flags)
+    # 0x2D: uint32 = 0x200000FF (polygon local flags[0])
+    struct.pack_into("<I", buf, 0x2D, 0x200000FF)
+    # 0x31: uint32 = 0x0003FCFD (polygon local flags[1])
+    struct.pack_into("<I", buf, 0x31, 0x0003FCFD)
+
+    # RGN3 (polylines) — empty for raster maps
+    rgn2_end = rgn2_pos + rgn2_size
+    struct.pack_into("<I", buf, 0x39, rgn2_end)  # position = end of RGN2
+    # 0x3D: size = 0 (already zero)
+    # 0x49: uint32 = 0x2000003F (lines local flags[1])
+    struct.pack_into("<I", buf, 0x49, 0x2000003F)
+    # 0x4D: uint32 = 0x00000FFD (lines local flags[2])
+    struct.pack_into("<I", buf, 0x4D, 0x00000FFD)
+
+    # RGN4 (POIs) — empty for raster maps
+    struct.pack_into("<I", buf, 0x55, rgn2_end)  # position = end of RGN2
+    # 0x59: size = 0 (already zero)
+    # 0x65: uint32 = 0x20003FFF (points local flags[1], SwissTopo reference)
+    struct.pack_into("<I", buf, 0x65, 0x20003FFF)
+    # 0x69: uint32 = 0x0FFFF73F (points local flags[2], SwissTopo reference)
+    struct.pack_into("<I", buf, 0x69, 0x0FFFF73F)
+
+    # RGN5 (dictionary) — empty for raster maps
+    struct.pack_into("<I", buf, 0x71, rgn2_end)  # position = end of RGN2
+    # 0x75: size = 0 (already zero)
+    # 0x79: uint32 = 1 (dict info, SwissTopo reference)
+    struct.pack_into("<I", buf, 0x79, 1)
 
     return bytes(buf)
 
@@ -2507,6 +2561,12 @@ class StreamingIMGWriter:
         for z_idx, zoom in enumerate(img_file.zoom_levels):
             zoom_shifts[z_idx] = max(0, 24 - zoom.level_number)
 
+        # Determine the last subdivision index at each zoom level
+        # (for setting the "end of chain" bit 15 on width)
+        last_sub_at_level: dict[int, int] = {}
+        for i, sub in enumerate(subdivisions):
+            last_sub_at_level[sub.zoom_level_index] = i
+
         off = 0
         for i, sub in enumerate(subdivisions):
             is_last_level = sub.zoom_level_index == n_zoom - 1
@@ -2521,14 +2581,16 @@ class StreamingIMGWriter:
             subdiv_data[off + 4 : off + 7] = _put3s(lon_mu)
             lat_mu = int(sub.center_lat * (2**24) / 360)
             subdiv_data[off + 7 : off + 10] = _put3s(lat_mu)
+            # Width: encoded horizontal extent with bit 15 = end of chain
             w = sub.encode_tre2_width(shift)
-            if not is_last_level:
-                w |= 0x8000
+            if not is_last_level and last_sub_at_level.get(sub.zoom_level_index) == i:
+                w |= 0x8000  # bit 15 = end of chain
             struct.pack_into("<H", subdiv_data, off + 10, w)
             h = sub.encode_tre2_height(shift)
             struct.pack_into("<H", subdiv_data, off + 12, h)
+            # Next level index (1-based, per mkgmap and PDF spec)
             if not is_last_level:
-                struct.pack_into("<H", subdiv_data, off + 14, sub.next_level_index)
+                struct.pack_into("<H", subdiv_data, off + 14, sub.next_level_index + 1)
             off += rec_size
         struct.pack_into("<I", subdiv_data, off, rgn2_total_extent)
 

@@ -402,8 +402,8 @@ class Subdivision:
       Last zoom level: 14 bytes (no nextLevel field)
         [rgn_offset(3)] [objects(1)] [lon(3)] [lat(3)] [width(2)] [height(2)]
 
-    width encodes: bit 15 = has children, bits 0-14 = encoded horizontal extent
-    height encodes: signed vertical extent (negative → has_points flag)
+    width encodes: bit 15 = end of chain (last child under parent), bits 0-14 = encoded horizontal extent
+    nextLevel: 1-based global subdivision number of first child at next zoom level
     """
 
     # Geographic center (WGS84 decimal degrees)
@@ -438,8 +438,9 @@ class Subdivision:
     def encode_tre2_width(self, shift: int) -> int:
         """Encode the horizontal extent for TRE2 width field.
 
-        Returns width with bit 15 set if this subdivision has children
-        (i.e., is not at the last zoom level — caller must set bit 15).
+        Returns width WITHOUT bit 15 set. The caller must set bit 15
+        (end-of-chain marker) only on the last subdivision at each
+        non-last zoom level.
         The encoded value represents (extent_in_map_units >> shift).
         Clamped to 0x7FFF to fit in 15-bit TRE2 width field.
         +1 is added to ensure adjacent subdivision bounds overlap (not gap).

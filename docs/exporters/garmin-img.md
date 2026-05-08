@@ -244,32 +244,42 @@ int(47.65 * 2^24 / 360) = 2,225,653 = 0x21E825 → bytes 25 E8 21
 
 ### 3.6 RGN Sub-Header (125 bytes)
 
-After the 21-byte common header, the RGN sub-header uses the following layout (positions are **GMP-relative** offsets):
+After the 21-byte common header, the RGN sub-header uses the following layout. All position values are **GMP-relative** offsets. Field values are from the Oppmann PDF spec (2023-09-05) and verified against SwissTopo reference files.
 
-| RGN Offset | Size | Field              | Description                                          |
-| ---------- | ---- | ------------------ | ---------------------------------------------------- |
-| 0x15       | 8    | RGN1 position/size | pos(4) + size(4) — standard data                     |
-| 0x1D       | 8    | RGN2 position/size | pos(4) + size(4) — raster layers / extended polygons |
-| 0x25       | 8    | RGN2 ext position  | Extended polygon data position and size (see below)  |
-| 0x2D       | 2    | RGN2 ext rec_size  | Record size for extended polygon entries              |
-| 0x2F       | 2    | Unknown            | Observed non-zero in SwissTopo reference              |
-| 0x31       | 8    | RGN2 ext flags     | Extended polygon section flags                        |
-| 0x39       | 8    | RGN3 position/size | pos(4) + size(4) — extended polylines                |
-| 0x41       | 8    | RGN3 ext position  | Extended polyline data position and size              |
-| 0x49       | 2    | RGN3 ext rec_size  | Record size for extended polyline entries             |
-| 0x4B       | 2    | Unknown            | Observed non-zero in SwissTopo reference              |
-| 0x4D       | 8    | RGN3 ext flags     | Extended polyline section flags                       |
-| 0x55       | 8    | RGN4 position/size | pos(4) + size(4) — extended POIs                     |
-| 0x5D       | 8    | RGN4 ext position  | Extended POI data position and size                   |
-| 0x65       | 2    | RGN4 ext rec_size  | Record size for extended POI entries                  |
-| 0x67       | 2    | Unknown            |                                                      |
-| 0x69       | 8    | RGN4 ext flags     | Extended POI section flags                            |
-| 0x71       | 8    | RGN5 position/size | pos(4) + size(4)                                     |
-| 0x79+      |      | RGNEXT header      | Extended data                                        |
+| RGN Offset | Size | Field                   | Description / Reference Value                                  |
+| ---------- | ---- | ----------------------- | -------------------------------------------------------------- |
+| 0x15       | 4    | RGN1 position           | GMP-relative offset to section 1 data                          |
+| 0x19       | 4    | RGN1 size               | Size of section 1 in bytes                                     |
+| 0x1D       | 4    | RGN2 position           | GMP-relative offset to polygon/raster section                  |
+| 0x21       | 4    | RGN2 size               | Size of polygon section in bytes                               |
+| 0x25       | 4    | RGN2 ext: encoding flag | Known values: 0, 2. **Must be 2** for extended/raster maps.    |
+| 0x29       | 4    | RGN2 ext: flags[0]      | 0x00000000 (always zero)                                       |
+| 0x2D       | 4    | RGN2 ext: flags[1]      | 0x200000FF — polygon local flag bitmask                        |
+| 0x31       | 4    | RGN2 ext: flags[2]      | 0x0003FCFD — polygon local flag bitmask                        |
+| 0x35       | 4    | RGN2 ext: flags[3]      | 0x00000000 (always zero)                                       |
+| 0x39       | 4    | RGN3 position           | GMP-relative offset to polyline section (= rgn2_pos + rgn2_size) |
+| 0x3D       | 4    | RGN3 size               | 0 for raster maps                                              |
+| 0x41       | 4    | RGN3 ext: reserved      | 0x00000000                                                     |
+| 0x45       | 4    | RGN3 ext: flags[0]      | 0x00000000                                                     |
+| 0x49       | 4    | RGN3 ext: flags[1]      | 0x2000003F — lines local flag bitmask                          |
+| 0x4D       | 4    | RGN3 ext: flags[2]      | 0x00000FFD — lines local flag bitmask                          |
+| 0x51       | 4    | RGN3 ext: flags[3]      | 0x00000000                                                     |
+| 0x55       | 4    | RGN4 position           | GMP-relative offset to POI section (= rgn2_pos + rgn2_size)    |
+| 0x59       | 4    | RGN4 size               | 0 for raster maps                                              |
+| 0x5D       | 4    | RGN4 ext: reserved      | 0x00000000                                                     |
+| 0x61       | 4    | RGN4 ext: flags[0]      | 0x00000000                                                     |
+| 0x65       | 4    | RGN4 ext: flags[1]      | 0x20003FFF — points local flag bitmask (SwissTopo reference)   |
+| 0x69       | 4    | RGN4 ext: flags[2]      | 0x0FFFF73F — points local flag bitmask (SwissTopo reference)   |
+| 0x6D       | 4    | RGN4 ext: flags[3]      | 0x00000000                                                     |
+| 0x71       | 4    | RGN5 position           | GMP-relative offset to dictionary section (= rgn2_pos + rgn2_size) |
+| 0x75       | 4    | RGN5 size               | 0 for raster maps                                              |
+| 0x79       | 4    | RGN5 ext: dict info     | 1 (SwissTopo reference; controls Huffman table loading)         |
 
-**Note:** All `pos` values in the RGN sub-header are GMP-relative offsets, matching the TRE header convention.
+**Critical field: RGN+0x25.** The value 2 at this offset indicates extended polygon encoding. Without this field set correctly, Garmin device firmware will not parse the RGN2 section as extended/raster data. A value of 0 means standard (non-extended) polygon format.
 
-**SwissTopo reference RGN sub-header differences:** The SwissTopo_West.img reference has non-zero bytes at multiple offsets where a naive implementation writes zeros. Key offsets with non-zero values in the reference include 0x25 (RGN2 ext position), 0x2D-0x33 (RGN2 ext rec_size and flags), 0x39-0x3B (RGN3 position), 0x49 (RGN3 ext rec_size), 0x4C-0x4E, 0x55-0x57 (RGN4 position), 0x65-0x66, 0x68-0x6C, 0x71-0x72 (RGN5 position), and 0x79. These extended fields are critical for device rendering — GPXSee uses them to locate per-subdivision segment boundaries within the RGN2 data section. See Section 4.5.4 for the full parsing chain.
+**Local flag bitmasks:** The flags fields at 0x2D, 0x31, 0x49, 0x4D, 0x65, 0x69 are bitmasks that tell the device firmware which extended object types (type values >= 0x100) have local fields in each section. The values above are taken from SwissTopo_West.img and SwissTopo_Est.img (both identical), the canonical raster IMG references.
+
+**Section positions for empty sections:** RGN3, RGN4, and RGN5 positions are set to `rgn2_pos + rgn2_size` (immediately after the RGN2 data) with size=0, indicating no polyline, POI, or dictionary data.
 
 ### 3.7 LBL Sub-Header (596 bytes)
 
@@ -708,15 +718,15 @@ Example with 12 zoom levels (zooms 6-17):
 
 - Zoom code 0 = most detailed (highest zoom level)
 - Higher zoom codes = less detailed (overview levels)
-- First two levels get `0x80 + (N-1-i)` (inherited/overview flag in bit 7)
-- Remaining levels count down from `N-3` to `0`
+- Only the first (most zoomed-out) level gets the inherited flag (0x80) per mkgmap
+- Pattern: level 0 gets `0x80 + (N-1)`, remaining levels count down from `N-2` to `0`
 
 **Observed values from reference files:**
 
 | File               | Zoom Codes (byte 0)          | Level Numbers (byte 1) | Subdivisions     |
 | ------------------ | ---------------------------- | ---------------------- | ---------------- |
-| SwissTopo_West     | 0x84, 0x83, 0x02, 0x01, 0x00 | 20, 21, 22, 23, 24   | 1 each (5 total) |
-| IOM subfile 355951 | 0x87, 0x86, 0x05, ..., 0x00  | 17, 18, 19, ..., 24  | 1 each (8 total) |
+| SwissTopo_West     | 0x84, 0x83, 0x02, 0x01, 0x00 | 20, 21, 22, 23, 24   | 1, 3, 138, 156, 300 |
+| IOM subfile 355951 | 0x87, 0x06, 0x05, ..., 0x00  | 17, 18, 19, ..., 24  | 1 each (8 total) |
 
 SwissTopo decoded level 0: code=0x84 (inherited, bit 7 set + value 4), bits=20. GPXSee skips inherited levels for data rendering.
 
@@ -728,23 +738,21 @@ TRE2 contains subdivision records that define the spatial index for map data. Th
 
 | Offset | Size | Field             | Description                                            |
 | ------ | ---- | ----------------- | ------------------------------------------------------ |
-| 0      | 3    | RGN offset        | 3-byte LE offset into RGN2 data for this subdivision   |
-| 3      | 1    | Object types      | Flags indicating contained object types                |
+| 0      | 4    | RGN offset/flags  | uint32 LE: bits 31-28 = has-polygons/lines/points flags, bits 27-0 = RGN2 offset |
 | 4      | 3    | Longitude center  | 3-byte signed LE, map units (degrees × 2^24 / 360)     |
 | 7      | 3    | Latitude center   | 3-byte signed LE, map units (degrees × 2^24 / 360)     |
-| 10     | 2    | Width             | uint16 LE, bit 15 = has_children flag                  |
+| 10     | 2    | Width             | uint16 LE: bit 15 = end of chain marker, bits 14-0 = encoded width |
 | 12     | 2    | Height            | uint16 LE                                              |
-| 14     | 2    | Next level index  | uint16 LE, 1-based index into next zoom level's groups |
+| 14     | 2    | Next level index  | uint16 LE, **1-based** global subdivision number of first child at next zoom level |
 
 **14-byte record (last zoom level — no next_level field):**
 
 | Offset | Size | Field             | Description                                            |
 | ------ | ---- | ----------------- | ------------------------------------------------------ |
-| 0      | 3    | RGN offset        | 3-byte LE offset into RGN2 data                        |
-| 3      | 1    | Object types      | Flags indicating contained object types                |
+| 0      | 4    | RGN offset/flags  | uint32 LE: bits 31-28 = has-polygons/lines/points flags, bits 27-0 = RGN2 offset |
 | 4      | 3    | Longitude center  | 3-byte signed LE, map units                            |
 | 7      | 3    | Latitude center   | 3-byte signed LE, map units                            |
-| 10     | 2    | Width             | uint16 LE, no has_children bit                         |
+| 10     | 2    | Width             | uint16 LE (no end-of-chain bit in last level)          |
 | 12     | 2    | Height            | uint16 LE                                              |
 
 **Trailing bytes:** 4 bytes (uint32 LE) containing total RGN2 data size. This is the sentinel value used by GPXSee to determine the end of the last subdivision's RGN2 segment.
@@ -760,7 +768,8 @@ mask = (1 << shift) - 1
 width  = ((2 * (center_mu - west_mu) + 1) // 2 + mask) >> shift
 height = ((2 * (center_mu - south_mu) + 1) // 2 + mask) >> shift
 
-For non-last levels: width |= 0x8000  (bit 15 = has_children)
+For non-last levels: width |= 0x8000 only on the LAST subdivision in each
+chain (bit 15 = end of chain marker per PDF spec)
 ```
 
 Where `center_mu`, `west_mu`, `south_mu` are the subdivision bounds in 24-bit map units (degrees × 2^24 / 360). The `+1 // 2` rounding ensures the encoded value rounds up to cover the full subdivision area.

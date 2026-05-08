@@ -252,6 +252,28 @@ This document provides a curated list of resources, tools, libraries, and docume
 
 ### Comprehensive Format Specification
 
+#### Herbert Oppmann Garmin IMG Format Documents (Local)
+
+- **Files:**
+  - `docs/exporters/Garmin_IMG_Format.pdf` — Container format specification
+  - `docs/exporters/Garmin_IMG_Subfiles_Format.pdf` — Subfile format specification
+- **Author:** Herbert Oppmann (memotech.franken.de)
+- **Source:** <https://www.memotech.franken.de/FileFormats/#GarminIMG>
+- **Dates:** 2024-08-31 (Container), 2023-09-05 (Subfiles)
+- **Coverage:** Authoritative reverse-engineered specification for both container and subfile formats
+- **Content (Container):**
+  - Boot sector / IMG header layout with XOR encryption
+  - FAT block structure and subfile chain traversal
+  - GMP container format with section table
+- **Content (Subfiles):**
+  - TRE header with all section descriptors (TRE1-TRE10)
+  - TRE Section 1 (Map levels): zoom_code encoding (bit 7=inherited, bits 3-0=level), bits_per_coordinate
+  - TRE Section 2 (Subdivisions): uint32 with flag bits 31-28 (has-polygons/lines/points), width bit 15 = end of chain, next_level as 1-based index
+  - TRE Section 7 (Extended type offsets): variable record format with flag byte
+  - RGN header: 125-byte format with section 1-5 descriptors and local flag bitmasks
+  - GMP format: all offsets are GMP-relative, not subfile-relative
+- **Importance:** Most up-to-date and accurate specification available. Corrects several ambiguities in the Mechalas and Willink documents. The TRE2 subdivision field descriptions (uint32 with flag bits, 1-based next_level, end-of-chain bit semantics) are authoritative.
+
 #### John Mechalas IMG Format Specification (Local)
 
 - **File:** `docs/exporters/imgformat-1.0.pdf` (included in repository)
@@ -742,5 +764,5 @@ Garmin's professional maps (like SwissTopo Pro) combine both raster and vector d
 
 ---
 
-**Last Updated:** 2026-04-26
+**Last Updated:** 2026-05-08
 **Key Takeaway:** This project implements the first known open-source Garmin raster IMG writer, filling a significant gap in the GIS ecosystem. The GMP container format has been fully reverse-engineered, with GMapTool validation passing for generated files.

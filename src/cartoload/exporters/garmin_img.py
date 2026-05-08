@@ -40,12 +40,12 @@ logger = logging.getLogger(__name__)
 
 # Garmin zoom code computation (position-based, not absolute)
 # The TRE1 level records store a zoom_code byte at offset 0.
-# Pattern (confirmed from SwissTopo_West.img reference files):
-#   For N levels: first two levels get 0x80 + (N-1) and 0x80 + (N-2),
-#   remaining levels count down from N-3 to 0.
-# Examples:
-#   SwissTopo 5 levels [20-24]: codes 0x84, 0x83, 0x02, 0x01, 0x00
-#   IOM 8 levels [17-24]:       codes 0x87, 0x86, 0x05, 0x04, 0x03, 0x02, 0x01, 0x00
+# Only the top level (most zoomed-out, first entry) gets the inherited flag (0x80).
+# This matches mkgmap behavior: Map.topLevelSubdivision() calls zoom.setInherited(true)
+# only once, on the root level. GPXSee skips all levels with 0x80 and starts rendering
+# from the first non-inherited level.
+# Pattern: first level gets 0x80 + (N-1), remaining levels count down from N-2 to 0.
+# Example (8 levels): 0x87, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0x00
 
 
 def _compute_zoom_codes(sorted_level_numbers: list[int]) -> list[tuple[int, int]]:
@@ -60,8 +60,8 @@ def _compute_zoom_codes(sorted_level_numbers: list[int]) -> list[tuple[int, int]
     n = len(sorted_level_numbers)
     codes = []
     for i, level_num in enumerate(sorted_level_numbers):
-        if i <= 1:
-            code = 0x80 + (n - 1 - i)
+        if i == 0:
+            code = 0x80 + (n - 1)
         else:
             code = n - 1 - i
         codes.append((level_num, code))
