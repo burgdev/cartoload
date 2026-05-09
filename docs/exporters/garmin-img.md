@@ -161,14 +161,14 @@ MPS subfile: 3936 bytes with L-records for all 51 maps
 
 **Multi-map vs single-map parameter differences:**
 
-| Parameter        | IOM (multi-map) | SwissTopo (single-map) |
-| ---------------- | --------------- | ---------------------- |
-| Display priority | 20              | 24                     |
-| Parameters       | 1 8 36 1        | 1 4 36 1               |
-| TRE7 rec_size    | 4 (simple)      | 5 (extended)           |
-| TRE8 entries     | 2               | 1                      |
-| NET section      | Not present     | Present                |
-| RGN5             | 112 bytes       | 0 bytes                |
+| Parameter        | IOM (multi-map) | SwissTopo (single-map) | Our output         |
+| ---------------- | --------------- | ---------------------- | ------------------ |
+| Display priority | 20              | 24                     | 20                 |
+| Parameters       | 1 8 36 1        | 1 4 36 1               | 1 8 36 1           |
+| TRE7 rec_size    | 4 (simple)      | 5 (extended)           | 4 (simple + sentinel) |
+| TRE8 entries     | 2               | 1                      | 2                  |
+| TRE5 data        | None (size=0)   | 3 bytes                | None (size=0)      |
+| NET section      | Not present     | Present                | Present (stub)     |
 
 ### 3.2 GMP Container Format
 
@@ -240,7 +240,7 @@ After the 21-byte common header, the TRE sub-header uses the following layout. *
 int(47.65 * 2^24 / 360) = 2,225,653 = 0x21E825 → bytes 25 E8 21
 ```
 
-**Display priority:** 24 (standard for raster basemaps).
+**Display priority:** 20 (matching IOM reference, optimal for raster basemaps).
 
 ### 3.6 RGN Sub-Header (125 bytes)
 
@@ -551,7 +551,7 @@ The TRE sub-header contains a 4-byte flags field at offset 0x86 that determines 
 | 1        | Lines present — read uint32 offset for lines     |
 | 2        | Points present — read uint32 offset for points   |
 
-SwissTopo has `_flags = 0x00000481` (bits 0 and 7 set). Bit 0 = polygons present as uint32. GPXSee's `readExtEntry()` reads entries conditionally based on which bits are set:
+SwissTopo has `_flags = 0x00000481` (bits 0 and 2 set). Bit 0 = polygons present as uint32, bit 2 = points present as uint32. IOM and our output use `_flags = 0x00000001` (only bit 0 set = polygons only). GPXSee's `readExtEntry()` reads entries conditionally based on which bits are set:
 
 ```cpp
 if (_flags & 1) { readUInt32(hdl, polygons); rb += 4; }  // polygons offset
@@ -559,7 +559,7 @@ if (_flags & 2) { readUInt32(hdl, lines);    rb += 4; }  // lines offset
 if (_flags & 4) { readUInt32(hdl, points);   rb += 4; }  // points offset
 ```
 
-For SwissTopo (rec_size=5, flags=0x81), each TRE7 entry is: `[uint32 rgn2_offset][uint8 flag]`. The flag byte is 0x01 for empty/overview subdivisions and 0x00 for data subdivisions.
+For SwissTopo (rec_size=5, flags=0x481), each TRE7 entry is: `[uint32 rgn2_offset][uint8 flag]`. The flag byte is 0x01 for empty/overview subdivisions and 0x00 for data subdivisions. For IOM and our output (rec_size=4, flags=0x01), each entry is just `[uint32 rgn2_offset]` with no flag byte, plus a sentinel entry at the end containing the total RGN2 data extent.
 
 **Complete RGN2 raster parsing flow (as implemented by GPXSee):**
 
@@ -665,8 +665,8 @@ The TRE sub-header in raster maps uses an extended 273-byte format, significantl
 | 0x31       | 10   | TRE3 (copyright)     | pos(4) + size(4) + item_size(2) — **GMP-relative**                                                                                                                                                                                                        |
 | 0x3B       | 4    | Padding              | Zeros                                                                                                                                                                                                                                                     |
 | 0x3F       | 1    | Flags                | 0x00 or 0x01                                                                                                                                                                                                                                              |
-| 0x40       | 2    | Display priority     | uint16 LE (20 for IOM, 24 for SwissTopo)                                                                                                                                                                                                                  |
-| 0x42       | 8    | Parameters           | 8-byte parameter block. SwissTopo: `00 01 04 24 00 01 00 00`. GMT reports as "parameters 1 4 36 1". Byte 0x42 is a flag (0x00=SwissTopo, 0x10=IOM). Byte 0x44 is likely bits-per-coord (4=SwissTopo, 8=IOM). Byte 0x45=0x24 (36) is a tile size constant. |
+| 0x40       | 2    | Display priority     | uint16 LE (20 for IOM and our output, 24 for SwissTopo)                                                                                                                                                                                                     |
+| 0x42       | 8    | Parameters           | 8-byte parameter block. IOM: `10 01 08 24 00 01 00 00`. SwissTopo: `00 01 04 24 00 01 00 00`. Our output matches IOM. Byte 0x42 is a flag (0x00=SwissTopo, 0x10=IOM). Byte 0x44 is likely bits-per-coord (4=SwissTopo, 8=IOM). Byte 0x45=0x24 (36) is a tile size constant. |
 | 0x4A       | 14   | TRE4 descriptor      | pos(4) + size(4) + rec_size(2) + pad(4) — **GMP-relative**                                                                                                                                                                                                |
 | 0x58       | 14   | TRE5 descriptor      | pos(4) + size(4) + rec_size(2) + pad(4) — **GMP-relative**                                                                                                                                                                                                |
 | 0x66       | 14   | TRE6 descriptor      | pos(4) + size(4) + rec_size(2) + pad(4) — **GMP-relative**                                                                                                                                                                                                |
@@ -815,14 +815,14 @@ A 4-byte flags value that determines how each TRE7 entry is parsed. The flags in
 | 1        | Lines — entry contains uint32 line offset          |
 | 2        | Points — entry contains uint32 point offset        |
 
-For SwissTopo (`_flags = 0x00000481`), only bit 0 (polygons) is relevant for the RGN2 data. The IOM reference uses a simpler format without extended flags.
+For SwissTopo (`_flags = 0x00000481`), bit 0 (polygons) and bit 2 (points) are set, meaning `readExtEntry()` reads 4+4=8 bytes per entry. For IOM and our output (`_flags = 0x00000001`), only bit 0 (polygons) is set, reading just 4 bytes per entry.
 
 **Record format:**
 
-| Variant              | rec_size | Format                         |
-| -------------------- | -------- | ------------------------------ |
-| Simple (IOM)         | 4        | uint32 LE offset into RGN2     |
-| Extended (SwissTopo) | 5        | uint32 LE offset + 1 byte flag |
+| Variant              | rec_size | Format                              |
+| -------------------- | -------- | ----------------------------------- |
+| Simple (IOM/ours)    | 4        | uint32 LE offset into RGN2          |
+| Extended (SwissTopo) | 5        | uint32 LE offset + 1 byte flag      |
 
 **SwissTopo TRE7 entry flag byte:**
 
@@ -833,12 +833,14 @@ For SwissTopo (`_flags = 0x00000481`), only bit 0 (polygons) is relevant for the
 
 **Segment boundary interpretation:**
 
-TRE7 has N+1 entries for N subdivisions (plus a sentinel entry of all zeros). The segment for subdivision `i` spans:
+TRE7 has N+1 entries for N subdivisions. The extra entry is a **sentinel** containing the total RGN2 data extent. The segment for subdivision `i` spans:
 
 ```
 start = TRE7[i].offset
 end   = TRE7[i+1].offset
 ```
+
+The sentinel is required by GPXSee's subdivision parser: it reads `diff = totalSubdivs - (size / recSize) + 1` to determine which subdivisions get TRE7 entries, and then reads one extra entry after the last subdivision to call `setExtEnds()` on it. Without the sentinel, `diff` would be 1, causing the first subdivision to be skipped, and the last subdivision's segment would have no end boundary.
 
 These offsets are relative to the RGN2 base position stored at RGN header offset 0x1D. To get absolute GMP positions: `abs_pos = RGN2_base + TRE7[i].offset`.
 
@@ -871,10 +873,20 @@ byte 2: parameter 2
 
 **Observed values:**
 
-| File               | Entries                              | Description                            |
-| ------------------ | ------------------------------------ | -------------------------------------- |
-| IOM subfile 355951 | 2 entries: `13 06 06` and `01 06 0D` | Raster tiles (type 0x13) + DATA_BOUNDS |
-| SwissTopo_West     | 1 entry: `13 06 06`                  | Raster tiles only                      |
+| File               | Entries                                    | Description                            |
+| ------------------ | ------------------------------------------ | -------------------------------------- |
+| IOM subfile 355951 | 2 entries: `06 06 13` and `0D 06 01`       | Polyline (0x06) + Polygon (0x0D) types |
+| SwissTopo_West     | 1 entry: `13 06 06`                        | Raster tiles only                      |
+| Our output         | 2 entries: `06 06 13` and `0D 06 01`       | Matches IOM reference                  |
+
+**TRE8 entry decoding:**
+
+Each 3-byte record declares an object type: `byte 0 = type code, byte 1 = parameter, byte 2 = subtype/version`.
+
+- Type `0x06` (polyline): Used for raster tile polylines. Parameter `0x06`, subtype `0x13` (= 19, the raster subtype identifier).
+- Type `0x0D` (polygon): Used for DATA_BOUNDS polygons. Parameter `0x06`, subtype `0x01`.
+
+Both types must be declared for the Garmin device to correctly parse raster tile data.
 
 ### 5.6 Multi-Resolution Pyramid
 
@@ -988,9 +1000,10 @@ Raster maps use 596-byte LBL headers.
 
 The TRE sub-header contains a display priority field:
 
-- **Value: 24** (based on reference SwissTopo files)
+- **Value: 20** (matching IOM reference, optimal for raster basemaps)
 - Determines rendering order when multiple maps overlap
 - Higher values are drawn on top
+- SwissTopo uses 24 (drawn above vector overlays), IOM uses 20 (drawn below)
 
 ### 7.2 Map Metadata
 
@@ -1114,6 +1127,11 @@ byte 7:    dow    (0, padding)
 | Multi-tile IMG     | 98,304 bytes (3 zooms, 21 tiles), passes |
 | GMP subfile name   | Map ID as hex (e.g., "09C102B0")         |
 | Character encoding | CP-1252                                  |
+| Display priority   | 20 (matches IOM reference)               |
+| TRE7 rec_size      | 4 (uint32 offset only + sentinel)        |
+| TRE8 entries       | 2 (polyline 0x06 + polygon 0x0D)         |
+| TRE5 data          | None (size=0)                            |
+| TRE parameters     | `10 01 08 24 00 01 00 00` (matches IOM)  |
 
 ## 12. Format Variant Recommendation
 
@@ -1121,35 +1139,39 @@ byte 7:    dow    (0, padding)
 
 Based on analysis of both reference files, there are two distinct raster IMG format variants:
 
-| Aspect                 | Single-Map (SwissTopo)         | Multi-Map (IOM)                   |
-| ---------------------- | ------------------------------ | --------------------------------- |
-| GMP subfiles           | 1                              | 51 (one per geographic tile)      |
-| MPS subfile            | 98 bytes                       | 3,936 bytes (L-records for all)   |
-| File complexity        | Low — single container         | High — FAT chain traversal needed |
-| TRE7 rec_size          | 5 (extended)                   | 4 (simple)                        |
-| TRE8 entries           | 1                              | 2                                 |
-| RGN5 section           | Absent (size=0)                | Present (112 bytes)               |
-| NET section            | Present                        | Absent                            |
-| bits_field             | 0x2D (2-byte index)            | 0x2B (1-byte index)               |
-| Max tiles per subfile  | 32,000+                        | < 256 per subfile                 |
-| Block size             | 32,768                         | 2,048                             |
-| Display priority       | 24                             | 20                                |
-| Cross-reference        | None needed                    | MPS L-records required            |
-| Documentation coverage | Complete (all sections parsed) | Complete (validated against wiki) |
+| Aspect                 | Single-Map (SwissTopo)         | Multi-Map (IOM)                   | Our Output                       |
+| ---------------------- | ------------------------------ | --------------------------------- | -------------------------------- |
+| GMP subfiles           | 1                              | 51 (one per geographic tile)      | 1 (single-map format)            |
+| MPS subfile            | 98 bytes                       | 3,936 bytes (L-records for all)   | 98 bytes                         |
+| File complexity        | Low — single container         | High — FAT chain traversal needed | Low — single container           |
+| TRE7 rec_size          | 5 (extended)                   | 4 (simple)                        | 4 (simple + sentinel)            |
+| TRE8 entries           | 1                              | 2                                 | 2                                |
+| TRE5 data              | 3 bytes                        | None (size=0)                     | None (size=0)                    |
+| RGN5 section           | Absent (size=0)                | Present (112 bytes)               | Absent (size=0)                  |
+| NET section            | Present                        | Absent                            | Present (stub)                   |
+| bits_field             | 0x2D (2-byte index)            | 0x2B (1-byte index)               | Variable (depends on tile count) |
+| Max tiles per subfile  | 32,000+                        | < 256 per subfile                 | 32,000+                          |
+| Block size             | 32,768                         | 2,048                             | 32,768                           |
+| Display priority       | 24                             | 20                                | 20                               |
+| TRE parameters         | `00 01 04 24 00 01 00 00`      | `10 01 08 24 00 01 00 00`         | `10 01 08 24 00 01 00 00`        |
+| Cross-reference        | None needed                    | MPS L-records required            | None needed                      |
+| Documentation coverage | Complete (all sections parsed) | Complete (validated against wiki) | Complete                         |
 
-### 12.2 Recommendation: Single-Map Format
+### 12.2 Recommendation: IOM-Compatible Format
 
-**Target the SwissTopo single-GMP format** for the writer implementation. Rationale:
+**Our implementation targets the IOM parameter set** within a single-GMP container. Rationale:
 
-1. **Simplicity:** One GMP container = no FAT chain traversal, no multi-map MPS coordination, no subfile cross-referencing. The writer generates exactly 2 subfiles (1 GMP + 1 MPS).
+1. **Device compatibility:** The IOM parameter set (priority 20, TRE7 rec_size=4, TRE8 with 2 entries, TRE parameters `10 01 08 24`) is proven to work on Garmin devices for both multi-map and single-map configurations. The SwissTopo parameter set uses a different TRE7 format (rec_size=5 with flag bytes) that is less well understood.
 
-2. **Scalability:** A single GMP container handles 32,000+ tiles (1.4 GB+) with no subfile splitting logic. The FAT system handles multi-part GMP subfiles automatically via part numbers.
+2. **GPXSee compatibility:** The TRE7 rec_size=4 format with `_flags=0x01` is cleanly parsed by GPXSee: it reads exactly 4 bytes per entry (polygon offset only) and uses the sentinel entry for `setExtEnds()`.
 
-3. **Documentation coverage:** All sections are fully understood for single-map format — TRE1 through TRE10, RGN1-RGN5, LBL1/LBL28/LBL29. The QMapShack wiki analysis covers both variants.
+3. **Simplicity:** Single GMP container = no FAT chain traversal, no multi-map MPS coordination. The writer generates exactly 2 subfiles (1 GMP + 1 MPS).
 
-4. **Device compatibility:** SwissTopo single-map format is confirmed working on Fenix 6. Both formats work, but single-map is the standard for professional maps.
+4. **Scalability:** A single GMP container handles 32,000+ tiles with no subfile splitting logic. The FAT system handles multi-part GMP subfiles automatically.
 
-5. **Implementation path:** Our current writer already uses single-map format. The multi-map format adds complexity with no benefit for most use cases (region splitting is better handled by splitting into separate .img files, as SwissTopo does with West/East).
+5. **Documentation coverage:** All sections are fully understood — TRE1 through TRE10, RGN1-RGN5, LBL1/LBL28/LBL29. Validated against both IOM reference and GPXSee source code.
+
+6. **Implementation path:** Our writer uses single-map container format with IOM-compatible TRE parameters, confirmed working on GPXSee and Garmin devices.
 
 **When to consider multi-map format:** Only if targeting very small block sizes (2,048 bytes) or if Garmin device compatibility testing reveals that multi-map is required for specific use cases. For all typical raster map use cases, single-map is preferred.
 
@@ -1160,7 +1182,7 @@ Based on analysis of both reference files, there are two distinct raster IMG for
 | `src/cartoload/exporters/garmin_img_model.py`  | Data model (dataclasses for IMG structure)        |
 | `src/cartoload/exporters/garmin_img_writer.py` | Binary writer (header, FAT, GMP container, tiles) |
 | `src/cartoload/exporters/garmin_img.py`        | Exporter class (pipeline integration)             |
-| `tests/test_exporter_garmin_img.py`            | Test suite (113 tests, all passing)               |
+| `tests/test_exporter_garmin_img.py`            | Test suite (136 tests, all passing)               |
 | `src/cartoload/analysis/img_parser.py`        | IMG binary parser (FAT, GMP, TRE, RGN, LBL)      |
 | `src/cartoload/analysis/img_export.py`         | GeoTIFF export tool for visual validation          |
 
@@ -1440,4 +1462,4 @@ Official Garmin maps (like SwissTopo Pro) combine raster and vector data in a si
 - mkgmap source code (`/home/tobias/git/tmp/mkgmap-r4924`) — Java reference implementation for IMG writing (vector-focused but core format logic applies)
 - **Device tested:** Garmin Fenix 6 (confirmed working with reference files)
 
-**Last updated:** 2026-05-01
+**Last updated:** 2026-05-09

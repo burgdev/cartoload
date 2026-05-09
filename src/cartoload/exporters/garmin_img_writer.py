@@ -598,15 +598,13 @@ class LayoutComputer:
         tre_data = 6 + subdiv_size + map_levels_size  # copyright + subdiv + map_levels
 
         # TRE extended sections (needed for GMT bitmap detection)
-        if subdivisions:
-            tre7_rec_size = 5  # SwissTopo format: uint32 offset + flag byte
-            tre7_size = (n_subdivisions + 1) * tre7_rec_size  # +1 sentinel
-        else:
-            tre7_rec_size = 4  # Legacy: uint32 offset only
-            tre7_size = (n_subdivisions + 1) * tre7_rec_size  # +1 sentinel
+        # rec_size=4 (uint32 offset only, no flag byte)
+        # +1 sentinel entry for GPXSee compatibility (setExtEnds on last subdiv)
+        tre7_rec_size = 4
+        tre7_size = (n_subdivisions + 1) * tre7_rec_size
         # TRE extended sections (TRE5, TRE7, TRE8)
-        tre5_size = 3  # 3 bytes: 4B 02 01
-        tre8_size = 3  # TRE8: single 3-byte entry (06 02 13)
+        tre5_size = 0  # IOM reference: no TRE5 data
+        tre8_size = 6  # TRE8: two 3-byte entries (06 06 13, 0D 06 01)
         tre_ext_data = tre5_size + tre8_size + tre7_size
 
         # RGN data sections:
@@ -989,10 +987,10 @@ class GMPWriter:
         use_subdivisions = subdivisions is not None and len(subdivisions) > 0
         if use_subdivisions:
             n_subdivisions = len(subdivisions)
-            tre7_rec_size = 5  # SwissTopo format: uint32 offset + flag byte
         else:
             n_subdivisions = n_zoom
-            tre7_rec_size = 4  # Legacy: uint32 offset only
+        # IOM reference: rec_size=4 (uint32 offset only, no flag byte)
+        tre7_rec_size = 4
 
         # --- Phase 1: Compute layout (positions of all sections) ---
         copyright_str = img_file.copyright_string or "Copyright GARMIN."
@@ -1054,19 +1052,16 @@ class GMPWriter:
 
         # --- TRE extended sections (TRE5, TRE8, TRE7) ---
         tre5_pos = pos  # GMP-relative (separate from TRE8)
-        tre5_size = 3  # 3 bytes: 4B 02 01
+        tre5_size = 0  # IOM reference: no TRE5 data
         pos += tre5_size
 
         tre8_pos = pos  # GMP-relative
-        tre8_size = 3  # Single entry: 06 02 13 (SwissTopo reference)
+        tre8_size = 6  # Two entries: 06 06 13, 0D 06 01 (IOM reference)
         pos += tre8_size
 
-        # TRE7 data: one entry per subdivision (+ sentinel only for SwissTopo format)
+        # TRE7 data: one entry per subdivision + sentinel (uint32 offset only)
         tre7_pos = pos  # GMP-relative
-        if use_subdivisions:
-            tre7_size = (n_subdivisions + 1) * tre7_rec_size  # +1 sentinel
-        else:
-            tre7_size = (n_subdivisions + 1) * tre7_rec_size  # +1 sentinel
+        tre7_size = (n_subdivisions + 1) * tre7_rec_size
         pos += tre7_size
 
         # --- RGN data sections ---
@@ -1151,7 +1146,6 @@ class GMPWriter:
         # Plus 4 trailing bytes (total RGN2 data extent)
         if use_subdivisions:
             # Assign RGN2 offsets to subdivisions (sequential per-subdivision)
-            # and set TRE7 flags (0x01 for empty subdivisions, 0x00 for those with tiles)
             rgn2_running_offset = 0
             rgn2_total_extent = 0
             record_size = _rgn2_record_size(_img_id_size(total_tiles))
@@ -1160,10 +1154,8 @@ class GMPWriter:
                 if tile_count == 0:
                     # Empty subdivision (overview zoom): no RGN2 data
                     sub.rgn2_offset = 0
-                    sub.tre7_flag = 0x01
                 else:
                     sub.rgn2_offset = rgn2_running_offset
-                    sub.tre7_flag = 0x00
                     chunk_size = tile_count * record_size
                     rgn2_running_offset += chunk_size
                     rgn2_total_extent = rgn2_running_offset
@@ -1175,7 +1167,9 @@ class GMPWriter:
                 zoom_shifts[z_idx] = max(0, 24 - zoom.level_number)
 
             # Determine the last subdivision index at each zoom level
-            # (for setting the "end of chain" bit 15 on width)
+            # (for setting the "end of chain" bit 15 on width).
+            # With the simple chain model (all parents point to first child at
+            # next level), EOC goes on the last sub at each non-last level.
             last_sub_at_level: dict[int, int] = {}
             for i, sub in enumerate(subdivisions):
                 last_sub_at_level[sub.zoom_level_index] = i
@@ -1197,9 +1191,6 @@ class GMPWriter:
                 lat_mu = int(sub.center_lat * (2**24) / 360)
                 subdiv_data[off + 7 : off + 10] = _put3s(lat_mu)
                 # Width: encoded horizontal extent with bit 15 = end of chain
-                # Bit 15 marks the last subdivision in a chain (PDF spec:
-                # "marks the end of chain referred by parent subdivision").
-                # Set on the last subdivision at each non-last zoom level.
                 w = sub.encode_tre2_width(shift)
                 if (
                     not is_last_level
@@ -1214,9 +1205,8 @@ class GMPWriter:
                 # mkgmap and PDF spec: "1-based index of the first subdivision
                 # in chain for the next zoom level")
                 if not is_last_level:
-                    struct.pack_into(
-                        "<H", subdiv_data, off + 14, sub.next_level_index + 1
-                    )
+                    nl = sub.next_level_index + 1 if sub.next_level_index > 0 else 0
+                    struct.pack_into("<H", subdiv_data, off + 14, nl)
 
                 off += rec_size
 
@@ -1347,29 +1337,26 @@ class GMPWriter:
         # 10. TRE map levels
         f.write(map_levels_data)
 
-        # 11. TRE5 data (3 bytes) — matching SwissTopo reference
-        f.write(bytes([0x4B, 0x02, 0x01]))
+        # 11. TRE5 data — IOM reference: no TRE5 data (size=0)
+        # (no data written)
 
-        # 12. TRE8 data (3 bytes) — single entry matching SwissTopo reference
-        f.write(bytes([0x06, 0x02, 0x13]))
+        # 12. TRE8 data (6 bytes) — two entries matching IOM reference
+        f.write(bytes([0x06, 0x06, 0x13, 0x0D, 0x06, 0x01]))
 
-        # 12. TRE7 data: raster layer offset table
+        # 12. TRE7 data: raster layer offset table (uint32 per subdivision + sentinel)
         if use_subdivisions:
-            # SwissTopo format: one entry per subdivision (uint32 offset + flag byte)
+            # uint32 offset per subdivision, then sentinel with total RGN2 extent
             for sub in subdivisions:
                 f.write(struct.pack("<I", sub.rgn2_offset))
-                f.write(struct.pack("<B", sub.tre7_flag))
-            # Sentinel entry: contains the total RGN2 data size as the end offset
-            # for the last real subdivision (NOT all zeros — that would make
-            # extPolygonsEnd == extPolygonsOffset == 0, preventing segment creation)
+            # Sentinel: total RGN2 data extent (used by GPXSee for setExtEnds)
             f.write(
                 struct.pack(
-                    "<I", total_tiles * _rgn2_record_size(_img_id_size(total_tiles))
+                    "<I",
+                    total_tiles * _rgn2_record_size(_img_id_size(total_tiles)),
                 )
             )
-            f.write(b"\x00")  # flag byte = 0
         else:
-            # Legacy: one uint32 per zoom level
+            # Legacy: one uint32 per zoom level + sentinel
             rgn2_offset = 0
             legacy_rs = _rgn2_record_size(_img_id_size(total_tiles))
             for z_idx, zoom in enumerate(img_file.zoom_levels):
@@ -1378,7 +1365,7 @@ class GMPWriter:
                 )
                 f.write(struct.pack("<I", rgn2_offset))
                 rgn2_offset += tile_count * legacy_rs
-            # Sentinel entry: total RGN2 data extent as the end offset
+            # Sentinel: total RGN2 data extent
             f.write(struct.pack("<I", rgn2_offset))
 
         # 13. RGN2 data section (Type E0 records)
@@ -1481,15 +1468,14 @@ def _build_tre_subheader(
     # TRE+0x3F: Flags (1 byte) = 1
     buf[0x3F] = 1
 
-    # TRE+0x40: Display priority (uint16 LE) = 24 for raster
-    struct.pack_into("<H", buf, 0x40, 24)
+    # TRE+0x40: Display priority (uint16 LE) = 20 for raster (IOM reference)
+    struct.pack_into("<H", buf, 0x40, 20)
 
     # TRE+0x42: More flags / parameters (8 bytes)
-    # SwissTopo reference: 00 01 04 24 00 01 00 00
-    # GMT reports "parameters 1 4 36 1" for SwissTopo
-    buf[0x42] = 0x00  # flag byte (SwissTopo reference: 0x00)
+    # IOM reference: 10 01 08 24 00 01 00 00
+    buf[0x42] = 0x10  # flag byte (IOM reference: 0x10)
     buf[0x43] = 0x01  # parameter 1
-    buf[0x44] = 0x04  # parameter 2 (bits per coord: 4 for SwissTopo)
+    buf[0x44] = 0x08  # parameter 2 (IOM reference: 0x08)
     buf[0x45] = 0x24  # parameter 3 (36 = tile_size_constant)
     buf[0x46] = 0x00
     buf[0x47] = 0x01  # parameter 4
@@ -1503,11 +1489,11 @@ def _build_tre_subheader(
     struct.pack_into("<H", buf, 0x52, 2)  # rec_size=2
 
     # TRE+0x58: TRE5 descriptor: pos(4) + size(4) + rec_size(2) + pad(4)
-    # TRE5 contains 3 bytes of data (4B 02 01), matching SwissTopo reference
+    # IOM reference: no TRE5 data (size=0, rec_size=2, pad=00 00 00 00)
     struct.pack_into("<I", buf, 0x58, tre5_pos)
-    struct.pack_into("<I", buf, 0x5C, tre5_size)  # size=3
-    struct.pack_into("<H", buf, 0x60, 3)  # rec_size=3
-    buf[0x62] = 0x01  # pad flag (SwissTopo reference: 01 00 00 00)
+    struct.pack_into("<I", buf, 0x5C, 0)  # size=0
+    struct.pack_into("<H", buf, 0x60, 2)  # rec_size=2
+    buf[0x62] = 0x00  # pad (IOM reference: 00 00 00 00)
     buf[0x63] = 0x00
     buf[0x64] = 0x00
     buf[0x65] = 0x00
@@ -1528,8 +1514,8 @@ def _build_tre_subheader(
     struct.pack_into("<I", buf, 0x7C, tre7_pos)
     struct.pack_into("<I", buf, 0x80, tre7_size)
     struct.pack_into("<H", buf, 0x84, tre7_rec_size)
-    buf[0x86] = 0x81  # pad flag (SwissTopo reference: 81 04 00 00)
-    buf[0x87] = 0x04
+    buf[0x86] = 0x01  # pad flag (IOM reference: 01 00 00 00)
+    buf[0x87] = 0x00
     buf[0x88] = 0x00
     buf[0x89] = 0x00
 
@@ -1537,9 +1523,9 @@ def _build_tre_subheader(
     struct.pack_into("<I", buf, 0x8A, tre8_pos)
     struct.pack_into("<I", buf, 0x8E, tre8_size)
     struct.pack_into("<H", buf, 0x92, 3)  # rec_size=3 (3-byte entries: type + 2 params)
-    buf[0x94] = 0x00  # pad flag (SwissTopo reference: 00 00 01 00)
+    buf[0x94] = 0x00  # pad flag (IOM reference: 00 00 02 00 — 2 entries)
     buf[0x95] = 0x00
-    buf[0x96] = 0x01
+    buf[0x96] = 0x02
     buf[0x97] = 0x00
 
     # TRE+0x9A-0xAD: Map ID hash area (already zeros)
@@ -2449,7 +2435,7 @@ class StreamingIMGWriter:
         total_tiles = sum(len(sub.tile_entries) for sub in subdivisions)
         n_zoom = len(img_file.zoom_levels)
         now = img_file.gmp_creation_date or datetime.now()
-        tre7_rec_size = 5
+        tre7_rec_size = 4  # IOM reference: uint32 offset only, no flag byte
 
         # --- Compute section layout (positions within GMP) ---
         copyright_str = img_file.copyright_string or "Copyright GARMIN."
@@ -2488,15 +2474,15 @@ class StreamingIMGWriter:
         pos += map_levels_size
 
         tre5_pos = pos
-        tre5_size = 3
+        tre5_size = 0  # IOM reference: no TRE5 data
         pos += tre5_size
 
         tre8_pos = pos
-        tre8_size = 3
+        tre8_size = 6  # Two entries: 06 06 13, 0D 06 01 (IOM reference)
         pos += tre8_size
 
         tre7_pos = pos
-        tre7_size = (len(subdivisions) + 1) * tre7_rec_size
+        tre7_size = (len(subdivisions) + 1) * tre7_rec_size  # +1 sentinel
         pos += tre7_size
 
         rgn1_pos = pos
@@ -2549,10 +2535,8 @@ class StreamingIMGWriter:
             tile_count = sub.get_tile_count()
             if tile_count == 0:
                 sub.rgn2_offset = 0
-                sub.tre7_flag = 0x01
             else:
                 sub.rgn2_offset = rgn2_running_offset
-                sub.tre7_flag = 0x00
                 chunk_size = tile_count * record_size
                 rgn2_running_offset += chunk_size
                 rgn2_total_extent = rgn2_running_offset
@@ -2589,8 +2573,11 @@ class StreamingIMGWriter:
             h = sub.encode_tre2_height(shift)
             struct.pack_into("<H", subdiv_data, off + 12, h)
             # Next level index (1-based, per mkgmap and PDF spec)
+            # 0 = no children (SwissTopo reference uses next_level=0 for
+            # childless subdivisions)
             if not is_last_level:
-                struct.pack_into("<H", subdiv_data, off + 14, sub.next_level_index + 1)
+                nl = sub.next_level_index + 1 if sub.next_level_index > 0 else 0
+                struct.pack_into("<H", subdiv_data, off + 14, nl)
             off += rec_size
         struct.pack_into("<I", subdiv_data, off, rgn2_total_extent)
 
@@ -2669,22 +2656,22 @@ class StreamingIMGWriter:
         # TRE map levels
         f.write(map_levels_data)
 
-        # TRE5 data
-        f.write(bytes([0x4B, 0x02, 0x01]))
+        # TRE5 data — IOM reference: no TRE5 data (size=0)
+        # (no data written)
 
-        # TRE8 data
-        f.write(bytes([0x06, 0x02, 0x13]))
+        # TRE8 data (6 bytes) — two entries matching IOM reference
+        f.write(bytes([0x06, 0x06, 0x13, 0x0D, 0x06, 0x01]))
 
-        # TRE7 data
+        # TRE7 data (uint32 per subdivision + sentinel with total RGN2 extent)
         for sub in subdivisions:
             f.write(struct.pack("<I", sub.rgn2_offset))
-            f.write(struct.pack("<B", sub.tre7_flag))
+        # Sentinel: total RGN2 data extent (used by GPXSee for setExtEnds)
         f.write(
             struct.pack(
-                "<I", total_tiles * _rgn2_record_size(_img_id_size(total_tiles))
+                "<I",
+                total_tiles * _rgn2_record_size(_img_id_size(total_tiles)),
             )
         )
-        f.write(b"\x00")
 
         # RGN2 data section (bounds from TileMetadata, no JPEG data needed)
         _write_rgn_data_section_subdivisions(f, subdivisions, total_tiles, img_file)

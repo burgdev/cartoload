@@ -668,7 +668,7 @@ Garmin's professional maps (like SwissTopo Pro) combine both raster and vector d
    - See `src/cartoload/exporters/garmin_img_writer.py`
 
 3. **Validation** — DONE
-   - 63 unit tests (all passing)
+   - 136 unit tests (all passing)
    - GMapTool validation passes
    - Reference: `tests/test_exporter_garmin_img.py`
 
@@ -764,5 +764,5 @@ Garmin's professional maps (like SwissTopo Pro) combine both raster and vector d
 
 ---
 
-**Last Updated:** 2026-05-08
+**Last Updated:** 2026-05-09
 **Key Takeaway:** This project implements the first known open-source Garmin raster IMG writer, filling a significant gap in the GIS ecosystem. The GMP container format has been fully reverse-engineered, with GMapTool validation passing for generated files.

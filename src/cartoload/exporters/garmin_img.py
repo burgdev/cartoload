@@ -294,6 +294,42 @@ def _set_subdivision_links(
             sub.next_level_index = 0
 
 
+def _reorder_subdivisions_in_place(
+    subdivisions: list[Subdivision],
+    old_indices: list[int],
+    new_order: list[int],
+    by_level: dict[int, list[int]],
+    level: int,
+) -> None:
+    """Reorder subdivisions at a given level in-place.
+
+    Given old_indices (current positions of level's subdivisions) and
+    new_order (desired order of those same subdivisions), rearranges the
+    main subdivisions list and updates by_level.
+
+    The trick: we extract the subdivision objects at old_indices, reorder
+    them according to new_order, and put them back at the same positions.
+    """
+    if old_indices == new_order:
+        return  # Already in correct order
+
+    # Build index mapping: old position -> object
+    old_to_obj: dict[int, Subdivision] = {}
+    for idx in old_indices:
+        old_to_obj[idx] = subdivisions[idx]
+
+    # Create ordered list of objects in the new order
+    ordered_objs = [old_to_obj[oi] for oi in new_order]
+
+    # Place back at the same positions (which are sorted)
+    sorted_positions = sorted(old_indices)
+    for i, obj in enumerate(ordered_objs):
+        subdivisions[sorted_positions[i]] = obj
+
+    # Update by_level to reflect new ordering
+    by_level[level] = sorted_positions
+
+
 MAP_NAME_MAX_LEN = 32
 
 

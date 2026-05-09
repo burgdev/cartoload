@@ -1748,8 +1748,8 @@ class TestSubdivisionBinaryWriting:
             f"TRE2 size {tre2_size} != {len(subdivisions)} * 14 + 4"
         )
 
-    def test_subdivision_tre7_rec_size_5(self, tmp_path):
-        """Verify TRE7 uses rec_size=5 when subdivisions are provided."""
+    def test_subdivision_tre7_rec_size_4(self, tmp_path):
+        """Verify TRE7 uses rec_size=4 (uint32 offset only, IOM reference format)."""
         output = tmp_path / "test_subdiv_tre7.img"
         tiles = _make_tiles_with_bounds(4)
         compressed = {15: tiles}
@@ -1771,10 +1771,10 @@ class TestSubdivisionBinaryWriting:
 
         # TRE7 rec_size at offset 0x84 in TRE header
         tre7_rec_size = struct.unpack_from("<H", data, tre_start + 0x84)[0]
-        assert tre7_rec_size == 5, f"TRE7 rec_size should be 5, got {tre7_rec_size}"
+        assert tre7_rec_size == 4, f"TRE7 rec_size should be 4, got {tre7_rec_size}"
 
-    def test_subdivision_tre7_has_sentinel(self, tmp_path):
-        """Verify TRE7 has a sentinel entry (all zeros) at the end."""
+    def test_subdivision_tre7_last_entry_is_extent(self, tmp_path):
+        """Verify TRE7 has sentinel entry with total RGN2 extent (rec_size=4)."""
         output = tmp_path / "test_subdiv_tre7_sentinel.img"
         tiles = _make_tiles_with_bounds(4)
         compressed = {15: tiles}
@@ -1797,32 +1797,25 @@ class TestSubdivisionBinaryWriting:
         tre7_pos = struct.unpack_from("<I", data, tre_start + 0x7C)[0]
         tre7_size = struct.unpack_from("<I", data, tre_start + 0x80)[0]
 
-        # TRE7 size should be (n_subdivisions + 1) * 5
-        expected_size = (len(subdivisions) + 1) * 5
+        # TRE7 size should be (n_subdivisions + 1) * 4 (entries + sentinel)
+        expected_size = (len(subdivisions) + 1) * 4
         assert tre7_size == expected_size, (
             f"TRE7 size {tre7_size} != expected {expected_size}"
         )
 
-        # Last 5 bytes should be the sentinel entry containing the total RGN2
-        # data extent as the polygon offset (end boundary for last subdivision)
+        # Last 4 bytes (sentinel) should contain the total RGN2 data extent
         tre7_data_offset = gmp_offset + tre7_pos
         sentinel = data[
-            tre7_data_offset + len(subdivisions) * 5 : tre7_data_offset + tre7_size
+            tre7_data_offset + len(subdivisions) * 4 : tre7_data_offset + tre7_size
         ]
         sentinel_offset = struct.unpack_from("<I", sentinel)[0]
-        sentinel_flag = sentinel[4]
-        # Sentinel offset = total RGN2 data size = n_tiles × 42
-        if isinstance(tiles[0], tuple) and len(tiles[0]) == 2:
-            pass  # tiles are (jpeg, bounds) tuples
-        # Record size is dynamic: 40 + imgIdSize where imgIdSize = byteSize(n-1)
-        # byteSize(val): 1 for 0-255, 2 for 256-65535, 3 for 65536-16777215
+        # Last entry offset = total RGN2 data size = n_tiles × record_size
         n = len(tiles)
         iid = 1 if n <= 256 else 2 if n <= 65536 else 3
         expected_extent = n * (40 + iid)
         assert sentinel_offset == expected_extent, (
             f"Sentinel offset should be {expected_extent}, got {sentinel_offset}"
         )
-        assert sentinel_flag == 0, f"Sentinel flag should be 0, got {sentinel_flag}"
 
     def test_subdivision_preserves_tile_data_in_lbl29(self, tmp_path):
         """Verify LBL29 contains all JPEG data when using subdivisions."""
