@@ -1,10 +1,8 @@
 # Garmin Raster IMG Format Specification
 
-This document describes the Garmin raster `.img` file format based on analysis of SwissTopo sample files using GMapTool (gmt), hex dump analysis, mkgmap source code, the John Mechalas IMG format specification (2005), and the Willink/Pinns "Exploring Garmin's IMG Format" (2015).
+This document describes the Garmin raster `.img` file format based on analysis of reference files (including IOM.img), GMapTool (gmt), hex dump analysis, mkgmap source code, the John Mechalas IMG format specification (2005), and the Willink/Pinns "Exploring Garmin's IMG Format" (2015).
 
-**Status:** Verified against reference files. GMT validation passes. Implementation in `src/cartoload/exporters/garmin_img_writer.py`.
-
-**Important:** The Garmin IMG format was originally designed for **vector maps**. The raster variant (used by SwissTopo and this project) reuses the same container structure (header, FAT, GMP subfile) but uses **different subdivision and RGN data formats** than the well-documented vector format. The vector format details (polyline/polygon encoding, point structures, label encoding) are documented for reference but are NOT used by raster maps.
+**Important:** The Garmin IMG format was originally designed for **vector maps**. The raster variant reuses the same container structure (header, FAT, GMP subfile) but uses **different subdivision and RGN data formats** than the well-documented vector format. The vector format details (polyline/polygon encoding, point structures, label encoding) are documented for reference but are NOT used by raster maps.
 
 **Primary references:**
 
@@ -25,12 +23,12 @@ The IMG file begins with a 512-byte header containing metadata and file system i
 | 0x01-0x07   | 7    | Reserved           | Zero padding                                                                                                                                                                                                                               |
 | 0x08-0x09   | 2    | Map version        | Typically 0x0000                                                                                                                                                                                                                           |
 | 0x0A-0x0B   | 2    | Update month/year  | Update marker (0x0020 observed)                                                                                                                                                                                                            |
-| 0x0E-0x0F   | 2    | Checksum/ID        | 2-byte field. mkgmap always sets this to 0x0000 and notes "Checksum is not checked." GPXSee does not validate it either. SwissTopo reference files use non-zero values (e.g., 0x5000) but these are not required for device compatibility. |
+| 0x0E-0x0F   | 2    | Checksum/ID        | 2-byte field. mkgmap always sets this to 0x0000 and notes "Checksum is not checked." GPXSee does not validate it either. Some reference files use non-zero values (e.g., 0x5000) but these are not required for device compatibility. |
 | 0x10        | 6    | Magic signature    | `DSKIMG` (ASCII)                                                                                                                                                                                                                           |
 | 0x16        | 1    | Unknown            | Always 0x00                                                                                                                                                                                                                                |
 | 0x17        | 1    | Format version     | Always 0x02                                                                                                                                                                                                                                |
-| 0x18-0x19   | 2    | Sectors per track  | CHS geometry (cosmetic). mkgmap picks from [4,8,16,32] so that sectors × heads × cylinders > file size in 512-byte sectors. Not validated by devices. SwissTopo: 32.                                                                       |
-| 0x1A-0x1B   | 2    | Heads per cylinder | CHS geometry (cosmetic). mkgmap picks from [16,32,64,128,256]. Not validated by devices. SwissTopo: 256. IOM: 16.                                                                                                                          |
+| 0x18-0x19   | 2    | Sectors per track  | CHS geometry (cosmetic). mkgmap picks from [4,8,16,32] so that sectors × heads × cylinders > file size in 512-byte sectors. Not validated by devices. Typical: 32.                                                                                                                                       |
+| 0x1A-0x1B   | 2    | Heads per cylinder | CHS geometry (cosmetic). mkgmap picks from [16,32,64,128,256]. Not validated by devices. Typical: 256. IOM: 16.                                                                                                                          |
 | 0x1C-0x1F   | 4    | Cylinders          | CHS geometry (cosmetic). 10-bit value, top 2 bits stored in sector field. Varies per file size.                                                                                                                                            |
 | 0x39-0x3E   | 6    | Creation date      | `year_LE(2) + month(1) + day(1) + hour(1) + min(1) + sec(1)`                                                                                                                                                                               |
 | 0x40        | 1    | FAT block number   | Physical block number of FAT start (8 = 0x1000)                                                                                                                                                                                            |
@@ -123,7 +121,7 @@ Each subfile gets one or more FAT entries:
 
 Raster IMG files can contain either 2 subfiles (single-map) or many subfiles (multi-map):
 
-**Single-map raster (SwissTopo format):**
+**Single-map raster:**
 
 | Subfile | Type | Count | Description                         |
 | ------- | ---- | ----- | ----------------------------------- |
@@ -161,7 +159,7 @@ MPS subfile: 3936 bytes with L-records for all 51 maps
 
 **Multi-map vs single-map parameter differences:**
 
-| Parameter        | IOM (multi-map) | SwissTopo (single-map) | Our output         |
+| Parameter        | IOM (multi-map) | Single-map reference | cartoload output   |
 | ---------------- | --------------- | ---------------------- | ------------------ |
 | Display priority | 20              | 24                     | 20                 |
 | Parameters       | 1 8 36 1        | 1 4 36 1               | 1 8 36 1           |
@@ -244,7 +242,7 @@ int(47.65 * 2^24 / 360) = 2,225,653 = 0x21E825 → bytes 25 E8 21
 
 ### 3.6 RGN Sub-Header (125 bytes)
 
-After the 21-byte common header, the RGN sub-header uses the following layout. All position values are **GMP-relative** offsets. Field values are from the Oppmann PDF spec (2023-09-05) and verified against SwissTopo reference files.
+After the 21-byte common header, the RGN sub-header uses the following layout. All position values are **GMP-relative** offsets. Field values are from the Oppmann PDF spec (2023-09-05) and verified against reference files.
 
 | RGN Offset | Size | Field                   | Description / Reference Value                                  |
 | ---------- | ---- | ----------------------- | -------------------------------------------------------------- |
@@ -268,16 +266,16 @@ After the 21-byte common header, the RGN sub-header uses the following layout. A
 | 0x59       | 4    | RGN4 size               | 0 for raster maps                                              |
 | 0x5D       | 4    | RGN4 ext: reserved      | 0x00000000                                                     |
 | 0x61       | 4    | RGN4 ext: flags[0]      | 0x00000000                                                     |
-| 0x65       | 4    | RGN4 ext: flags[1]      | 0x20003FFF — points local flag bitmask (SwissTopo reference)   |
-| 0x69       | 4    | RGN4 ext: flags[2]      | 0x0FFFF73F — points local flag bitmask (SwissTopo reference)   |
+| 0x65       | 4    | RGN4 ext: flags[1]      | 0x20003FFF — points local flag bitmask   |
+| 0x69       | 4    | RGN4 ext: flags[2]      | 0x0FFFF73F — points local flag bitmask   |
 | 0x6D       | 4    | RGN4 ext: flags[3]      | 0x00000000                                                     |
 | 0x71       | 4    | RGN5 position           | GMP-relative offset to dictionary section (= rgn2_pos + rgn2_size) |
 | 0x75       | 4    | RGN5 size               | 0 for raster maps                                              |
-| 0x79       | 4    | RGN5 ext: dict info     | 1 (SwissTopo reference; controls Huffman table loading)         |
+| 0x79       | 4    | RGN5 ext: dict info     | 1 (controls Huffman table loading)         |
 
 **Critical field: RGN+0x25.** The value 2 at this offset indicates extended polygon encoding. Without this field set correctly, Garmin device firmware will not parse the RGN2 section as extended/raster data. A value of 0 means standard (non-extended) polygon format.
 
-**Local flag bitmasks:** The flags fields at 0x2D, 0x31, 0x49, 0x4D, 0x65, 0x69 are bitmasks that tell the device firmware which extended object types (type values >= 0x100) have local fields in each section. The values above are taken from SwissTopo_West.img and SwissTopo_Est.img (both identical), the canonical raster IMG references.
+**Local flag bitmasks:** The flags fields at 0x2D, 0x31, 0x49, 0x4D, 0x65, 0x69 are bitmasks that tell the device firmware which extended object types (type values >= 0x100) have local fields in each section.
 
 **Section positions for empty sections:** RGN3, RGN4, and RGN5 positions are set to `rgn2_pos + rgn2_size` (immediately after the RGN2 data) with size=0, indicating no polyline, POI, or dictionary data.
 
@@ -316,10 +314,10 @@ Minimal stub for raster maps. Contains the 21-byte common header, with all NET-s
 
 **Tiles are stored as standard JFIF JPEG files**, concatenated sequentially at the end of the GMP subfile. Each tile begins with the JPEG start-of-image marker `FFD8FFE0` followed by `JFIF`.
 
-Verified from SwissTopo reference files:
+Verified from reference files:
 
 - Tile sizes range from ~10KB to ~65KB each
-- All 32,254 tiles in SwissTopo_West verified to have valid JPEG start markers
+- All 32,254 tiles in reference files verified to have valid JPEG start markers
 
 ### 4.2 LBL Labels (Tile Filenames)
 
@@ -485,7 +483,7 @@ Where:
 
 **Why this matters:** The `boundingRect` derived from the decoded delta pair is used by GPXSee's `copyPolys()` for tile filtering. If the bitstream is incorrectly encoded (wrong bitSize, missing extended bit, or wrong packing order), the boundingRect will be wrong, causing tiles to be incorrectly excluded — appearing as white grid lines at subdivision boundaries.
 
-**Reference implementations:** SwissTopo uses 3 delta pairs tracing the tile outline (+w,0), (0,+h), (-w,0) with different sign modes per axis. IOM uses 0 delta pairs (single-point boundingRect). Both produce valid files. Our implementation uses 1 pair (+w, +h) for full tile coverage with the simplest encoding.
+**Reference implementations:** Some reference files use 3 delta pairs tracing the tile outline (+w,0), (0,+h), (-w,0) with different sign modes per axis. IOM uses 0 delta pairs (single-point boundingRect). Both produce valid files. Our implementation uses 1 pair (+w, +h) for full tile coverage with the simplest encoding.
 
 **GPXSee parsing flow:**
 
@@ -508,14 +506,14 @@ drawPolygons() renders: uses poly.raster.rect()
 
 #### 4.5.3 RGN5 — Metadata Section
 
-RGN5 is a smaller metadata section observed in IOM.img but not present in SwissTopo_West.
+RGN5 is a smaller metadata section observed in IOM.img but not present in single-map references.
 
 | File               | RGN5 Size | Content                                          |
 | ------------------ | --------- | ------------------------------------------------ |
 | IOM subfile 355951 | 112 bytes | Starts with `DF 14 06 02 20 0B`, purpose unclear |
-| SwissTopo_West     | 0 bytes   | Not present (size=0)                             |
+| Single-map reference     | 0 bytes   | Not present (size=0)                             |
 
-The RGN5 section may contain rendering hints or extended metadata for the raster layer. For writer implementation, it can safely be omitted (size=0), as SwissTopo_West validates correctly without it.
+The RGN5 section may contain rendering hints or extended metadata for the raster layer. For writer implementation, it can safely be omitted (size=0), as reference files validate correctly without it.
 
 #### 4.5.4 RGN2 Per-Subdivision Segment Boundaries
 
@@ -551,7 +549,7 @@ The TRE sub-header contains a 4-byte flags field at offset 0x86 that determines 
 | 1        | Lines present — read uint32 offset for lines     |
 | 2        | Points present — read uint32 offset for points   |
 
-SwissTopo has `_flags = 0x00000481` (bits 0 and 2 set). Bit 0 = polygons present as uint32, bit 2 = points present as uint32. IOM and our output use `_flags = 0x00000001` (only bit 0 set = polygons only). GPXSee's `readExtEntry()` reads entries conditionally based on which bits are set:
+Some reference files have `_flags = 0x00000481` (bits 0 and 2 set). Bit 0 = polygons present as uint32, bit 2 = points present as uint32. IOM and our output use `_flags = 0x00000001` (only bit 0 set = polygons only). GPXSee's `readExtEntry()` reads entries conditionally based on which bits are set:
 
 ```cpp
 if (_flags & 1) { readUInt32(hdl, polygons); rb += 4; }  // polygons offset
@@ -559,7 +557,7 @@ if (_flags & 2) { readUInt32(hdl, lines);    rb += 4; }  // lines offset
 if (_flags & 4) { readUInt32(hdl, points);   rb += 4; }  // points offset
 ```
 
-For SwissTopo (rec_size=5, flags=0x481), each TRE7 entry is: `[uint32 rgn2_offset][uint8 flag]`. The flag byte is 0x01 for empty/overview subdivisions and 0x00 for data subdivisions. For IOM and our output (rec_size=4, flags=0x01), each entry is just `[uint32 rgn2_offset]` with no flag byte, plus a sentinel entry at the end containing the total RGN2 data extent.
+For extended-format files (rec_size=5, flags=0x481), each TRE7 entry is: `[uint32 rgn2_offset][uint8 flag]`. The flag byte is 0x01 for empty/overview subdivisions and 0x00 for data subdivisions. For IOM and our output (rec_size=4, flags=0x01), each entry is just `[uint32 rgn2_offset]` with no flag byte, plus a sentinel entry at the end containing the total RGN2 data extent.
 
 **Complete RGN2 raster parsing flow (as implemented by GPXSee):**
 
@@ -617,7 +615,7 @@ Offset from GMP start  | Section            | Size
 +lbl28                 | LBL29 section      | Sum of JPEG sizes (image storage)
 ```
 
-**Reference SwissTopo_West (32,443 tiles):**
+**Reference single-map file (32,443 tiles):**
 
 ```
 Offset from GMP start  | Section            | Size (actual)
@@ -640,7 +638,7 @@ Offset from GMP start  | Section            | Size (actual)
 
 ### 5.1 TRE Header Structure (Raster Maps, 273 bytes)
 
-The TRE sub-header in raster maps uses an extended 273-byte format, significantly larger than vector maps (116-188 bytes). The layout below was verified against the QMapShack wiki analysis by Alex Whiter and confirmed with both IOM.img and SwissTopo_West.img reference files.
+The TRE sub-header in raster maps uses an extended 273-byte format, significantly larger than vector maps (116-188 bytes). The layout below was verified against the QMapShack wiki analysis by Alex Whiter and confirmed with IOM.img and other reference files.
 
 **Common sub-header prefix (21 bytes):**
 
@@ -665,8 +663,8 @@ The TRE sub-header in raster maps uses an extended 273-byte format, significantl
 | 0x31       | 10   | TRE3 (copyright)     | pos(4) + size(4) + item_size(2) — **GMP-relative**                                                                                                                                                                                                        |
 | 0x3B       | 4    | Padding              | Zeros                                                                                                                                                                                                                                                     |
 | 0x3F       | 1    | Flags                | 0x00 or 0x01                                                                                                                                                                                                                                              |
-| 0x40       | 2    | Display priority     | uint16 LE (20 for IOM and our output, 24 for SwissTopo)                                                                                                                                                                                                     |
-| 0x42       | 8    | Parameters           | 8-byte parameter block. IOM: `10 01 08 24 00 01 00 00`. SwissTopo: `00 01 04 24 00 01 00 00`. Our output matches IOM. Byte 0x42 is a flag (0x00=SwissTopo, 0x10=IOM). Byte 0x44 is likely bits-per-coord (4=SwissTopo, 8=IOM). Byte 0x45=0x24 (36) is a tile size constant. |
+| 0x40       | 2    | Display priority     | uint16 LE (20 for IOM and our output, 24 for some references)                                                                                                                                                                                                     |
+| 0x42       | 8    | Parameters           | 8-byte parameter block. IOM: `10 01 08 24 00 01 00 00`. Single-map: `00 01 04 24 00 01 00 00`. Our output matches IOM. Byte 0x42 is a flag (0x00=single-map, 0x10=IOM). Byte 0x44 is likely bits-per-coord (4=single-map, 8=IOM). Byte 0x45=0x24 (36) is a tile size constant. |
 | 0x4A       | 14   | TRE4 descriptor      | pos(4) + size(4) + rec_size(2) + pad(4) — **GMP-relative**                                                                                                                                                                                                |
 | 0x58       | 14   | TRE5 descriptor      | pos(4) + size(4) + rec_size(2) + pad(4) — **GMP-relative**                                                                                                                                                                                                |
 | 0x66       | 14   | TRE6 descriptor      | pos(4) + size(4) + rec_size(2) + pad(4) — **GMP-relative**                                                                                                                                                                                                |
@@ -694,7 +692,7 @@ byte 1:   level_number (bits) — coordinate precision (shift = 24 - level_numbe
 bytes 2-3: number_of_subdivisions (uint16 LE)
 ```
 
-**Critical:** Byte 0 is zoom_code, byte 1 is level_number. This is the OPPOSITE of what some documentation claims. Confirmed via SwissTopo reference binary and GPXSee source (`trefile.cpp:107-111`):
+**Critical:** Byte 0 is zoom_code, byte 1 is level_number. This is the OPPOSITE of what some documentation claims. Confirmed via reference binary analysis and GPXSee source (`trefile.cpp:107-111`):
 
 ```cpp
 _levels[i].level = *zoom;       // byte0 = zoom_code
@@ -707,7 +705,7 @@ The `level_number` field determines coordinate precision for subdivision width/h
 
 **Important:** For raster maps, the `level_number` must be high enough that the quantization step (2^shift × 360 / 2^24 degrees) is smaller than the tile size. Otherwise, GPXSee's `copyPolys()` boundingRect filtering will drop tiles because the single-point boundingRect (derived from delta << shift) can land outside the view rect.
 
-**Level number remapping:** The writer remaps level_numbers from the actual zoom levels to the range `24 - N + 1 .. 24` (where N = number of zoom levels), ensuring the most detailed level has level_number=24 (shift=0, no quantization error). This matches the SwissTopo pattern: 5 levels → level_numbers 20-24.
+**Level number remapping:** The writer remaps level_numbers from the actual zoom levels to the range `24 - N + 1 .. 24` (where N = number of zoom levels), ensuring the most detailed level has level_number=24 (shift=0, no quantization error). This matches patterns observed in reference files: 5 levels → level_numbers 20-24.
 
 Example with 12 zoom levels (zooms 6-17):
 - Config zoom levels: 6, 7, 8, ..., 17
@@ -725,10 +723,10 @@ Example with 12 zoom levels (zooms 6-17):
 
 | File               | Zoom Codes (byte 0)          | Level Numbers (byte 1) | Subdivisions     |
 | ------------------ | ---------------------------- | ---------------------- | ---------------- |
-| SwissTopo_West     | 0x84, 0x83, 0x02, 0x01, 0x00 | 20, 21, 22, 23, 24   | 1, 3, 138, 156, 300 |
+| Single-map reference | 0x84, 0x83, 0x02, 0x01, 0x00 | 20, 21, 22, 23, 24   | 1, 3, 138, 156, 300 |
 | IOM subfile 355951 | 0x87, 0x06, 0x05, ..., 0x00  | 17, 18, 19, ..., 24  | 1 each (8 total) |
 
-SwissTopo decoded level 0: code=0x84 (inherited, bit 7 set + value 4), bits=20. GPXSee skips inherited levels for data rendering.
+Single-map reference decoded level 0: code=0x84 (inherited, bit 7 set + value 4), bits=20. GPXSee skips inherited levels for data rendering.
 
 ### 5.3 TRE2 — Group/Subdivision Section
 
@@ -780,7 +778,7 @@ Where `center_mu`, `west_mu`, `south_mu` are the subdivision bounds in 24-bit ma
 
 **TRE2 section size:** Sum of all record sizes (16 × non-last subdivs + 14 × last-level subdivs + 4 trailing bytes).
 
-**Example from SwissTopo_West:**
+**Example from a single-map reference:**
 
 ```
 Level 0 (overview): 1 subdiv, w=1, h=1, shift=4 → ~0.09° × 0.07° actual size
@@ -815,16 +813,16 @@ A 4-byte flags value that determines how each TRE7 entry is parsed. The flags in
 | 1        | Lines — entry contains uint32 line offset          |
 | 2        | Points — entry contains uint32 point offset        |
 
-For SwissTopo (`_flags = 0x00000481`), bit 0 (polygons) and bit 2 (points) are set, meaning `readExtEntry()` reads 4+4=8 bytes per entry. For IOM and our output (`_flags = 0x00000001`), only bit 0 (polygons) is set, reading just 4 bytes per entry.
+For extended-format references (`_flags = 0x00000481`), bit 0 (polygons) and bit 2 (points) are set, meaning `readExtEntry()` reads 4+4=8 bytes per entry. For IOM and our output (`_flags = 0x00000001`), only bit 0 (polygons) is set, reading just 4 bytes per entry.
 
 **Record format:**
 
 | Variant              | rec_size | Format                              |
 | -------------------- | -------- | ----------------------------------- |
 | Simple (IOM/ours)    | 4        | uint32 LE offset into RGN2          |
-| Extended (SwissTopo) | 5        | uint32 LE offset + 1 byte flag      |
+| Extended (rec_size=5) | 5        | uint32 LE offset + 1 byte flag      |
 
-**SwissTopo TRE7 entry flag byte:**
+**Extended TRE7 entry flag byte:**
 
 | Value | Meaning                               |
 | ----- | ------------------------------------- |
@@ -851,7 +849,7 @@ Offset table: [0, 46, 92, 138, 184, 243, 361, 420]
 → 8 entries pointing to raster layer descriptions in RGN2 for 8 zoom levels
 ```
 
-**SwissTopo_West example (rec_size=5):**
+**Single-map example (rec_size=5):**
 
 ```
 748 entries with uint32 offset + 1 byte flag each
@@ -876,7 +874,7 @@ byte 2: parameter 2
 | File               | Entries                                    | Description                            |
 | ------------------ | ------------------------------------------ | -------------------------------------- |
 | IOM subfile 355951 | 2 entries: `06 06 13` and `0D 06 01`       | Polyline (0x06) + Polygon (0x0D) types |
-| SwissTopo_West     | 1 entry: `13 06 06`                        | Raster tiles only                      |
+| Single-map reference     | 1 entry: `13 06 06`                        | Raster tiles only                      |
 | Our output         | 2 entries: `06 06 13` and `0D 06 01`       | Matches IOM reference                  |
 
 **TRE8 entry decoding:**
@@ -890,13 +888,13 @@ Both types must be declared for the Garmin device to correctly parse raster tile
 
 ### 5.6 Multi-Resolution Pyramid
 
-SwissTopo files use 5 zoom levels (20-24), forming a pyramid where each level covers the same geographic area with different tile counts and resolutions. IOM uses 8 zoom levels (17-24).
+Single-map reference files use 5 zoom levels (20-24), forming a pyramid where each level covers the same geographic area with different tile counts and resolutions. IOM uses 8 zoom levels (17-24).
 
 For our implementation, we support configurable zoom levels with the zoom_code specified per level.
 
 ## 5.7 JNX Format Comparison
 
-JNX (used by Garmin BirdsEye and SwissTopo's original format) is a simpler raster map format. SwissTopo IMG files were converted from JNX using Garmin tools. Understanding JNX's approach helps explain why IMG raster requires careful subdivision handling.
+JNX (used by Garmin BirdsEye and the original format) is a simpler raster map format. Some raster IMG files were converted from JNX using Garmin tools. Understanding JNX's approach helps explain why IMG raster requires careful subdivision handling.
 
 **JNX tile positioning:** Each tile stores its own 32-bit bounding rectangle (north, south, east, west as int32 LE) with NO quantization or subdivision scheme. Tiles are independently positioned at full precision, making gap-free display trivial.
 
@@ -989,7 +987,7 @@ Characters are packed MSB-first. Special codes exist for symbols (0x1B prefix), 
 ### 6.6 TRE Header Variants (vector)
 
 Known TRE header lengths for vector maps: 116, 120, 154, 188 bytes.
-Raster maps use 273-byte TRE headers (seen in SwissTopo reference files) — a newer extended format not documented in the 2005 Mechalas spec.
+Raster maps use 273-byte TRE headers (seen in reference files) — a newer extended format not documented in the 2005 Mechalas spec.
 
 LBL header variants (vector): 170, 196, 208, 236 bytes.
 Raster maps use 596-byte LBL headers.
@@ -1003,7 +1001,7 @@ The TRE sub-header contains a display priority field:
 - **Value: 20** (matching IOM reference, optimal for raster basemaps)
 - Determines rendering order when multiple maps overlap
 - Higher values are drawn on top
-- SwissTopo uses 24 (drawn above vector overlays), IOM uses 20 (drawn below)
+- Some references use 24 (drawn above vector overlays), IOM uses 20 (drawn below)
 
 ### 7.2 Map Metadata
 
@@ -1037,11 +1035,11 @@ The TRE sub-header contains a display priority field:
 Each FAT entry holds 240 block pointers (240 × 32KB = 7.5MB per FAT entry). For large files:
 
 - 1.4 GB GMP ≈ 45,623 data blocks ≈ 191 FAT entries
-- SwissTopo_West FAT extent: 0x20000 (131,072 bytes = 256 FAT entries)
+- Single-map FAT extent: 0x20000 (131,072 bytes = 256 FAT entries)
 
 ### 8.3 Map Splitting
 
-When approaching 4 GB, split into multiple `.img` files by geographic region (e.g., SwissTopo splits into West/East). Each file is self-contained with no cross-file references.
+When approaching 4 GB, split into multiple `.img` files by geographic region (e.g., large maps are split by region). Each file is self-contained with no cross-file references.
 
 ## 9. Garmin Date Format
 
@@ -1089,7 +1087,7 @@ byte 7:    dow    (0, padding)
 
 **Primary analysis target:** Subfile 00355951 — fully validated against QMapShack wiki analysis by Alex Whiter.
 
-### 10.2 SwissTopo_West.img (Single-Map Raster)
+### 10.2 Single-Map Raster Reference
 
 | Property         | Value                                |
 | ---------------- | ------------------------------------ |
@@ -1107,7 +1105,7 @@ byte 7:    dow    (0, padding)
 | RGN5             | 0 bytes (not present)                |
 | NET section      | Present                              |
 
-### 10.3 SwissTopo_Est.img
+### 10.3 Single-Map Raster Reference (East)
 
 | Property    | Value                               |
 | ----------- | ----------------------------------- |
@@ -1139,7 +1137,7 @@ byte 7:    dow    (0, padding)
 
 Based on analysis of both reference files, there are two distinct raster IMG format variants:
 
-| Aspect                 | Single-Map (SwissTopo)         | Multi-Map (IOM)                   | Our Output                       |
+| Aspect                 | Single-Map (reference)         | Multi-Map (IOM)                   | Our Output                       |
 | ---------------------- | ------------------------------ | --------------------------------- | -------------------------------- |
 | GMP subfiles           | 1                              | 51 (one per geographic tile)      | 1 (single-map format)            |
 | MPS subfile            | 98 bytes                       | 3,936 bytes (L-records for all)   | 98 bytes                         |
@@ -1161,7 +1159,7 @@ Based on analysis of both reference files, there are two distinct raster IMG for
 
 **Our implementation targets the IOM parameter set** within a single-GMP container. Rationale:
 
-1. **Device compatibility:** The IOM parameter set (priority 20, TRE7 rec_size=4, TRE8 with 2 entries, TRE parameters `10 01 08 24`) is proven to work on Garmin devices for both multi-map and single-map configurations. The SwissTopo parameter set uses a different TRE7 format (rec_size=5 with flag bytes) that is less well understood.
+1. **Device compatibility:** The IOM parameter set (priority 20, TRE7 rec_size=4, TRE8 with 2 entries, TRE parameters `10 01 08 24`) is proven to work on Garmin devices for both multi-map and single-map configurations. The single-map parameter set uses a different TRE7 format (rec_size=5 with flag bytes) that is less well understood.
 
 2. **GPXSee compatibility:** The TRE7 rec_size=4 format with `_flags=0x01` is cleanly parsed by GPXSee: it reads exactly 4 bytes per entry (polygon offset only) and uses the sentinel entry for `setExtEnds()`.
 
@@ -1394,7 +1392,7 @@ NOD provides the routing graph structure for navigable roads:
 
 ### A.5 Hybrid Raster+Vector Considerations
 
-Official Garmin maps (like SwissTopo Pro) combine raster and vector data in a single IMG file. Understanding which sections are shared vs. format-specific is key to implementing hybrid maps.
+Official Garmin maps (like Garmin professional maps) combine raster and vector data in a single IMG file. Understanding which sections are shared vs. format-specific is key to implementing hybrid maps.
 
 **Shared sections (used by both raster and vector):**
 
@@ -1450,8 +1448,8 @@ Official Garmin maps (like SwissTopo Pro) combine raster and vector data in a si
 **Analysis based on:**
 
 - IOM: IOM.img (33,462,272 bytes / 31.9 MB, 51 GMP subfiles + 1 MPS)
-- SwissTopo_West: my_SwissTopo_West.img (1,495,072,768 bytes / 1.4 GB)
-- SwissTopo_Est: my_SwissTopo_Est.img (1,421,049,856 bytes / 1.4 GB)
+- Single-map reference: single_map_west.img (1,495,072,768 bytes / 1.4 GB)
+- Single-map reference: single_map_east.img (1,421,049,856 bytes / 1.4 GB)
 - GMapTool (gmt) v0.8.220.853b output
 - QMapShack wiki — Alex Whiter's raster IMG analysis (IOM subfile 00355951)
 - mkgmap source code (`uk.me.parabola.imgfmt` package)

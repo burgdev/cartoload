@@ -1,21 +1,55 @@
+[project]
 site_name = "cartoload"
 site_description = "Convert official geodata into GPS device maps"
 site_url = "https://burgdev.github.io/cartoload/"
 docs_dir = "."
 site_dir = "site"
+extra_css = ["stylesheets/extra.css"]
 
 nav = [
     { title = "Home", path = "index.md" },
     { title = "Getting started", path = "getting-started.md" },
+    { title = "Guides", children = [
+        { title = "Build a map", path = "guides/build-a-map.md" },
+        { title = "Analyze IMG files", path = "guides/analyze-img.md" },
+        { title = "Split large maps", path = "guides/split-maps.md" },
+    ]},
     { title = "Configuration", children = [
         { title = "Sources", path = "configuration/sources.md" },
         { title = "Layers", path = "configuration/layers.md" },
-        { title = "Style files (vector)", path = "configuration/style.md" },
     ]},
-    { title = "Exporters", children = [
-        { title = "Garmin raster IMG", path = "exporters/garmin-img.md" },
-        { title = "Garmin vector IMG", path = "exporters/garmin-img-vector.md" },
-        { title = "Adding exporters", path = "exporters/adding-exporters.md" },
+    { title = "IMG Format", children = [
+        { title = "Overview", path = "img-format/overview.md" },
+        { title = "Detailed specification", path = "img-format/detailed-spec.md" },
+        { title = "Tools & resources", path = "img-format/tools-resources.md" },
     ]},
     { title = "CLI reference", path = "cli.md" },
+    { title = "API reference", path = "api-reference.md" },
 ]
+
+[project.theme]
+favicon = "assets/favicon.svg"
+logo = "assets/logo-light.svg"
+language = "en"
+
+[[project.theme.palette]]
+scheme = "default"
+primary = "custom"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+scheme = "slate"
+primary = "custom"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"
+
+[project.theme.features]
+navigation.sections = true
+navigation.footer = true
+navigation.path = true
+navigation.top = true
+navigation.tracking = true
+search.highlight = true
+content.code.copy = true
+content.code.annotate = true

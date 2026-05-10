@@ -4,10 +4,10 @@ Layer configuration files define map layers to build. They reference source IDs 
 
 ```yaml
 bounds:
-  west: 5.96
-  east: 10.49
-  south: 45.82
-  north: 47.81
+  west: 6.5
+  east: 7.5
+  south: 46.5
+  north: 47.0
 
 layers:
   my_layer:

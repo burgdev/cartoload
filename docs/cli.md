@@ -9,104 +9,96 @@ Commands:
   split     Split an oversized .img into region files
   list      List all layers from the provided config files
   analyze   Analyze geodata files
+  cache     Manage the local tile cache
 ```
 
 ## build
 
-```
+```bash
 cartoload build [OPTIONS]
-  --sources PATH    Source config file(s) (repeatable)
-  --layers PATH     Layer config file(s) (repeatable)
-  --layer TEXT      Layer ID to build (repeatable; default: all)
-  --exporter TEXT   Override exporter: garmin_img | garmin_img_vec
-  --bounds TEXT     Override bounding box: "west,east,south,north"
-  --zoom TEXT       Override zoom levels: "10,12,14"
-  --output-dir PATH Default: ./output
-  --cache-dir PATH  Default: ./cache
-  --no-download     Use existing cache only
-  --quality INT     JPEG quality 1-100 (default: 85)
 ```
+
+| Option | Description |
+|--------|-------------|
+| `-S`, `--sources PATH` | Source config file(s) (repeatable) |
+| `-L`, `--layers PATH` | Layer config file(s) (repeatable) |
+| `-l`, `--layer TEXT` | Layer ID to build (repeatable; default: all) |
+| `-e`, `--exporter TEXT` | Override exporter: `garmin_img` \| `garmin_img_vec` |
+| `--bounds TEXT` | Override bounding box: `"west,east,south,north"` |
+| `-y`, `--center-lat FLOAT` | Center latitude for bounds override |
+| `-x`, `--center-lon FLOAT` | Center longitude for bounds override |
+| `-W`, `--width FLOAT` | Width in km for bounds override |
+| `-H`, `--height FLOAT` | Height in km for bounds override |
+| `-z`, `--zoom TEXT` | Override zoom levels: `"10,12,14"` |
+| `-o`, `--output-dir PATH` | Output directory (default: `./output`) |
+| `-c`, `--cache-dir PATH` | Cache directory (default: `./cache`) |
+| `--no-download` | Use existing cache only |
+| `-f`, `--force` | Overwrite existing output files |
+| `--dry-run` | Show build plan without executing |
+| `-q`, `--quality INT` | JPEG quality 1–100 (default: 85) |
+| `--preview` | Generate preview images after build |
+| `--executor TEXT` | Execution mode: `thread` \| `process` |
+| `--resume` | Resume a previous interrupted build |
+
+See the [Build a map](guides/build-a-map.md) guide for a full walkthrough.
 
 ## analyze img
 
-Inspect and compare Garmin IMG binary files.
-
-```
-cartoload analyze img <command> [OPTIONS]
-```
-
-Commands:
-- `info` — inspect an IMG file
-- `compare` — compare two IMG files side by side
-
-### analyze img info
-
-```
-cartoload analyze img info <img_file> [OPTIONS]
-  -s, --subfile TEXT     Subfile name (e.g. '00355951')
-  -n, --section TEXT     Show only one section (TRE, TRE7, RGN, RGN2, LBL, NET, etc.)
-      --limit INT        Max entries per section (default: 20, 0 = unlimited)
-  -x, --hex TEXT         Dump hex of a section (gmp-header, tre-header, tre-levels, tre-subdivs, tre7, tre8, rgn-header, rgn-data, rgn2, rgn5, lbl-header, lbl-data)
-  -d, --dump TEXT        Full hex dump of section with ASCII
-  -l, --list             List subfiles only (no parsing)
-  -a, --all              Dump all sections
-  --raw-offset INT       Read raw bytes at file offset
-  --raw-size INT         Size for raw read (default: 64)
-  -r, --rgn2             Show annotated RGN2 analysis (raster tile records and polyline/polygon preambles per zoom level)
-  -g, --segments         Segment RGN2 by zoom level using TRE7 offsets
-  -m, --summary          Show concise summary (bounds, bitmaps, encoding, map name)
-  -q, --no-descriptions  Hide section descriptions
-      --no-color         Disable colored output (auto-disabled when piped)
-```
-
-The output uses Rich for colored, formatted section headers with hierarchical paths
-(e.g. `── IMG > GMP > TRE > TRE7`). For large files (>200 MB), a spinner is shown
-while parsing. Colors are automatically disabled when output is piped.
-
-Examples:
+Inspect and compare Garmin IMG binary files. See [Analyze IMG files](guides/analyze-img.md) for detailed usage and examples.
 
 ```bash
-# Concise summary
-cartoload analyze img info tests/data/garmin_samples/IOM.img -m
-
-# List all subfiles in an IMG
-cartoload analyze img info tests/data/garmin_samples/IOM.img -l
-
-# Full analysis (TRE, RGN, LBL sections with bitmap stats)
-cartoload analyze img info tests/data/garmin_samples/IOM.img
-
-# Show only the TRE7 section
-cartoload analyze img info tests/data/garmin_samples/IOM.img --section TRE7
-
-# Show all TRE2 entries (no limit)
-cartoload analyze img info tests/data/garmin_samples/IOM.img --section TRE2 --limit 0
-
-# Hide section descriptions
-cartoload analyze img info tests/data/garmin_samples/IOM.img -q
-
-# Annotated RGN2 analysis
-cartoload analyze img info tests/data/garmin_samples/IOM.img -r
-
-# Segment RGN2 by zoom level
-cartoload analyze img info tests/data/garmin_samples/IOM.img -g
-
-# Hex dump of a specific section
-cartoload analyze img info tests/data/garmin_samples/IOM.img -x rgn2
-
-# Raw bytes at a specific offset
-cartoload analyze img info tests/data/garmin_samples/IOM.img --raw-offset 0x100 --raw-size 128
-```
-
-### analyze img compare
-
-```
+cartoload analyze img info <img_file> [OPTIONS]
 cartoload analyze img compare <file1> <file2>
 ```
 
-Side-by-side comparison of two IMG files. Shows RGN headers, RGN2 record-by-record parsing, and a diff of RGN header bytes 0x15–0x7C.
-
-Example:
+## split
 
 ```bash
-cartoload analyze img compare reference.img output.img
+cartoload split <img_file> [OPTIONS]
 ```
+
+| Option | Description |
+|--------|-------------|
+| `-o`, `--output-dir PATH` | Output directory |
+
+See [Split large maps](guides/split-maps.md).
+
+## list
+
+```bash
+cartoload list [OPTIONS]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-S`, `--sources PATH` | Source config file(s) (repeatable) |
+| `-L`, `--layers PATH` | Layer config file(s) (repeatable) |
+
+## download
+
+```bash
+cartoload download [OPTIONS]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-S`, `--sources PATH` | Source config file(s) (repeatable) |
+| `-L`, `--layers PATH` | Layer config file(s) (repeatable) |
+| `-l`, `--layer TEXT` | Layer ID to download (repeatable) |
+| `-y`, `--center-lat FLOAT` | Center latitude |
+| `-x`, `--center-lon FLOAT` | Center longitude |
+| `-W`, `--width FLOAT` | Width in km |
+| `-H`, `--height FLOAT` | Height in km |
+| `-z`, `--zoom TEXT` | Zoom levels |
+| `-c`, `--cache-dir PATH` | Cache directory (default: `./cache`) |
+
+## cache
+
+```bash
+cartoload cache [COMMAND]
+```
+
+| Command | Description |
+|---------|-------------|
+| `cache info` | Show cache statistics |
+| `cache clean` | Remove cached tiles |

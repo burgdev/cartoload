@@ -1,0 +1,91 @@
+/* Cartoload Design System — matches cartoload-server nav */
+
+:root,
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #1A1C18;
+  --md-primary-fg-color--light: #252924;
+  --md-primary-fg-color--dark: #1A1C18;
+  --md-primary-bg-color: #F5F2EC;
+  --md-accent-fg-color: #4E7A5F;
+  --md-accent-fg-color--transparent: rgba(78, 122, 95, 0.1);
+  --md-default-bg-color: #F5F2EC;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #0D0F0C;
+  --md-primary-fg-color--light: #131512;
+  --md-primary-fg-color--dark: #0D0F0C;
+  --md-primary-bg-color: #131512;
+  --md-accent-fg-color: #7DB88C;
+  --md-accent-fg-color--transparent: rgba(125, 184, 140, 0.1);
+  --md-default-bg-color: #131512;
+  --md-default-fg-color: #EDEAE3;
+  --md-typeset-color: #EDEAE3;
+  --md-typeset-a-color: #7DB88C;
+}
+
+/* Header — Dark Earth nav matching cartoload-server */
+.md-header {
+  background-color: #1A1C18;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+[data-md-color-scheme="slate"] .md-header {
+  background-color: #0D0F0C;
+}
+
+/* Tabs — slightly lighter shade */
+.md-tabs {
+  background-color: #252924;
+}
+
+[data-md-color-scheme="slate"] .md-tabs {
+  background-color: #131512;
+}
+
+/* Force light text on dark header in ALL modes */
+.md-header,
+.md-header__inner,
+.md-header__button,
+.md-header__link,
+.md-tabs__link {
+  color: rgba(245, 242, 236, 0.7) !important;
+}
+
+.md-tabs__link:hover,
+.md-tabs__link--active,
+.md-header__button:hover {
+  color: #F5F2EC !important;
+}
+
+/* Search button on dark header */
+.md-header .md-search__button {
+  background-color: rgba(245, 242, 236, 0.08);
+  color: rgba(245, 242, 236, 0.6) !important;
+}
+
+.md-header .md-search__button:hover,
+.md-header .md-search__button:focus {
+  background-color: rgba(245, 242, 236, 0.14);
+  color: #F5F2EC !important;
+}
+
+.md-header .md-search__button::before {
+  background-color: rgba(245, 242, 236, 0.6);
+}
+
+.md-header .md-search__button::after {
+  background: rgba(245, 242, 236, 0.1);
+  color: rgba(245, 242, 236, 0.5);
+}
+
+/* Sidebar active link */
+.md-nav__link--active {
+  color: var(--md-accent-fg-color);
+}
+
+/* Logo: dark variant on dark header (both modes — nav is always dark) */
+.md-header .md-logo img,
+[data-md-color-scheme="slate"] .md-header .md-logo img {
+  content: url("../assets/logo-dark.svg");
+}

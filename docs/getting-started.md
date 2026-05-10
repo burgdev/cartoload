@@ -14,7 +14,14 @@ uv tool install cartoload
 
 ## Quick Start
 
-1. Create or use example configuration files for your data source
+1. Create or use example configuration files for your data source:
+
+```bash
+# Example configs are included for common providers
+ls examples/configs/sources/
+ls examples/configs/layers/
+```
+
 2. Build a layer:
 
 ```bash
@@ -25,6 +32,12 @@ cartoload build \
 ```
 
 3. Copy the resulting `.img` file to your GPS device
+
+## Next Steps
+
+- [Build a map](guides/build-a-map.md) — full build workflow with all options
+- [Analyze IMG files](guides/analyze-img.md) — inspect and compare IMG files
+- [Configuration](configuration/sources.md) — configure your own data sources
 
 ## Development
 

@@ -2289,6 +2289,7 @@ class StreamingIMGWriter:
 
         with open(self.output_path, "wb") as f:
             current_offset = data_start
+            tiles_offset = 0
 
             for group_idx, group in enumerate(gmp_groups):
                 gmp_name = f"{group.map_id:08X}"[:8]
@@ -2317,8 +2318,10 @@ class StreamingIMGWriter:
                     source_crs,
                     jpeg_quality,
                     progress_callback,
+                    tiles_offset=tiles_offset,
                 )
 
+                tiles_offset += sum(len(sub.tile_entries) for sub in group.subdivisions)
                 gmp_actual.append((gmp_name, start_offset, actual_size))
                 # Next GMP starts at block-aligned end of this one
                 aligned_end = _align_to_block(start_offset + actual_size, block_size)
@@ -2425,6 +2428,7 @@ class StreamingIMGWriter:
         source_crs: str,
         jpeg_quality: int | None,
         progress_callback: Callable[[str, int, int], None] | None = None,
+        tiles_offset: int = 0,
     ) -> int:
         """Write GMP subfile with streaming LBL29 section.
 
@@ -2817,7 +2821,9 @@ class StreamingIMGWriter:
 
                 # Overall progress after each batch
                 if progress_callback is not None:
-                    progress_callback("writing", tiles_processed, total_tiles)
+                    progress_callback(
+                        "writing", tiles_offset + tiles_processed, total_tiles
+                    )
 
                 if tiles_processed % 5000 == 0 or batch_start + batch_size >= len(
                     all_tiles

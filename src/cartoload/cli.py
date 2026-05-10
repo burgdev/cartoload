@@ -135,11 +135,14 @@ def _parse_zoom(value: str | None) -> list[int] | None:
 
 def _human_size(size: int) -> str:
     """Format a byte count as a human-readable string."""
+    value = float(size)
     for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024:
-            return f"{size:.1f} {unit}"
-        size //= 1024
-    return f"{size:.1f} TB"
+        if value < 1024:
+            formatted = f"{value:.2f}".rstrip("0").rstrip(".")
+            return f"{formatted} {unit}"
+        value /= 1024
+    formatted = f"{value:.2f}".rstrip("0").rstrip(".")
+    return f"{formatted} TB"
 
 
 def _handle_pipeline_error(error: PipelineError, *, verbose: bool = False) -> None:
