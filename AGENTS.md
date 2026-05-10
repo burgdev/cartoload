@@ -21,7 +21,7 @@ Guidelines for AI coding agents working on cartoload.
 
 - Read and keep the docs in `docs/` up to date when changing user-facing behavior.
 - Project documentation is built with zensical and deployed to GitHub Pages.
-- Some of the referenced sources are under `docs/external_ignored/` (ignored by git)
+- Some of the referenced sources are under `docs_external_refs/` (ignored by git)
 
 ## Project Structure
 
