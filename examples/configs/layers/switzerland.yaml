@@ -14,7 +14,8 @@ layers:
     type: raster
     source: swisstopo_wmts
     wmts_layer: ch.swisstopo.pixelkarte-farbe
-    zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16] #, 18]
+    #zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16] #, 18]
+    zoom_levels: [8, 9, 11, 12, 13, 14, 16] #, 18]
     exporter: garmin_img
     output: ch_basemap_test.img
 

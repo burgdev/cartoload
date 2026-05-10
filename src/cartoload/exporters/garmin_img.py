@@ -92,18 +92,136 @@ def _compute_zoom_codes(
     return codes
 
 
+def _filter_tiles_by_bounds(
+    tiles: list, parent_bounds: tuple[float, float, float, float]
+) -> list:
+    """Filter tiles whose center falls within parent bounds.
+
+    Args:
+        tiles: List of (jpeg_bytes, (lat_min, lon_min, lat_max, lon_max)) tuples.
+        parent_bounds: (north, south, west, east) of the parent subdivision.
+
+    Returns:
+        List of tiles whose center is within the parent bounds.
+    """
+    p_north, p_south, p_west, p_east = parent_bounds
+    result = []
+    for tile_entry in tiles:
+        if not isinstance(tile_entry, tuple):
+            continue
+        _, tile_bounds = tile_entry
+        lat_min, lon_min, lat_max, lon_max = tile_bounds
+        center_lat = (lat_min + lat_max) / 2
+        center_lon = (lon_min + lon_max) / 2
+        if p_south <= center_lat <= p_north and p_west <= center_lon <= p_east:
+            result.append(tile_entry)
+    return result
+
+
+def _filter_metadata_by_bounds(
+    tiles: list[TileMetadata], parent_bounds: tuple[float, float, float, float]
+) -> list[TileMetadata]:
+    """Filter TileMetadata entries whose center falls within parent bounds."""
+    p_north, p_south, p_west, p_east = parent_bounds
+    result = []
+    for tm in tiles:
+        center_lat = (tm.lat_min + tm.lat_max) / 2
+        center_lon = (tm.lon_min + tm.lon_max) / 2
+        if p_south <= center_lat <= p_north and p_west <= center_lon <= p_east:
+            result.append(tm)
+    return result
+
+
+def _generate_child_subdivisions(
+    tiles: list,
+    z_idx: int,
+    parent_bounds: tuple[float, float, float, float],
+) -> list[Subdivision]:
+    """Generate child subdivisions within parent bounds from (bytes, bounds) tiles.
+
+    Args:
+        tiles: Tiles at zoom level z_idx whose centers fall within parent_bounds.
+        z_idx: Zoom level index for the children.
+        parent_bounds: (north, south, west, east) constraining the grid.
+
+    Returns:
+        List of child Subdivision objects, with bounds derived from tiles.
+    """
+    if not tiles:
+        # No tiles in this parent — create one empty child spanning parent bounds
+        p_n, p_s, p_w, p_e = parent_bounds
+        return [
+            Subdivision(
+                center_lat=(p_n + p_s) / 2,
+                center_lon=(p_w + p_e) / 2,
+                zoom_level_index=z_idx,
+                bounds_west=p_w,
+                bounds_east=p_e,
+                bounds_north=p_n,
+                bounds_south=p_s,
+            )
+        ]
+
+    if len(tiles) <= 4:
+        # Few tiles: single subdivision
+        children: list[Subdivision] = []
+        _assign_tiles_to_single_subdivision(tiles, z_idx, children)
+        return children
+
+    n_tiles = len(tiles)
+    grid_side = max(2, int(n_tiles**0.25))
+    children = []
+    _assign_tiles_to_grid(tiles, z_idx, grid_side, grid_side, children)
+    return children
+
+
+def _generate_child_subdivisions_from_metadata(
+    tiles: list[TileMetadata],
+    z_idx: int,
+    parent_bounds: tuple[float, float, float, float],
+) -> list[Subdivision]:
+    """Generate child subdivisions within parent bounds from TileMetadata.
+
+    Same logic as _generate_child_subdivisions but for metadata-based tiles.
+    """
+    if not tiles:
+        p_n, p_s, p_w, p_e = parent_bounds
+        return [
+            Subdivision(
+                center_lat=(p_n + p_s) / 2,
+                center_lon=(p_w + p_e) / 2,
+                zoom_level_index=z_idx,
+                bounds_west=p_w,
+                bounds_east=p_e,
+                bounds_north=p_n,
+                bounds_south=p_s,
+            )
+        ]
+
+    if len(tiles) <= 4:
+        children: list[Subdivision] = []
+        _assign_metadata_to_single_subdivision(tiles, z_idx, children)
+        return children
+
+    n_tiles = len(tiles)
+    grid_side = max(2, int(n_tiles**0.25))
+    children = []
+    _assign_metadata_to_grid(tiles, z_idx, grid_side, grid_side, children)
+    return children
+
+
 def generate_subdivisions(
     compressed_tiles: CompressedTiles,
     sorted_zoom_levels: list[int],
     bounds: dict[str, float],
 ) -> list[Subdivision]:
-    """Generate spatial subdivisions for all zoom levels.
+    """Generate spatial subdivisions for all zoom levels in a hierarchical tree.
 
-    Divides the map area into a geographic grid at each zoom level.
-    The grid size increases with zoom level detail (fewer for overview
-    zooms, more for detailed zooms), matching the SwissTopo pattern.
-
-    Each tile is assigned to a subdivision based on its geographic position.
+    Builds a true parent-child hierarchy where each parent's children are
+    spatially contained within the parent's bounds. At each level, for each
+    parent, tiles whose centers fall within the parent's bounds are assigned
+    to child subdivisions. This enables efficient spatial pruning on Garmin
+    devices.
 
     Args:
         compressed_tiles: Dict mapping zoom level number to list of
@@ -113,8 +231,9 @@ def generate_subdivisions(
 
     Returns:
         Flat list of Subdivision objects across all zoom levels, ordered
-        by zoom level (overview first). Each subdivision contains its
-        assigned tiles.
+        by zoom level then by parent group. Each parent's children are
+        contiguous. Each subdivision contains its assigned tiles and
+        next_level_index pointing to its first child.
     """
     if not sorted_zoom_levels:
         return []
@@ -122,34 +241,61 @@ def generate_subdivisions(
     n_zoom = len(sorted_zoom_levels)
     subdivisions: list[Subdivision] = []
 
-    for z_idx, zoom_level in enumerate(sorted_zoom_levels):
-        tiles = compressed_tiles.get(zoom_level, [])
-        if not tiles:
-            # No tiles at this zoom level — create one empty subdivision
-            sub = Subdivision(
-                center_lat=(bounds.get("north", 0) + bounds.get("south", 0)) / 2,
-                center_lon=(bounds.get("west", 0) + bounds.get("east", 0)) / 2,
-                zoom_level_index=z_idx,
+    map_n = bounds.get("north", 0.0)
+    map_s = bounds.get("south", 0.0)
+    map_w = bounds.get("west", 0.0)
+    map_e = bounds.get("east", 0.0)
+
+    # Level 0: create top-level subdivisions from all tiles at zoom 0
+    first_zoom = sorted_zoom_levels[0]
+    first_tiles = compressed_tiles.get(first_zoom, [])
+
+    if not first_tiles:
+        # Empty overview level — single full-bounds subdivision
+        subdivisions.append(
+            Subdivision(
+                center_lat=(map_n + map_s) / 2,
+                center_lon=(map_w + map_e) / 2,
+                zoom_level_index=0,
+                bounds_west=map_w,
+                bounds_east=map_e,
+                bounds_north=map_n,
+                bounds_south=map_s,
             )
-            subdivisions.append(sub)
-            continue
+        )
+    elif len(first_tiles) <= 4:
+        _assign_tiles_to_single_subdivision(first_tiles, 0, subdivisions)
+    else:
+        grid_side = max(2, int(len(first_tiles) ** 0.25))
+        _assign_tiles_to_grid(first_tiles, 0, grid_side, grid_side, subdivisions)
 
-        # Compute grid dimensions for this zoom level.
-        # SwissTopo pattern: subdiv_counts=[1, 3, 138, 156, 300] for 5 levels.
-        # For overview levels (z_idx=0,1): 1 subdivision
-        # For detail levels: subdivide proportionally to tile count.
-        if len(tiles) <= 4:
-            # Few tiles: one subdivision for all tiles
-            _assign_tiles_to_single_subdivision(tiles, z_idx, subdivisions)
-        else:
-            # Subdivide into a regular grid
-            n_tiles = len(tiles)
-            # Target roughly sqrt(n_tiles) subdivisions, but at least 4
-            grid_side = max(2, int(n_tiles**0.25))
-            _assign_tiles_to_grid(tiles, z_idx, grid_side, grid_side, subdivisions)
+    # Levels 1..N-1: for each parent, generate children within its bounds
+    for z_idx in range(1, n_zoom):
+        zoom_level = sorted_zoom_levels[z_idx]
+        all_tiles_at_level = compressed_tiles.get(zoom_level, [])
 
-    # Set TRE2 links and bounds
-    _set_subdivision_links(subdivisions, n_zoom, bounds)
+        # Get parents at previous level
+        parents = [s for s in subdivisions if s.zoom_level_index == z_idx - 1]
+
+        for parent in parents:
+            parent_bounds = (
+                parent.bounds_north,
+                parent.bounds_south,
+                parent.bounds_west,
+                parent.bounds_east,
+            )
+
+            # Filter tiles to those within this parent's bounds
+            parent_tiles = _filter_tiles_by_bounds(all_tiles_at_level, parent_bounds)
+
+            # Generate children within parent bounds
+            children = _generate_child_subdivisions(parent_tiles, z_idx, parent_bounds)
+
+            # Link parent to first child
+            parent.next_level_index = len(subdivisions)
+
+            # Append children contiguously
+            subdivisions.extend(children)
 
     return subdivisions
 
@@ -362,11 +508,12 @@ def generate_subdivisions_from_metadata(
     sorted_zoom_levels: list[int],
     bounds: dict[str, float],
 ) -> list[Subdivision]:
-    """Generate spatial subdivisions from TileMetadata (no JPEG data needed).
+    """Generate spatial subdivisions from TileMetadata in a hierarchical tree.
 
-    Identical logic to generate_subdivisions() but reads bounds directly
-    from TileMetadata fields instead of unpacking (bytes, bounds) tuples.
-    Produces Subdivision objects with tile_entries populated from metadata.
+    Same hierarchical approach as generate_subdivisions() but reads bounds
+    directly from TileMetadata fields instead of unpacking (bytes, bounds)
+    tuples. Produces Subdivision objects with tile_entries populated from
+    metadata.
 
     Args:
         tile_metadata_by_zoom: Dict mapping zoom level to list of TileMetadata
@@ -374,7 +521,7 @@ def generate_subdivisions_from_metadata(
         bounds: Geographic bounds dict with north, south, west, east keys.
 
     Returns:
-        Flat list of Subdivision objects across all zoom levels.
+        Flat list of Subdivision objects in hierarchical order.
     """
     if not sorted_zoom_levels:
         return []
@@ -382,25 +529,57 @@ def generate_subdivisions_from_metadata(
     n_zoom = len(sorted_zoom_levels)
     subdivisions: list[Subdivision] = []
 
-    for z_idx, zoom_level in enumerate(sorted_zoom_levels):
-        tiles = tile_metadata_by_zoom.get(zoom_level, [])
-        if not tiles:
-            sub = Subdivision(
-                center_lat=(bounds.get("north", 0) + bounds.get("south", 0)) / 2,
-                center_lon=(bounds.get("west", 0) + bounds.get("east", 0)) / 2,
-                zoom_level_index=z_idx,
+    map_n = bounds.get("north", 0.0)
+    map_s = bounds.get("south", 0.0)
+    map_w = bounds.get("west", 0.0)
+    map_e = bounds.get("east", 0.0)
+
+    # Level 0: create top-level subdivisions
+    first_zoom = sorted_zoom_levels[0]
+    first_tiles = tile_metadata_by_zoom.get(first_zoom, [])
+
+    if not first_tiles:
+        subdivisions.append(
+            Subdivision(
+                center_lat=(map_n + map_s) / 2,
+                center_lon=(map_w + map_e) / 2,
+                zoom_level_index=0,
+                bounds_west=map_w,
+                bounds_east=map_e,
+                bounds_north=map_n,
+                bounds_south=map_s,
             )
-            subdivisions.append(sub)
-            continue
+        )
+    elif len(first_tiles) <= 4:
+        _assign_metadata_to_single_subdivision(first_tiles, 0, subdivisions)
+    else:
+        grid_side = max(2, int(len(first_tiles) ** 0.25))
+        _assign_metadata_to_grid(first_tiles, 0, grid_side, grid_side, subdivisions)
 
-        if len(tiles) <= 4:
-            _assign_metadata_to_single_subdivision(tiles, z_idx, subdivisions)
-        else:
-            n_tiles = len(tiles)
-            grid_side = max(2, int(n_tiles**0.25))
-            _assign_metadata_to_grid(tiles, z_idx, grid_side, grid_side, subdivisions)
+    # Levels 1..N-1: for each parent, generate children within its bounds
+    for z_idx in range(1, n_zoom):
+        zoom_level = sorted_zoom_levels[z_idx]
+        all_tiles_at_level = tile_metadata_by_zoom.get(zoom_level, [])
 
-    _set_subdivision_links(subdivisions, n_zoom, bounds)
+        parents = [s for s in subdivisions if s.zoom_level_index == z_idx - 1]
+
+        for parent in parents:
+            parent_bounds = (
+                parent.bounds_north,
+                parent.bounds_south,
+                parent.bounds_west,
+                parent.bounds_east,
+            )
+
+            parent_tiles = _filter_metadata_by_bounds(all_tiles_at_level, parent_bounds)
+
+            children = _generate_child_subdivisions_from_metadata(
+                parent_tiles, z_idx, parent_bounds
+            )
+
+            parent.next_level_index = len(subdivisions)
+            subdivisions.extend(children)
+
     return subdivisions
 
 
