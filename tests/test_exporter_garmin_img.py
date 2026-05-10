@@ -19,6 +19,7 @@ import pytest
 
 from cartoload.config import LayerConfig
 from cartoload.exporters.garmin_img import (
+    _compute_zoom_codes,
     generate_subdivisions,
     generate_subdivisions_from_metadata,
 )
@@ -417,6 +418,72 @@ class TestTileEncoder:
         cols_high, rows_high = TileEncoder.compute_grid(bounds, zoom_level=12)
         assert cols_high >= cols_low
         assert rows_high >= rows_low
+
+
+# ---------------------------------------------------------------------------
+# Zoom Code Computation
+# ---------------------------------------------------------------------------
+
+
+class TestComputeZoomCodes:
+    """Tests for _compute_zoom_codes() inherited flag logic."""
+
+    def test_all_levels_have_tiles_no_inherited(self):
+        """When all levels have tiles, no level gets the 0x80 inherited flag."""
+        codes = _compute_zoom_codes([8, 10, 12], has_tiles=[True, True, True])
+        assert codes == [(8, 0x02), (10, 0x01), (12, 0x00)]
+
+    def test_default_has_tiles_is_all_true(self):
+        """When has_tiles is not provided, all levels assumed to have tiles."""
+        codes = _compute_zoom_codes([8, 10, 12])
+        assert codes == [(8, 0x02), (10, 0x01), (12, 0x00)]
+
+    def test_empty_top_levels_get_inherited(self):
+        """Empty levels before the first with tiles get the 0x80 flag."""
+        # 8 levels: 8,9 empty; 11-16 have tiles
+        has = [False, False, True, True, True, True, True, True]
+        codes = _compute_zoom_codes([8, 9, 11, 12, 13, 14, 15, 16], has_tiles=has)
+        zoom_codes = [c for _, c in codes]
+        # First two (empty) get 0x80, rest don't
+        assert zoom_codes[0] == 0x87  # 0x80 | 7
+        assert zoom_codes[1] == 0x86  # 0x80 | 6
+        assert zoom_codes[2] == 0x05  # first with tiles, no 0x80
+        assert zoom_codes[3] == 0x04
+        assert zoom_codes[4] == 0x03
+        assert zoom_codes[5] == 0x02
+        assert zoom_codes[6] == 0x01
+        assert zoom_codes[7] == 0x00
+
+    def test_first_level_has_tiles_no_inherited(self):
+        """When the very first level has tiles, no level gets 0x80."""
+        has = [True, True, True, True]
+        codes = _compute_zoom_codes([10, 12, 14, 16], has_tiles=has)
+        zoom_codes = [c for _, c in codes]
+        assert zoom_codes == [0x03, 0x02, 0x01, 0x00]
+
+    def test_single_level_with_tiles(self):
+        """Single level with tiles gets no inherited flag."""
+        codes = _compute_zoom_codes([12], has_tiles=[True])
+        assert codes == [(12, 0x00)]
+
+    def test_single_level_without_tiles(self):
+        """Single empty level gets inherited flag (map boundary root)."""
+        codes = _compute_zoom_codes([12], has_tiles=[False])
+        assert codes == [(12, 0x80)]
+
+    def test_all_levels_empty(self):
+        """When no level has tiles, only the first gets inherited."""
+        codes = _compute_zoom_codes([8, 10, 12], has_tiles=[False, False, False])
+        zoom_codes = [c for _, c in codes]
+        assert zoom_codes[0] == 0x82  # inherited
+        assert zoom_codes[1] == 0x01  # no inherited
+        assert zoom_codes[2] == 0x00
+
+    def test_five_levels_all_have_tiles(self):
+        """Five levels matching SwissTopo pattern, all with tiles."""
+        codes = _compute_zoom_codes([20, 21, 22, 23, 24], has_tiles=[True] * 5)
+        zoom_codes = [c for _, c in codes]
+        assert zoom_codes == [0x04, 0x03, 0x02, 0x01, 0x00]
 
 
 # ---------------------------------------------------------------------------

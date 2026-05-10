@@ -48,22 +48,46 @@ logger = logging.getLogger(__name__)
 # Example (8 levels): 0x87, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0x00
 
 
-def _compute_zoom_codes(sorted_level_numbers: list[int]) -> list[tuple[int, int]]:
+def _compute_zoom_codes(
+    sorted_level_numbers: list[int],
+    has_tiles: list[bool] | None = None,
+) -> list[tuple[int, int]]:
     """Compute Garmin zoom codes for a set of zoom levels.
+
+    The 0x80 inherited flag is set only on consecutive empty levels at the
+    top of the hierarchy (before the first level with tiles). This ensures
+    that the most-zoomed-out level with actual tile data is visible on
+    Garmin devices and in GPXSee, which skip all levels with the inherited
+    flag.
 
     Args:
         sorted_level_numbers: Zoom level numbers in ascending order.
+        has_tiles: Optional list of booleans (same length as
+            sorted_level_numbers). True means that level has tile data.
+            If None, defaults to all True (no levels get inherited flag).
 
     Returns:
         List of (level_number, zoom_code) tuples in the same order.
     """
     n = len(sorted_level_numbers)
+    if has_tiles is None:
+        has_tiles = [True] * n
+
+    # Find the first level with tiles; only levels before it get inherited.
+    first_with_tiles = 0
+    for i, has in enumerate(has_tiles):
+        if has:
+            first_with_tiles = i
+            break
+    else:
+        # No level has tiles — only the first gets inherited (map boundary).
+        first_with_tiles = 1
+
     codes = []
     for i, level_num in enumerate(sorted_level_numbers):
-        if i == 0:
-            code = 0x80 + (n - 1)
-        else:
-            code = n - 1 - i
+        code = n - 1 - i
+        if i < first_with_tiles:
+            code |= 0x80
         codes.append((level_num, code))
     return codes
 
@@ -703,7 +727,9 @@ class GarminImgExporter(BaseExporter):
 
         # 1. Resolve attribution and build IMG structure
         attribution = self._resolve_attribution(layer_config)
-        img_file = self._build_img_structure(layer_config, attribution)
+        sorted_zooms = sorted(layer_config.zoom_levels)
+        has_tiles = [len(compressed_tiles.get(zl, [])) > 0 for zl in sorted_zooms]
+        img_file = self._build_img_structure(layer_config, attribution, has_tiles)
 
         # 2. Report tile counts
         total_tiles = sum(len(t) for t in compressed_tiles.values())
@@ -758,7 +784,9 @@ class GarminImgExporter(BaseExporter):
 
         # 1. Resolve attribution and build IMG structure
         attribution = self._resolve_attribution(layer_config)
-        img_file = self._build_img_structure(layer_config, attribution)
+        sorted_zooms = sorted(layer_config.zoom_levels)
+        has_tiles = [len(tile_metadata.get(zl, [])) > 0 for zl in sorted_zooms]
+        img_file = self._build_img_structure(layer_config, attribution, has_tiles)
 
         # 2. Report tile counts
         total_tiles = sum(len(t) for t in tile_metadata.values())
@@ -886,9 +914,19 @@ class GarminImgExporter(BaseExporter):
         return name[:MAP_NAME_MAX_LEN]
 
     def _build_img_structure(
-        self, layer_config: LayerConfig, attribution: str
+        self,
+        layer_config: LayerConfig,
+        attribution: str,
+        has_tiles: list[bool] | None = None,
     ) -> IMGFile:
-        """Build the IMGFile data structure from configuration."""
+        """Build the IMGFile data structure from configuration.
+
+        Args:
+            layer_config: Layer configuration with zoom levels and bounds.
+            attribution: Map attribution string.
+            has_tiles: Optional per-zoom-level tile presence (same order as
+                sorted zoom levels). If None, all levels assumed to have tiles.
+        """
         bounds = layer_config.bounds or {}
 
         header = IMGHeader(
@@ -913,7 +951,7 @@ class GarminImgExporter(BaseExporter):
         # Example: 12 levels → level_numbers 13-24, 5 levels → 20-24.
         sorted_zooms = sorted(layer_config.zoom_levels)
         n_zoom = len(sorted_zooms)
-        zoom_code_map = dict(_compute_zoom_codes(sorted_zooms))
+        zoom_code_map = dict(_compute_zoom_codes(sorted_zooms, has_tiles))
         zoom_levels = []
         for z_idx, zl in enumerate(sorted_zooms):
             remapped_level = 24 - (n_zoom - 1 - z_idx)
