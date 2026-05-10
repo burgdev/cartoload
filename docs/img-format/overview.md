@@ -1,6 +1,6 @@
 # Garmin IMG Format — Overview
 
-The Garmin IMG format is a proprietary binary container used by Garmin GPS devices to store map data. This page provides a high-level overview. For byte-level details, see the [detailed specification](detailed-spec.md).
+The Garmin IMG format is a proprietary binary container used by Garmin GPS devices to store map data. This page provides a high-level overview. For byte-level details, see the individual specification pages linked below.
 
 ## Two Variants: Raster and Vector
 
@@ -83,5 +83,9 @@ Raster IMG maps work on both Garmin watches and handheld GPS units.
 
 ## Further Reading
 
-- [Detailed specification](detailed-spec.md) — complete binary format reference with byte offsets and field descriptions
+- [Header & FAT](header-fat.md) — file header structure, FAT layout, MPS subfile, size constraints, date encoding
+- [GMP Container](gmp-container.md) — subfile organization, GMP container format, TRE/RGN/LBL/NET sub-headers
+- [Tile Storage](tile-storage.md) — JPEG tile data, LBL28/LBL29 index, RGN2 compound records, DeltaStream bitstream
+- [TRE Sections](tre-sections.md) — TRE header layout, map levels, subdivisions, raster layers, draw order
+- [Vector Reference](vector-reference.md) — vector vs raster differences, vector format specification
 - [Tools & resources](tools-resources.md) — third-party tools, format documentation, and reference implementations

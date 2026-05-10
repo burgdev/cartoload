@@ -37,7 +37,7 @@ cartoload build \
 
 - [Build a map](guides/build-a-map.md) — full build workflow with all options
 - [Analyze IMG files](guides/analyze-img.md) — inspect and compare IMG files
-- [Configuration](configuration/sources.md) — configure your own data sources
+- [Configuration](configuration/index.md) — understand sources, layers, and how they fit together
 
 ## Development
 

@@ -2,6 +2,8 @@
 site_name = "cartoload"
 site_description = "Convert official geodata into GPS device maps"
 site_url = "https://burgdev.github.io/cartoload/"
+repo_url = "https://github.com/burgdev/cartoload"
+repo_name = "burgdev/cartoload"
 docs_dir = "."
 site_dir = "site"
 extra_css = ["stylesheets/extra.css"]
@@ -15,17 +17,30 @@ nav = [
         { title = "Split large maps", path = "guides/split-maps.md" },
     ]},
     { title = "Configuration", children = [
+        { title = "Overview", path = "configuration/index.md" },
         { title = "Sources", path = "configuration/sources.md" },
         { title = "Layers", path = "configuration/layers.md" },
     ]},
-    { title = "IMG Format", children = [
-        { title = "Overview", path = "img-format/overview.md" },
-        { title = "Detailed specification", path = "img-format/detailed-spec.md" },
-        { title = "Tools & resources", path = "img-format/tools-resources.md" },
+    { title = "Reference", children = [
+        { title = "Overview", path = "reference.md" },
+        { title = "CLI", path = "cli.md" },
+        { title = "API", path = "api-reference.md" },
+        { title = "IMG Format", children = [
+            { title = "Overview", path = "img-format/overview.md" },
+            { title = "Header & FAT", path = "img-format/header-fat.md" },
+            { title = "GMP Container", path = "img-format/gmp-container.md" },
+            { title = "Tile Storage", path = "img-format/tile-storage.md" },
+            { title = "TRE Sections", path = "img-format/tre-sections.md" },
+            { title = "Vector Reference", path = "img-format/vector-reference.md" },
+            { title = "Tools & resources", path = "img-format/tools-resources.md" },
+        ]},
     ]},
-    { title = "CLI reference", path = "cli.md" },
-    { title = "API reference", path = "api-reference.md" },
 ]
+
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/burgdev/cartoload"
+name = "cartoload on GitHub"
 
 [project.theme]
 favicon = "assets/favicon.svg"
@@ -45,6 +60,7 @@ toggle.icon = "lucide/moon"
 toggle.name = "Switch to light mode"
 
 [project.theme.features]
+"navigation.tabs" = true
 navigation.sections = true
 navigation.footer = true
 navigation.path = true
