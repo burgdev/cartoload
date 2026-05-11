@@ -12,11 +12,27 @@ layers:
     name: "Switzerland 1:25k"
     description: "swisstopo national map, colour, 1:25000"
     type: raster
-    source: swisstopo_wmts
-    wmts_layer: ch.swisstopo.pixelkarte-farbe
-    #zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16] #, 18]
+    source:
+      ref: swisstopo_wmts
+    layers: # first entry is bottom
+      - ref: ch_basemap_25k
+      - ref: ch_hiking
+        #opacity: 0.6
+        opacity: { 11: 0.4, 12: 0.4, 13: 0.5, 14: 0.6, 15: 0.7, 16: 0.7 }
+        #zoom_levels: [8, 9, 11]
+        zoom_levels: [11, 12, 13, 14, 15, 16] #, 18]
+      - name: "Skiroutes Switzerland"
+        source:
+          ref: swisstopo_wmts
+          layer: ch.swisstopo-karto.skitouren
+          extension: png
+        #zoom_levels: [9, 11, 12, 13, 14, 15]
+        #opacity: 0.6
+        opacity: { 11: 0.4, 12: 0.4, 13: 0.5, 14: 0.6, 15: 0.7, 16: 0.7 }
+        zoom_levels: [11, 12, 13, 14, 15, 16] #, 18]
+    zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16] #, 18]
     #zoom_levels: [8, 9, 11, 12, 13, 14, 16] #, 18]
-    zoom_levels: [8, 9, 11, 12, 13, 14, 15, 17] #, 18]
+    #zoom_levels: [8, 9, 11, 12, 13, 14, 15, 17] #, 18]
     exporter: garmin_img
     output: ch_basemap_test.img
 
@@ -24,9 +40,10 @@ layers:
     name: "Switzerland 1:25k"
     description: "swisstopo national map, colour, 1:25000"
     type: raster
-    source: swisstopo_wmts
-    wmts_layer: ch.swisstopo.pixelkarte-farbe
-    zoom_levels: [10, 12, 14]
+    source:
+      ref: swisstopo_wmts
+      layer: ch.swisstopo.pixelkarte-farbe
+    zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16] #, 18]
     exporter: garmin_img
     output: ch_basemap_25k.img
 
@@ -34,18 +51,32 @@ layers:
     name: "Switzerland 1:10k"
     description: "swisstopo national map, colour, 1:10000"
     type: raster
-    source: swisstopo_wmts
-    wmts_layer: ch.swisstopo.pixelkarte-farbe
+    source:
+      ref: swisstopo_wmts
+      layer: ch.swisstopo.pixelkarte-farbe
     zoom_levels: [12, 14, 15, 16]
     exporter: garmin_img
     output: ch_basemap_10k.img
+
+  ch_hiking:
+    name: "Hiking Switzerland"
+    description: "swisstopo national map, colour, 1:25000"
+    source:
+      ref: swisstopo_wmts
+      layer: ch.swisstopo.swisstlm3d-wanderwege
+      extension: png
+    zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16]
+    exporter: garmin_img
+    output: ch_hiking.img
 
   ch_steepness:
     name: "Switzerland steepness"
     description: "Terrain steepness shading overlay"
     type: raster_overlay
-    source: swisstopo_wmts
-    wmts_layer: ch.swisstopo-ov.hangneigungskarte
+    source:
+      ref: swisstopo_wmts
+      layer: ch.swisstopo-ov.hangneigungskarte
+      extension: png
     zoom_levels: [12, 14]
     exporter: garmin_img
     output: ch_steepness.img

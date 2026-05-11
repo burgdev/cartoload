@@ -238,7 +238,17 @@ class TestCaching:
     def test_cache_path_format(self, tmp_path: Path) -> None:
         dl = _make_downloader(tmp_path)
         path = dl._cache_path(543, 361, 10)
-        assert path == tmp_path / "cache" / "test_source" / "10" / "543" / "361.jpeg"
+        # Path includes a URL-based cache key hash: source_id / <hash> / zoom / x / y.ext
+        source_dir = tmp_path / "cache" / "test_source"
+        assert path.name == "361.jpeg"
+        assert path.parent.name == "543"
+        assert path.parent.parent.name == "10"
+        # path is source_dir / <hash> / 10 / 543 / 361.jpeg
+        cache_key_dir = path.parent.parent.parent
+        assert cache_key_dir.parent == source_dir
+        assert cache_key_dir.name
+        assert len(cache_key_dir.name) == 12
+        assert all(c in "0123456789abcdef" for c in cache_key_dir.name)
 
     def test_cache_miss_downloads_and_writes(self, tmp_path: Path) -> None:
         dl = _make_downloader(tmp_path)

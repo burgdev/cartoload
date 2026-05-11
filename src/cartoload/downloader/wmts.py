@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import os
@@ -10,6 +11,8 @@ from pathlib import Path
 from typing import Sequence
 
 import requests
+
+from cartoload.template import expand
 from rich.progress import (
     BarColumn,
     Progress,
@@ -83,6 +86,16 @@ class _UrlSelector:
                 )
 
 
+def _url_cache_key(url: str) -> str:
+    """Compute a short filesystem-safe cache key from a URL template.
+
+    Uses the first 12 hex chars of a SHA-256 hash. This differentiates
+    tile sets that share a source but differ in any template variable
+    (layer, extension, etc.).
+    """
+    return hashlib.sha256(url.encode()).hexdigest()[:12]
+
+
 class WMTSDownloader(BaseDownloader):
     """Downloads tiles from WMTS/XYZ tile services."""
 
@@ -97,11 +110,13 @@ class WMTSDownloader(BaseDownloader):
         layer_name: str = "",
         crs: str | None = None,
         urls: Sequence[str] | None = None,
+        display_name: str = "",
     ) -> None:
         super().__init__(source_id, cache_dir, max_workers, delay_ms, crs=crs)
         self._url_template = url_template
         self._tile_format = tile_format
         self._layer_name = layer_name
+        self._display_name = display_name or layer_name or source_id
 
         # Multi-URL support: if additional URLs provided, use round-robin
         all_urls = [url_template] if url_template else []
@@ -120,6 +135,19 @@ class WMTSDownloader(BaseDownloader):
         # Scale thread pool with URL count
         if urls and len(urls) > 1 and max_workers == 4:
             self._max_workers = max(4, len(all_urls) * 2)
+
+        # Cache key: short hash of the resolved URL template to differentiate
+        # layers that share the same source but have different template args
+        # (e.g. different WMTS layers, extensions, or other source_args).
+        self._cache_key = _url_cache_key(url_template) if url_template else ""
+
+    @property
+    def source_cache_dir(self) -> Path:
+        """Cache directory for this source (includes cache key hash if set)."""
+        base = self._cache_dir / self._source_id
+        if self._cache_key:
+            return base / self._cache_key
+        return base
 
     # ------------------------------------------------------------------
     # Tile grid computation
@@ -273,29 +301,51 @@ class WMTSDownloader(BaseDownloader):
         source_id: str = "",
         layer_name: str = "",
     ) -> str:
-        """Substitute placeholders in a URL template with tile coordinates."""
-        return (
-            template.replace("{zoom}", str(zoom))
+        """Substitute per-tile variables in a URL template.
+
+        Config-level variables (${layer}, ${extension}, etc.) are already
+        resolved by the pipeline. This handles the per-tile coordinates.
+        Supports both ${x}/${y}/${z}/${zoom}/${source_id}/${layer} and
+        legacy {x}/{y}/{z}/{zoom}/{source_id}/{layer} syntax.
+        """
+        variables = {
+            "x": str(x),
+            "y": str(y),
+            "z": str(zoom),
+            "zoom": str(zoom),
+            "source_id": source_id,
+            "layer": layer_name or source_id,
+        }
+        # Expand ${VAR} syntax via template engine
+        result = expand(template, variables)
+        # Also handle legacy {VAR} syntax for backward compat
+        result = (
+            result.replace("{zoom}", str(zoom))
             .replace("{z}", str(zoom))
             .replace("{x}", str(x))
             .replace("{y}", str(y))
             .replace("{source_id}", source_id)
             .replace("{layer}", layer_name or source_id)
         )
+        return result
 
     # ------------------------------------------------------------------
     # Caching helpers
     # ------------------------------------------------------------------
 
     def _cache_path(self, x: int, y: int, zoom: int) -> Path:
-        """Return the cache file path for a tile."""
-        return (
-            self._cache_dir
-            / self._source_id
-            / str(zoom)
-            / str(x)
-            / f"{y}.{self._tile_format}"
-        )
+        """Return the cache file path for a tile.
+
+        Uses a URL-based cache key to differentiate layers sharing the
+        same source:
+            cache_dir / source_id / <cache_key> / zoom / x / y.ext
+        If no cache key (empty URL template), falls back to:
+            cache_dir / source_id / zoom / x / y.ext
+        """
+        base = self._cache_dir / self._source_id
+        if self._cache_key:
+            base = base / self._cache_key
+        return base / str(zoom) / str(x) / f"{y}.{self._tile_format}"
 
     def _world_file_path(self, tile_path: Path) -> Path:
         """Return the expected world file path for a tile."""
@@ -478,7 +528,7 @@ class WMTSDownloader(BaseDownloader):
             TimeElapsedColumn(),
         ) as progress:
             task_id = progress.add_task(
-                f"Downloading {self._source_id} z{zoom}",
+                f"Downloading {self._display_name} z{zoom}",
                 total=total,
             )
             # Fast-forward for cached tiles

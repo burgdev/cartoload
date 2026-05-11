@@ -10,15 +10,28 @@ The system SHALL composite multiple raster sub-layers into a single output tile 
 - **THEN** for each tile position, the system SHALL load both tiles, decode them as RGBA, apply opacity 0.6 to the overlay's alpha channel, and composite the overlay on top of the basemap
 - **AND** the result SHALL be encoded as JPEG bytes
 
-#### Scenario: Sub-layer tile missing at a position
+#### Scenario: Sub-layer tile not available at a zoom level
 
-- **WHEN** a composite layer has three sub-layers but sub-layer 3 has no tile at tile position (x, y, z)
-- **THEN** the compositor SHALL proceed with only sub-layers 1 and 2 for that tile position
-- **AND** a debug-level log message SHALL be emitted noting the missing sub-layer tile
+- **WHEN** a sub-layer declares zoom level 12 in its `zoom_levels` but a tile at position (x, y, 12) is unavailable (not in cache, download failed with 404)
+- **THEN** the system SHALL fall back to the closest lower zoom level in the sub-layer's `zoom_levels` list (e.g., zoom 10) and upscale that tile to cover the requested position
+- **AND** the upscaled tile SHALL be composited with the same opacity as the requested zoom level
+- **AND** a debug-level log message SHALL be emitted noting the fallback
 
-#### Scenario: All sub-layer tiles missing at a position
+#### Scenario: Sub-layer zoom level not declared — no fallback
 
-- **WHEN** no sub-layer has a tile at tile position (x, y, z)
+- **WHEN** a sub-layer's `zoom_levels` list does not include zoom level 12 (intentionally omitted)
+- **THEN** no fallback SHALL occur — the sub-layer is simply absent at that zoom level
+- **AND** this is not an error condition
+
+#### Scenario: No lower zoom tile available for fallback
+
+- **WHEN** a sub-layer tile is unavailable at zoom 12 and no lower zoom level in the sub-layer's `zoom_levels` list has a tile covering that position
+- **THEN** the sub-layer SHALL be absent for that tile position
+- **AND** the compositor SHALL proceed with the remaining available sub-layers
+
+#### Scenario: All sub-layers absent at a position
+
+- **WHEN** no sub-layer can produce a tile at tile position (x, y, z) (neither directly nor via fallback)
 - **THEN** that tile position SHALL be skipped entirely
 - **AND** no entry SHALL be written to the tile metadata for that position
 

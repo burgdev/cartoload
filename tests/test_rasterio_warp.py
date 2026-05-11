@@ -13,6 +13,7 @@ from cartoload.processor.rasterio_warp import (
     compute_bounds_4326,
     compute_transform_3857,
     warp_tile_to_jpeg,
+    warp_tile_to_rgba,
 )
 
 
@@ -23,6 +24,22 @@ def _create_test_jpeg(
     img = Image.new("RGB", (width, height), color=color)
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=90)
+    data = buf.getvalue()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return data
+
+
+def _create_test_png(
+    path: Path,
+    width: int = 256,
+    height: int = 256,
+    color: tuple = (100, 150, 200, 255),
+) -> bytes:
+    """Create a test PNG file and return its bytes. Supports RGBA."""
+    img = Image.new("RGBA", (width, height), color=color)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
     data = buf.getvalue()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
@@ -217,3 +234,84 @@ class TestWarpTileToJpeg:
             # At zoom 15, 3857→4326 warp changes tile dimensions based on latitude
             assert 150 <= img.width <= 400
             assert 150 <= img.height <= 400
+
+
+class TestWarpTileToRgba:
+    """Tests for warp_tile_to_rgba (PNG/RGBA-aware tile reprojection)."""
+
+    def test_png_passthrough_same_crs(self):
+        """PNG with same CRS: returns RGBA image directly."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "tile.png"
+            _create_test_png(path, color=(100, 150, 200, 255))
+
+            result = warp_tile_to_rgba(path, 17000, 11300, 15, "EPSG:4326")
+            assert result is not None
+            img, bounds = result
+            assert img.mode == "RGBA"
+            px = img.getpixel((0, 0))
+            assert px[:3] == (100, 150, 200)
+            assert px[3] == 255  # fully opaque
+
+    def test_png_with_alpha_passthrough(self):
+        """PNG with alpha channel preserved in passthrough."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "tile.png"
+            _create_test_png(path, color=(100, 150, 200, 128))
+
+            result = warp_tile_to_rgba(path, 17000, 11300, 15, "EPSG:4326")
+            assert result is not None
+            img, _ = result
+            assert img.mode == "RGBA"
+            px = img.getpixel((0, 0))
+            assert px[3] == 128  # alpha preserved
+
+    def test_png_warp_3857_to_4326(self):
+        """PNG warp from EPSG:3857 to EPSG:4326 produces RGBA image."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "tile.png"
+            _create_test_png(path, color=(200, 100, 50, 200))
+
+            result = warp_tile_to_rgba(path, 17000, 11300, 15, "EPSG:3857")
+            assert result is not None
+            img, bounds = result
+            assert img.mode == "RGBA"
+            # Should have 4 channels
+            assert len(img.getpixel((0, 0))) == 4
+            # Alpha should be preserved (approximately, due to bilinear resampling)
+            px = img.getpixel((img.width // 2, img.height // 2))
+            assert abs(px[3] - 200) <= 10
+
+    def test_jpeg_treated_as_opaque_rgba(self):
+        """JPEG input produces RGBA with fully opaque alpha."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "tile.jpeg"
+            _create_test_jpeg(path, color=(100, 150, 200))
+
+            result = warp_tile_to_rgba(path, 17000, 11300, 15, "EPSG:4326")
+            assert result is not None
+            img, _ = result
+            assert img.mode == "RGBA"
+            px = img.getpixel((0, 0))
+            assert px[3] == 255  # fully opaque
+
+    def test_missing_file_returns_none(self):
+        """Non-existent file returns None."""
+        result = warp_tile_to_rgba(Path("/nonexistent/tile.png"), 0, 0, 0, "EPSG:3857")
+        assert result is None
+
+    def test_rgb_png_treated_as_opaque(self):
+        """PNG without alpha (RGB mode) treated as fully opaque."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "tile.png"
+            img = Image.new("RGB", (256, 256), (128, 64, 32))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            img.save(path, format="PNG")
+
+            result = warp_tile_to_rgba(path, 17000, 11300, 15, "EPSG:4326")
+            assert result is not None
+            rgba_img, _ = result
+            assert rgba_img.mode == "RGBA"
+            px = rgba_img.getpixel((0, 0))
+            assert px[:3] == (128, 64, 32)
+            assert px[3] == 255

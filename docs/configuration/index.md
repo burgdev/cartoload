@@ -58,4 +58,4 @@ cartoload build -S sources.yaml -L layers.yaml -l my_map
 ## Detail pages
 
 - [Sources](sources.md) — all source types and their options
-- [Layers](layers.md) — layer definition, bounds, zoom levels, exporters
+- [Layers](layers.md) — layer definition, bounds, zoom levels, exporters, composite layers

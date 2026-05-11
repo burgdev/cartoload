@@ -937,6 +937,7 @@ class GarminImgExporter(BaseExporter):
         source_crs: str = "EPSG:3857",
         quality: int | None = None,
         progress_callback: ExportProgressCallback | None = None,
+        tile_processor_override: Callable | None = None,
     ) -> list[Path]:
         """Export tiles to Garmin IMG using streaming writer from metadata.
 
@@ -951,6 +952,9 @@ class GarminImgExporter(BaseExporter):
             source_crs: Source CRS for tile processing (default EPSG:3857)
             quality: JPEG quality for warping (1-100), or None for passthrough
             progress_callback: Called with (stage, current, total) for progress
+            tile_processor_override: Custom tile processor callable. When
+                provided, this replaces the default warp_tile_to_jpeg processor.
+                Used by the composite pipeline to blend sub-layers.
 
         Returns:
             List of created .img files (may be multiple if >4GB)
@@ -989,7 +993,9 @@ class GarminImgExporter(BaseExporter):
         from ..processor.rasterio_warp import warp_tile_to_jpeg
 
         tile_processor = None
-        if source_crs != "EPSG:4326":
+        if tile_processor_override is not None:
+            tile_processor = tile_processor_override
+        elif source_crs != "EPSG:4326":
             tile_processor = partial(warp_tile_to_jpeg, target_crs="EPSG:4326")
 
         # 4. Check if we need multiple GMP subfiles (uint32 section size limit)
@@ -1036,6 +1042,7 @@ class GarminImgExporter(BaseExporter):
             source_crs=source_crs,
             jpeg_quality=quality,
             progress_callback=progress_callback,
+            sequential_only=tile_processor_override is not None,
         )
 
         output_files = [output_path]

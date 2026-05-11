@@ -336,7 +336,7 @@ def build(
         # Compute and display build summary
         source = resolve_source(layer_config, config.sources)
         try:
-            dl = get_downloader(source, cache, layer_name=layer_config.wmts_layer or "")
+            dl = get_downloader(source, cache, source_args=layer_config.source_args)
             summary = compute_build_summary(layer_config, dl, quality=quality)
             if summary.total_tiles > 0:
                 click.echo(
@@ -452,9 +452,7 @@ def build(
         # Generate previews if requested
         if preview:
             try:
-                dl = get_downloader(
-                    source, cache, layer_name=layer_config.wmts_layer or ""
-                )
+                dl = get_downloader(source, cache, source_args=layer_config.source_args)
                 if isinstance(dl, WMTSDownloader):
                     preview_paths = generate_previews(
                         layer_config,
@@ -570,9 +568,7 @@ def download(
 
         click.echo("Downloading tiles...")
 
-        downloader = get_downloader(
-            source, cache, layer_name=layer_config.wmts_layer or ""
-        )
+        downloader = get_downloader(source, cache, source_args=layer_config.source_args)
         if isinstance(downloader, GeoTIFFDownloader):
             downloaded = downloader.run(source, layer_config)
         elif isinstance(downloader, WMTSDownloader):

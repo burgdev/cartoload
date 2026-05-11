@@ -87,6 +87,14 @@ Future concern: non-WMTS sources (especially GeoTIFF) will be added later. The c
 
 **Rationale**: Per-zoom opacity is useful for overlays that should be subtle at low zoom (overview) but prominent at high zoom (detail). Uniform opacity covers the common case simply.
 
+### D8: Tile fallback — upscale from closest lower zoom on 404
+
+**Decision**: When a sub-layer declares a zoom level in its `zoom_levels` but a specific tile at (x, y, z) is unavailable (not in cache, 404 from server), the system SHALL fall back to the closest lower zoom level in the sub-layer's declared `zoom_levels` list and upscale that tile. Fallback only applies when the zoom level is declared but the tile is missing — if the zoom level is intentionally omitted from the list, no fallback occurs.
+
+**Rationale**: WMTS overlay layers (ski routes, hiking trails) often have sparse coverage. A tile that exists at zoom 10 may not exist at zoom 12 for the same geographic area. Upscaling from the coarser zoom is standard practice — it adds blur but preserves the overlay information. Checking the cache for lower-zoom tiles is fast (already on disk). Only looking downward avoids downloading tiles the user didn't request.
+
+**Alternative**: No fallback (just skip the sub-layer at that position) would produce maps where overlays appear and disappear unpredictably at adjacent tiles. Downscaling from a higher zoom would require having downloaded those tiles first, which the user may not have requested.
+
 ## Risks / Trade-offs
 
 - **Performance**: Compositing N sub-layers means N× the downloads and N decode+blend per tile position. For 3 sub-layers this is ~3× slower than single-layer. → Mitigation: parallel downloads across sub-layers (different sources = independent rate limits). Compositing is cheap (PIL alpha blending is fast). The bottleneck remains network I/O.
@@ -95,6 +103,6 @@ Future concern: non-WMTS sources (especially GeoTIFF) will be added later. The c
 
 - **Memory**: Compositing requires holding N decoded PIL images per tile. For 256×256 tiles with 5 sub-layers, this is ~1.3 MB per tile position — negligible. → Mitigation: no mitigation needed, memory impact is trivial.
 
-- **Missing sub-layer tiles**: If an overlay source has gaps (no tile at a given position), the compositor proceeds with available sub-layers. → Mitigation: This is correct behavior — overlays often don't cover the full extent. Log at debug level when a sub-layer tile is missing.
+- **Missing sub-layer tiles**: If an overlay source has gaps (no tile at a given position), the system falls back to the closest lower zoom and upscales. → Mitigation: Fallback is automatic and cache-based (fast). Only applies to declared zoom levels — intentionally omitted zooms are simply absent. If no lower-zoom fallback exists, the sub-layer is skipped for that tile position.
 
 - **Config complexity**: The `layers` sub-field adds nesting. Users could create confusing configs with deeply nested refs. → Mitigation: No nesting beyond one level (composite layer → sub-layers). Refs can only point to top-level layers, not other composites.

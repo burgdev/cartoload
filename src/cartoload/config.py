@@ -20,6 +20,36 @@ class SourceConfig:
     rate_limit_ms: int = 150
     max_threads: int = 4
     crs: str | None = None
+    defaults: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class CompositeSubLayer:
+    """A sub-layer within a composite layer definition.
+
+    Sub-layers are either inline (with their own source) or
+    references to existing top-level layers. After resolution, all sub-layers
+    have concrete source values.
+
+    All template variables (layer, extension, etc.) are stored in source_args.
+    Only per-tile variables (x, y, z, zoom) are predefined.
+    """
+
+    name: str = ""
+    source: str = ""
+    zoom_levels: list[int] = field(default_factory=list)
+    opacity: float | dict[int, float] = 1.0
+    ref: str | None = None
+    source_args: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def extension(self) -> str:
+        """Tile format, derived from source_args.extension (default: jpeg)."""
+        return self.source_args.get("extension", "jpeg")
+
+    def is_resolved(self) -> bool:
+        """Return True if this sub-layer has a concrete source (not a ref)."""
+        return bool(self.source)
 
 
 @dataclass
@@ -32,12 +62,17 @@ class LayerConfig:
     type: str = "raster"  # raster, raster_overlay, vector
     source: str = ""
     wmts_fallback: str | None = None
-    wmts_layer: str | None = None
     geotiff_product: str | None = None
+    source_args: dict[str, str] = field(default_factory=dict)
     zoom_levels: list[int] = field(default_factory=list)
     exporter: str = "garmin_img"
     output: str = ""
     bounds: dict[str, float] | None = None
+    layers: list[CompositeSubLayer] | None = None
+
+    def is_composite(self) -> bool:
+        """Return True if this layer is a composite of multiple sub-layers."""
+        return self.layers is not None and len(self.layers) > 0
 
 
 @dataclass
@@ -169,6 +204,16 @@ def load_sources_file(path: str) -> dict[str, SourceConfig]:
                 f"{path}: Source '{source_id}' field 'urls' must be a list or string"
             )
 
+        # Parse defaults
+        defaults_raw = source_dict.get("defaults", {})
+        if defaults_raw is None:
+            defaults_raw = {}
+        if not isinstance(defaults_raw, dict):
+            raise ValueError(
+                f"{path}: Source '{source_id}' field 'defaults' must be a dict"
+            )
+        defaults = {str(k): str(v) for k, v in defaults_raw.items()}
+
         # Create SourceConfig instance
         sources[source_id] = SourceConfig(
             id=source_id,
@@ -180,6 +225,7 @@ def load_sources_file(path: str) -> dict[str, SourceConfig]:
             rate_limit_ms=source_dict.get("rate_limit_ms", 150),
             max_threads=source_dict.get("max_threads", 4),
             crs=source_dict.get("crs"),
+            defaults=defaults,
         )
 
     return sources
@@ -249,7 +295,7 @@ def load_layers_file(
 
     # Parse layers
     layers = {}
-    required_layer_fields = ["name", "source", "zoom_levels", "exporter", "output"]
+    required_layer_fields = ["name", "zoom_levels", "exporter", "output"]
 
     for layer_id, layer_dict in layers_data.items():
         if not isinstance(layer_dict, dict):
@@ -257,16 +303,35 @@ def load_layers_file(
                 f"{path}: Layer '{layer_id}' must be a dict, got {type(layer_dict).__name__}"
             )
 
-        # Validate required fields
-        for field in required_layer_fields:
-            if (
-                field not in layer_dict
-                or layer_dict[field] is None
-                or layer_dict[field] == ""
-            ):
-                raise ValueError(
-                    f"{path}: Layer '{layer_id}' missing required field '{field}'"
-                )
+        # Check if this is a composite layer
+        has_sub_layers = (
+            "layers" in layer_dict
+            and layer_dict["layers"] is not None
+            and isinstance(layer_dict["layers"], list)
+        )
+
+        # Validate required fields (source is optional for composite layers)
+        if has_sub_layers:
+            for field in required_layer_fields:
+                if (
+                    field not in layer_dict
+                    or layer_dict[field] is None
+                    or layer_dict[field] == ""
+                ):
+                    raise ValueError(
+                        f"{path}: Layer '{layer_id}' missing required field '{field}'"
+                    )
+        else:
+            all_required = required_layer_fields + ["source"]
+            for field in all_required:
+                if (
+                    field not in layer_dict
+                    or layer_dict[field] is None
+                    or layer_dict[field] == ""
+                ):
+                    raise ValueError(
+                        f"{path}: Layer '{layer_id}' missing required field '{field}'"
+                    )
 
         # Validate zoom_levels
         zoom_levels = layer_dict["zoom_levels"]
@@ -329,23 +394,219 @@ def load_layers_file(
             # Inherit file-level bounds if layer has none
             layer_bounds = bounds
 
+        # Parse sub-layers if present (composite layer)
+        sub_layers: list[CompositeSubLayer] | None = None
+        if has_sub_layers:
+            sub_layers = _parse_sub_layers(path, layer_id, layer_dict["layers"])
+
+        # Parse source field: string (source ID) or dict (ref + args)
+        raw_source = layer_dict.get("source", "")
+        source_id, source_args = _parse_source_field(raw_source)
+
+        # Backward compat: merge wmts_layer into source_args as 'layer'
+        wmts_layer = layer_dict.get("wmts_layer")
+        if wmts_layer is not None and "layer" not in source_args:
+            source_args["layer"] = wmts_layer
+
+        # Backward compat: merge extension into source_args
+        extension = layer_dict.get("extension")
+        if extension is not None and "extension" not in source_args:
+            source_args["extension"] = extension
+
         # Create LayerConfig instance
         layers[layer_id] = LayerConfig(
             id=layer_id,
             name=layer_dict["name"],
             description=layer_dict.get("description", ""),
             type=layer_dict.get("type", "raster"),
-            source=layer_dict["source"],
+            source=source_id,
             wmts_fallback=layer_dict.get("wmts_fallback"),
-            wmts_layer=layer_dict.get("wmts_layer"),
             geotiff_product=layer_dict.get("geotiff_product"),
+            source_args=source_args,
             zoom_levels=zoom_levels,
             exporter=layer_dict["exporter"],
             output=layer_dict["output"],
             bounds=layer_bounds,
+            layers=sub_layers,
         )
 
     return (layers, bounds)
+
+
+def _parse_source_field(
+    raw_source: str | dict,
+) -> tuple[str, dict[str, str]]:
+    """Parse a source field that can be a string (source ID) or dict.
+
+    When a dict is provided, 'ref' is the source ID and remaining keys
+    become source_args. All values are converted to strings.
+
+    Returns:
+        Tuple of (source_id, source_args)
+    """
+    if isinstance(raw_source, str):
+        return (raw_source, {})
+    if isinstance(raw_source, dict):
+        if "ref" not in raw_source:
+            raise ValueError(
+                f"Dict source must contain a 'ref' key, got keys: {list(raw_source.keys())}"
+            )
+        source_id = str(raw_source["ref"])
+        source_args = {str(k): str(v) for k, v in raw_source.items() if k != "ref"}
+        return (source_id, source_args)
+    return ("", {})
+
+
+def _extract_source_id(raw_source: str | dict) -> str:
+    """Extract just the source ID from a string or dict source field."""
+    source_id, _ = _parse_source_field(raw_source)
+    return source_id
+
+
+def _build_sub_source_args(sub_dict: dict) -> dict[str, str]:
+    """Build source_args for a sub-layer from its YAML dict.
+
+    Handles both dict-style source (extract args from dict) and
+    backward-compat wmts_layer and extension fields.
+    """
+    raw_source = sub_dict.get("source", "")
+    _, source_args = _parse_source_field(raw_source)
+
+    # Backward compat: merge wmts_layer into source_args as 'layer'
+    wmts_layer = sub_dict.get("wmts_layer")
+    if wmts_layer is not None and "layer" not in source_args:
+        source_args["layer"] = wmts_layer
+
+    # Backward compat: merge extension into source_args
+    extension = sub_dict.get("extension")
+    if extension is not None and "extension" not in source_args:
+        source_args["extension"] = extension
+
+    return source_args
+
+
+def _parse_sub_layers(
+    path: str, layer_id: str, sub_layers_data: list
+) -> list[CompositeSubLayer]:
+    """Parse and validate sub-layers from a composite layer config.
+
+    Args:
+        path: Config file path (for error messages)
+        layer_id: Parent layer ID (for error messages)
+        sub_layers_data: List of sub-layer dicts from YAML
+
+    Returns:
+        List of CompositeSubLayer instances
+
+    Raises:
+        ValueError: If validation fails
+    """
+    if not isinstance(sub_layers_data, list):
+        raise ValueError(f"{path}: Layer '{layer_id}' field 'layers' must be a list")
+
+    if len(sub_layers_data) == 0:
+        raise ValueError(f"{path}: Layer '{layer_id}' field 'layers' cannot be empty")
+
+    result: list[CompositeSubLayer] = []
+    for idx, sub_dict in enumerate(sub_layers_data):
+        if not isinstance(sub_dict, dict):
+            raise ValueError(
+                f"{path}: Layer '{layer_id}' sub-layer [{idx}] must be a dict"
+            )
+
+        # Determine if this is a ref or inline sub-layer
+        has_ref = "ref" in sub_dict and sub_dict["ref"] is not None
+        has_source = "source" in sub_dict and sub_dict["source"] not in (None, "")
+
+        if not has_ref and not has_source:
+            raise ValueError(
+                f"{path}: Layer '{layer_id}' sub-layer [{idx}] "
+                f"must have either 'source' or 'ref'"
+            )
+
+        if has_ref and has_source:
+            raise ValueError(
+                f"{path}: Layer '{layer_id}' sub-layer [{idx}] "
+                f"cannot have both 'source' and 'ref'"
+            )
+
+        # Validate opacity
+        opacity = sub_dict.get("opacity", 1.0)
+        opacity = _validate_opacity(path, layer_id, idx, opacity)
+
+        # Validate extension (backward compat: moved into source_args)
+        extension = sub_dict.get("extension")
+        if extension is not None and (
+            not isinstance(extension, str) or extension not in ("jpeg", "png")
+        ):
+            raise ValueError(
+                f"{path}: Layer '{layer_id}' sub-layer [{idx}] "
+                f"'extension' must be 'jpeg' or 'png'"
+            )
+
+        # Validate zoom_levels
+        zoom_levels = sub_dict.get("zoom_levels", [])
+        if zoom_levels:
+            if not isinstance(zoom_levels, list):
+                raise ValueError(
+                    f"{path}: Layer '{layer_id}' sub-layer [{idx}] "
+                    f"'zoom_levels' must be a list"
+                )
+            for z in zoom_levels:
+                if not isinstance(z, int):
+                    raise ValueError(
+                        f"{path}: Layer '{layer_id}' sub-layer [{idx}] "
+                        f"'zoom_levels' must contain integers"
+                    )
+
+        result.append(
+            CompositeSubLayer(
+                name=sub_dict.get("name", ""),
+                source=_extract_source_id(sub_dict.get("source", "")),
+                zoom_levels=zoom_levels,
+                opacity=opacity,
+                ref=sub_dict.get("ref") if has_ref else None,
+                source_args=_build_sub_source_args(sub_dict),
+            )
+        )
+
+    return result
+
+
+def _validate_opacity(
+    path: str, layer_id: str, idx: int, opacity: float | dict
+) -> float | dict[int, float]:
+    """Validate and return a normalized opacity value.
+
+    Accepts a float (0.0–1.0) or a dict of {zoom_level: float}.
+    """
+    if isinstance(opacity, (int, float)):
+        val = float(opacity)
+        if val < 0.0 or val > 1.0:
+            raise ValueError(
+                f"{path}: Layer '{layer_id}' sub-layer [{idx}] "
+                f"'opacity' must be between 0.0 and 1.0, got {val}"
+            )
+        return val
+
+    if isinstance(opacity, dict):
+        result: dict[int, float] = {}
+        for k, v in opacity.items():
+            zoom = int(k)
+            val = float(v)
+            if val < 0.0 or val > 1.0:
+                raise ValueError(
+                    f"{path}: Layer '{layer_id}' sub-layer [{idx}] "
+                    f"'opacity' value for zoom {zoom} must be between "
+                    f"0.0 and 1.0, got {val}"
+                )
+            result[zoom] = val
+        return result
+
+    raise ValueError(
+        f"{path}: Layer '{layer_id}' sub-layer [{idx}] "
+        f"'opacity' must be a float or a dict, got {type(opacity).__name__}"
+    )
 
 
 def merge_sources(*source_dicts: dict[str, SourceConfig]) -> dict[str, SourceConfig]:
@@ -408,6 +669,10 @@ def resolve_references(
     """
     Validate that all layer source references point to loaded sources.
 
+    For composite layers, validates that each inline sub-layer's source
+    references a loaded source. Ref sub-layers are validated separately
+    by resolve_sub_layer_refs().
+
     Args:
         layers: Dictionary of LayerConfig instances
         sources: Dictionary of SourceConfig instances
@@ -417,7 +682,12 @@ def resolve_references(
     """
     unresolved = []
     for layer_id, layer_config in layers.items():
-        if layer_config.source not in sources:
+        # Composite layers: validate inline sub-layer sources
+        if layer_config.is_composite():
+            for idx, sub in enumerate(layer_config.layers or []):
+                if sub.ref is None and sub.source and sub.source not in sources:
+                    unresolved.append((f"{layer_id}[{idx}]", sub.source))
+        elif layer_config.source and layer_config.source not in sources:
             unresolved.append((layer_id, layer_config.source))
 
     if unresolved:
@@ -431,6 +701,63 @@ def resolve_references(
             + "\n".join(error_lines)
             + f"\n\nAvailable sources: {available_sources}"
         )
+
+
+def resolve_sub_layer_refs(
+    layers: dict[str, LayerConfig],
+) -> None:
+    """Resolve ref sub-layers by merging referenced layer fields.
+
+    For each composite layer, resolves sub-layers that use `ref` by looking
+    up the referenced top-level layer and merging its fields with the
+    sub-layer's overrides. Modifies the layers dict in-place.
+
+    Args:
+        layers: Dictionary of LayerConfig instances
+
+    Raises:
+        ValueError: If a ref points to a non-existent or composite layer
+    """
+    for layer_id, layer_config in layers.items():
+        if not layer_config.is_composite():
+            continue
+
+        resolved_subs: list[CompositeSubLayer] = []
+        for idx, sub in enumerate(layer_config.layers or []):
+            if sub.ref is None:
+                resolved_subs.append(sub)
+                continue
+
+            # Look up referenced layer
+            if sub.ref not in layers:
+                raise ValueError(
+                    f"Layer '{layer_id}' sub-layer [{idx}] references "
+                    f"undefined layer '{sub.ref}'"
+                )
+
+            ref_layer = layers[sub.ref]
+
+            # Prevent composite-to-composite refs
+            if ref_layer.is_composite():
+                raise ValueError(
+                    f"Layer '{layer_id}' sub-layer [{idx}] references "
+                    f"composite layer '{sub.ref}' (not supported)"
+                )
+
+            # Merge: sub-layer source_args override ref layer source_args
+            merged = CompositeSubLayer(
+                name=sub.name or ref_layer.name,
+                source=sub.source or ref_layer.source,
+                zoom_levels=sub.zoom_levels
+                if sub.zoom_levels
+                else list(ref_layer.zoom_levels),
+                opacity=sub.opacity,
+                ref=None,  # Resolved — no longer a ref
+                source_args={**ref_layer.source_args, **sub.source_args},
+            )
+            resolved_subs.append(merged)
+
+        layer_config.layers = resolved_subs
 
 
 def load_config(source_paths: list[str], layer_paths: list[str]) -> Config:
@@ -465,6 +792,10 @@ def load_config(source_paths: list[str], layer_paths: list[str]) -> Config:
     merged_layers, merged_bounds = (
         merge_layers(*layer_results) if layer_results else ({}, None)
     )
+
+    # Resolve sub-layer refs (must happen before source validation)
+    if merged_layers:
+        resolve_sub_layer_refs(merged_layers)
 
     # Resolve source references
     if merged_layers:

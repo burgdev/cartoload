@@ -2206,6 +2206,7 @@ class StreamingIMGWriter:
         source_crs: str = "EPSG:3857",
         jpeg_quality: int | None = None,
         progress_callback: Callable[[str, int, int], None] | None = None,
+        sequential_only: bool = False,
     ) -> None:
         """Write complete IMG file streaming JPEG data from source files.
 
@@ -2319,6 +2320,7 @@ class StreamingIMGWriter:
                     jpeg_quality,
                     progress_callback,
                     tiles_offset=tiles_offset,
+                    sequential_only=sequential_only,
                 )
 
                 tiles_offset += sum(len(sub.tile_entries) for sub in group.subdivisions)
@@ -2429,6 +2431,7 @@ class StreamingIMGWriter:
         jpeg_quality: int | None,
         progress_callback: Callable[[str, int, int], None] | None = None,
         tiles_offset: int = 0,
+        sequential_only: bool = False,
     ) -> int:
         """Write GMP subfile with streaming LBL29 section.
 
@@ -2701,21 +2704,27 @@ class StreamingIMGWriter:
                 zoom_tile_counts[z] = zoom_tile_counts.get(z, 0) + 1
         zoom_progress: dict[int, int] = {}
 
-        # Determine parallelism: only warp jobs benefit from parallelism
+        # Determine parallelism: the standard parallel path uses _warp_tile_worker
+        # which calls warp_tile_to_jpeg directly. For custom tile processors
+        # (sequential_only), use ThreadPoolExecutor since they can't be pickled
+        # for ProcessPoolExecutor but do release the GIL during warp/composite.
         use_parallel = tile_processor is not None and _get_worker_count() > 1
         max_workers = _get_worker_count() if use_parallel else 1
-        batch_size = StreamingIMGWriter.BATCH_SIZE
+        # Smaller batches for custom processors to allow more frequent progress updates
+        batch_size = 500 if sequential_only else StreamingIMGWriter.BATCH_SIZE
 
         # Create persistent executor (reused across all batches, not recreated)
         executor: Executor | None = None
         if use_parallel:
-            executor_mode = _get_executor_mode()
+            # Custom tile processors must use threads (not picklable for processes)
+            executor_mode = "thread" if sequential_only else _get_executor_mode()
             executor_cls = (
                 ProcessPoolExecutor
                 if executor_mode == "process"
                 else ThreadPoolExecutor
             )
-            executor = executor_cls(max_workers=max_workers, initializer=_init_worker)
+            init_fn = None if sequential_only else _init_worker
+            executor = executor_cls(max_workers=max_workers, initializer=init_fn)
             logger.info(
                 "LBL29 streaming: %d tiles, batch_size=%d, workers=%d (%s, persistent)",
                 len(all_tiles),
@@ -2742,7 +2751,7 @@ class StreamingIMGWriter:
                 batch_jpegs: list[bytes] = [b""] * len(batch)
 
                 if executor is not None:
-                    # Parallel warp: submit to persistent executor
+                    # Parallel processing
                     future_to_idx: dict = {}
                     for i, tile_entry in enumerate(batch):
                         if (
@@ -2750,30 +2759,57 @@ class StreamingIMGWriter:
                             and tile_entry.source_path is not None
                             and tile_entry.source_path.exists()
                         ):
-                            future = executor.submit(
-                                _warp_tile_worker,
-                                tile_entry.source_path,
-                                tile_entry.x,
-                                tile_entry.y,
-                                tile_entry.zoom,
-                                source_crs,
-                                "EPSG:4326",
-                                jpeg_quality,
-                            )
+                            if sequential_only and tile_processor is not None:
+                                # Custom processor: use _process_tile_jpeg
+                                # which respects the tile_processor override
+                                future = executor.submit(
+                                    _process_tile_jpeg,
+                                    tile_entry,
+                                    tile_processor,
+                                    source_crs,
+                                    jpeg_quality,
+                                )
+                            else:
+                                # Standard warp path
+                                future = executor.submit(
+                                    _warp_tile_worker,
+                                    tile_entry.source_path,
+                                    tile_entry.x,
+                                    tile_entry.y,
+                                    tile_entry.zoom,
+                                    source_crs,
+                                    "EPSG:4326",
+                                    jpeg_quality,
+                                )
                             future_to_idx[future] = i
                         elif isinstance(tile_entry, tuple):
                             batch_jpegs[i] = tile_entry[0]
                         else:
                             batch_jpegs[i] = tile_entry
 
+                    batch_done = 0
                     for future in as_completed(future_to_idx):
                         idx = future_to_idx[future]
                         try:
-                            _, _, _, jpeg_data = future.result()
+                            result = future.result()
+                            if sequential_only:
+                                # _process_tile_jpeg returns bytes | None
+                                jpeg_data = result
+                            else:
+                                # _warp_tile_worker returns (x, y, zoom, bytes|None)
+                                jpeg_data = result[3]
                             if jpeg_data is not None:
                                 batch_jpegs[idx] = jpeg_data
                         except Exception as e:
                             logger.warning("Parallel tile warp failed: %s", e)
+                        # Report progress as tiles complete
+                        batch_done += 1
+                        if progress_callback is not None and batch_done % 100 == 0:
+                            progress_callback(
+                                "writing",
+                                tiles_offset + tiles_processed + batch_done,
+                                total_tiles,
+                            )
                 else:
                     # Sequential processing
                     for i, tile_entry in enumerate(batch):
@@ -2983,11 +3019,8 @@ def _process_tile_jpeg(
         return None
 
     if tile_processor is not None:
-        # When quality is None (passthrough) with a processor, we still call it
-        # but the processor receives quality=None and should return raw bytes
-        if jpeg_quality is None:
-            # Passthrough: read raw bytes without re-encoding
-            return tile.source_path.read_bytes()
+        # Custom processor (e.g. composite blending): always call it,
+        # regardless of jpeg_quality. The processor handles quality internally.
         result = tile_processor(
             tile.source_path,
             tile.x,
