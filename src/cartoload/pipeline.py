@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
+import io
 import math
 from pathlib import Path
 from typing import Callable
+
+from PIL import Image
 
 from .config import CompositeSubLayer, LayerConfig, SourceConfig
 from .downloader.base import BaseDownloader
@@ -15,7 +18,10 @@ from .downloader.wmts import _url_cache_key
 from .exporters.garmin_img import GarminImgExporter
 from .processor.geotiff_collector import collect_geotiff_files
 from .processor.geotiff_index import GeoTIFFIndex
-from .processor.geotiff_tile_reader import read_tile_from_geotiff
+from .processor.geotiff_tile_reader import (
+    read_tile_from_geotiff,
+    read_tile_from_warped_geotiff,
+)
 from .processor.checkpoint import (
     CheckpointData,
     delete_checkpoint,
@@ -718,6 +724,43 @@ async def build_geotiff_layer(
             effective_bounds,
         )
 
+    # --- Pre-warp GeoTIFFs to EPSG:4326 ---
+    # Converts source GeoTIFFs (any CRS, possibly paletted) to 3-band RGB
+    # in EPSG:4326 once, so per-tile reads don't need CRS transforms or
+    # palette expansion. Cached alongside originals.
+    prewarped_map: dict[Path, Path] = {}
+    mosaic_path: Path | None = None
+    try:
+        from .processor.geotiff_prewarp import (
+            merge_prewarped_geotiffs,
+            prewarp_all_geotiffs,
+        )
+
+        prewarped_map = prewarp_all_geotiffs(
+            geotiff_paths,
+            target_crs="EPSG:4326",
+            force=False,
+            progress_callback=progress_callback,
+        )
+
+        # Merge all pre-warped files into a single mosaic so tiles that
+        # span multiple source GeoTIFFs can read all data at once.
+        prewarped_paths = list(set(prewarped_map.values()))
+        if len(prewarped_paths) > 1:
+            # Determine cache directory from the first pre-warped file
+            mosaic_dir = prewarped_paths[0].parent
+            mosaic_path = merge_prewarped_geotiffs(
+                prewarped_paths,
+                cache_dir=mosaic_dir,
+                force=False,
+                progress_callback=progress_callback,
+            )
+        elif len(prewarped_paths) == 1:
+            mosaic_path = prewarped_paths[0]
+
+    except Exception as e:
+        logger.warning("Pre-warp failed, falling back to per-tile warp: %s", e)
+
     # --- Compute tile metadata ---
     if progress_callback:
         progress_callback("process", "Computing tile metadata...")
@@ -734,11 +777,16 @@ async def build_geotiff_layer(
             for x, y in tile_coords:
                 lat_min, lon_min, lat_max, lon_max = compute_bounds_4326(x, y, zoom)
 
-                # Pre-resolve which GeoTIFF covers this tile.
-                # This avoids per-tile spatial index lookups during export.
-                geotiff_path = index.find(lon_min, lat_min, lon_max, lat_max)
-                if geotiff_path is None:
-                    continue  # skip tiles with no GeoTIFF coverage
+                if mosaic_path is not None:
+                    # With a merged mosaic, all tiles within bounds can
+                    # potentially contain data. Use the mosaic as source.
+                    geotiff_path = mosaic_path
+                else:
+                    # Pre-resolve which GeoTIFF covers this tile.
+                    # This avoids per-tile spatial index lookups during export.
+                    geotiff_path = index.find(lon_min, lat_min, lon_max, lat_max)
+                    if geotiff_path is None:
+                        continue  # skip tiles with no GeoTIFF coverage
 
                 # Estimate jpeg_size — use a rough estimate for GeoTIFF-sourced tiles
                 jpeg_size = 50_000  # ~50KB per tile estimate
@@ -804,7 +852,9 @@ async def build_geotiff_layer(
                 )
 
         # Build a GeoTIFF-aware tile processor
-        geotiff_processor = _make_geotiff_processor(quality)
+        geotiff_processor = _make_geotiff_processor(
+            quality, prewarped_map=prewarped_map if mosaic_path is None else None
+        )
 
         output_paths = exporter.export_from_metadata(
             tile_metadata,
@@ -898,14 +948,18 @@ def _compute_tile_coords_from_bounds(
 
 def _make_geotiff_processor(
     quality: int | None = None,
+    prewarped_map: dict[Path, Path] | None = None,
 ):
     """Create a tile processor callable that reads from GeoTIFF files.
 
     Returns a callable with the signature expected by the streaming writer:
     (source_path, x, y, zoom, source_crs, quality) -> (jpeg_bytes, bounds) | None
 
-    The source_path is pre-resolved by build_geotiff_layer, so no spatial
-    index lookup is needed at read time.
+    Two modes:
+    - Mosaic mode (prewarped_map=None): source_path is a pre-warped EPSG:4326
+      mosaic file — always use the fast read path.
+    - Per-file mode (prewarped_map provided): source_path is an original file.
+      Look up pre-warped version and use fast path, fall back to per-tile warp.
     """
     from .exporters.garmin_img_writer import ProcessedTile
 
@@ -922,6 +976,28 @@ def _make_geotiff_processor(
             return None
 
         effective_quality = quality if quality is not None else jpeg_quality or 85
+
+        # Mosaic mode: source is already a pre-warped EPSG:4326 file
+        if prewarped_map is None:
+            result = read_tile_from_warped_geotiff(
+                source_path, x, y, zoom, quality=effective_quality
+            )
+            if result is not None:
+                return result
+            # Fall through to slow path if fast path fails
+
+        # Per-file mode: look up pre-warped version
+        if prewarped_map and source_path in prewarped_map:
+            warped_path = prewarped_map[source_path]
+            if warped_path != source_path:
+                result = read_tile_from_warped_geotiff(
+                    warped_path, x, y, zoom, quality=effective_quality
+                )
+                if result is not None:
+                    return result
+                # Fall through to slow path if fast path fails
+
+        # Original slow path (per-tile warp)
         return read_tile_from_geotiff(
             source_path, x, y, zoom, quality=effective_quality
         )
@@ -1036,6 +1112,174 @@ def _collect_cached_tiles(
 # ---------------------------------------------------------------------------
 
 
+def _download_stac_sub_layer(
+    sub: CompositeSubLayer,
+    source: SourceConfig,
+    layer: LayerConfig,
+    cache_dir: Path,
+    *,
+    display_name: str,
+    progress_callback: Callable[[str, str], None] | None,
+    sub_idx: int,
+    sub_total: int,
+    no_download: bool = False,
+) -> list[Path]:
+    """Download GeoTIFFs for a STAC sub-layer within a composite layer.
+
+    Args:
+        sub: Sub-layer configuration
+        source: Resolved STAC source config
+        layer: Parent composite layer (used for bounds)
+        cache_dir: Cache directory
+        display_name: Name shown in progress
+        progress_callback: Progress callback
+        sub_idx: Sub-layer index (for progress)
+        sub_total: Total number of sub-layers
+        no_download: If True, use cached files only
+
+    Returns:
+        List of downloaded GeoTIFF paths
+    """
+    # Resolve collection ID from source_args (layer variable)
+    variables: dict[str, str] = dict(source.defaults)
+    if sub.source_args:
+        variables.update(sub.source_args)
+
+    collection_id = variables.get("layer", "")
+    if not collection_id:
+        raise PipelineError(
+            f"STAC source '{source.id}' in composite layer '{layer.id}' "
+            f"requires a 'layer' variable "
+            f"(set in source defaults or sub-layer source_args)"
+        )
+
+    if not source.urls:
+        raise PipelineError(f"STAC source '{source.id}' has no URL configured")
+
+    url = expand(source.urls[0], variables)
+    unresolved = check_unresolved(url)
+    if unresolved:
+        raise PipelineError(
+            f"STAC source '{source.id}' URL has unresolved variables: {unresolved}"
+        )
+
+    # Resolve asset_filter: sub-layer override takes precedence over source default.
+    # None means no override (use source default), {} means explicit "no filter".
+    if sub.asset_filter is not None:
+        asset_filter = sub.asset_filter if sub.asset_filter else None
+    else:
+        asset_filter = source.asset_filter
+
+    stac_dl = STACDownloader(cache_dir)
+
+    if not no_download:
+        if progress_callback:
+            progress_callback(
+                "download",
+                f"Sub-layer {sub_idx + 1}/{sub_total}: "
+                f"downloading GeoTIFFs from STAC '{collection_id}'...",
+            )
+        return stac_dl.run(
+            source,
+            layer,
+            url,
+            collection_id,
+            asset_filter=asset_filter,
+        )
+    else:
+        # Use cached files
+        # Use cached files — reconstruct cache directory from previous download
+        cache_subdir = stac_dl._get_cache_path(source.id, url, "", asset_filter).parent
+        if cache_subdir.exists():
+            geotiff_paths = sorted(
+                p
+                for p in cache_subdir.rglob("*")
+                if p.is_file() and p.suffix.lstrip(".") in ("tif", "tiff")
+            )
+            if geotiff_paths:
+                logger.info(
+                    "Using %d cached GeoTIFF(s) for sub-layer '%s'",
+                    len(geotiff_paths),
+                    display_name,
+                )
+                return geotiff_paths
+        raise PipelineError(
+            f"No cached GeoTIFFs found for STAC sub-layer '{display_name}' "
+            f"collection '{collection_id}'. Run without --no-download first."
+        )
+
+
+def _build_stac_sub_layer_mosaic(
+    sub: CompositeSubLayer,
+    source: SourceConfig,
+    layer: LayerConfig,
+    cache_dir: Path,
+    *,
+    no_download: bool = False,
+    progress_callback: Callable[[str, str], None] | None = None,
+) -> Path | None:
+    """Build a pre-warped mosaic for a STAC sub-layer.
+
+    Downloads GeoTIFFs (if needed), pre-warps to EPSG:4326, and merges
+    into a single mosaic file. Returns the mosaic path, or None if no
+    files are available.
+
+    Args:
+        sub: Sub-layer configuration
+        source: Resolved STAC source config
+        layer: Parent composite layer (used for bounds)
+        cache_dir: Cache directory
+        no_download: If True, skip downloads
+        progress_callback: Progress callback
+
+    Returns:
+        Path to the mosaic file, or None
+    """
+    # Download/collect GeoTIFFs
+    geotiff_paths = _download_stac_sub_layer(
+        sub,
+        source,
+        layer,
+        cache_dir,
+        display_name=sub.name or source.id,
+        progress_callback=progress_callback,
+        sub_idx=0,
+        sub_total=1,
+        no_download=no_download,
+    )
+
+    if not geotiff_paths:
+        return None
+
+    # Pre-warp and merge
+    from .processor.geotiff_prewarp import (
+        merge_prewarped_geotiffs,
+        prewarp_all_geotiffs,
+    )
+
+    prewarped_map = prewarp_all_geotiffs(
+        geotiff_paths,
+        target_crs="EPSG:4326",
+        force=False,
+        progress_callback=progress_callback,
+    )
+    prewarped_paths = list(set(prewarped_map.values()))
+
+    if not prewarped_paths:
+        return None
+
+    if len(prewarped_paths) == 1:
+        return prewarped_paths[0]
+
+    mosaic_dir = prewarped_paths[0].parent
+    return merge_prewarped_geotiffs(
+        prewarped_paths,
+        cache_dir=mosaic_dir,
+        force=False,
+        progress_callback=progress_callback,
+    )
+
+
 async def build_composite_layer(
     layer: LayerConfig,
     sources: dict[str, SourceConfig],
@@ -1090,37 +1334,58 @@ async def build_composite_layer(
         for idx, sub in enumerate(sub_layers):
             sub_source = _resolve_sub_layer_source(sub, sources, layer.id)
             try:
-                downloader = get_downloader(
-                    sub_source,
-                    cache_dir,
-                    source_args=sub.source_args,
-                    display_name=sub_slugs[idx],
-                )
-
-                if isinstance(downloader, WMTSDownloader):
-                    bounds = layer.bounds
-                    if not bounds:
-                        raise DownloadError(
-                            sub_source.id,
-                            "WMTS download requires bounds on the composite layer",
-                        )
-                    bbox = (
-                        bounds["west"],
-                        bounds["south"],
-                        bounds["east"],
-                        bounds["north"],
+                if sub_source.type == "stac":
+                    _download_stac_sub_layer(
+                        sub,
+                        sub_source,
+                        layer,
+                        cache_dir,
+                        display_name=sub_slugs[idx],
+                        progress_callback=progress_callback,
+                        sub_idx=idx,
+                        sub_total=len(sub_layers),
+                        no_download=False,
                     )
-                    for zoom in sub.zoom_levels:
-                        paths = downloader.download_grid(bbox, zoom)
-                        if progress_callback:
-                            dl_count = len(paths)
-                            expected = len(downloader._bbox_to_tile_indices(bbox, zoom))
-                            if dl_count < expected:
-                                progress_callback(
-                                    "download",
-                                    f"Sub-layer {idx + 1}/{len(sub_layers)} zoom {zoom}: "
-                                    f"{dl_count}/{expected} tiles available",
+                elif sub_source.type == "wmts":
+                    downloader = get_downloader(
+                        sub_source,
+                        cache_dir,
+                        source_args=sub.source_args,
+                        display_name=sub_slugs[idx],
+                    )
+
+                    if isinstance(downloader, WMTSDownloader):
+                        bounds = layer.bounds
+                        if not bounds:
+                            raise DownloadError(
+                                sub_source.id,
+                                "WMTS download requires bounds on the composite layer",
+                            )
+                        bbox = (
+                            bounds["west"],
+                            bounds["south"],
+                            bounds["east"],
+                            bounds["north"],
+                        )
+                        for zoom in sub.zoom_levels:
+                            paths = downloader.download_grid(bbox, zoom)
+                            if progress_callback:
+                                dl_count = len(paths)
+                                expected = len(
+                                    downloader._bbox_to_tile_indices(bbox, zoom)
                                 )
+                                if dl_count < expected:
+                                    progress_callback(
+                                        "download",
+                                        f"Sub-layer {idx + 1}/{len(sub_layers)} "
+                                        f"zoom {zoom}: "
+                                        f"{dl_count}/{expected} tiles available",
+                                    )
+                else:
+                    raise PipelineError(
+                        f"Composite sub-layer source type '{sub_source.type}' "
+                        f"is not supported. Supported types: wmts, stac"
+                    )
             except PipelineError:
                 raise
             except Exception as e:
@@ -1131,6 +1396,38 @@ async def build_composite_layer(
                 ) from e
     else:
         logger.info("Skipping download stage (--no-download)")
+
+    # --- Build GeoTIFF mosaics for STAC sub-layers ---
+    # Maps sub-layer index -> pre-warped mosaic Path (only for STAC sub-layers)
+    stac_mosaics: dict[int, Path] = {}
+    for idx, sub in enumerate(sub_layers):
+        sub_source = _resolve_sub_layer_source(sub, sources, layer.id)
+        if sub_source.type != "stac":
+            continue
+
+        try:
+            mosaic = _build_stac_sub_layer_mosaic(
+                sub,
+                sub_source,
+                layer,
+                cache_dir,
+                no_download=no_download,
+                progress_callback=progress_callback,
+            )
+            if mosaic is not None:
+                stac_mosaics[idx] = mosaic
+                logger.info(
+                    "Sub-layer '%s' mosaic: %s",
+                    sub.name or sub_source.id,
+                    mosaic,
+                )
+        except Exception as e:
+            logger.warning(
+                "Failed to build mosaic for STAC sub-layer '%s': %s. "
+                "Tiles from this sub-layer will be missing.",
+                sub.name or sub_source.id,
+                e,
+            )
 
     # --- Compute tile metadata for the composite layer ---
     if progress_callback:
@@ -1230,7 +1527,11 @@ async def build_composite_layer(
 
         # Build a composite-aware tile processor
         composite_processor = _make_composite_processor(
-            sub_layers, sources, cache_dir, source_crs or "EPSG:3857"
+            sub_layers,
+            sources,
+            cache_dir,
+            source_crs or "EPSG:3857",
+            stac_mosaics=stac_mosaics,
         )
 
         output_paths = exporter.export_from_metadata(
@@ -1349,6 +1650,7 @@ def _make_composite_processor(
     sources: dict[str, SourceConfig],
     cache_dir: Path,
     source_crs: str,
+    stac_mosaics: dict[int, Path] | None = None,
 ):
     """Create a tile processor callable that composites sub-layers.
 
@@ -1357,6 +1659,8 @@ def _make_composite_processor(
     """
     from .exporters.garmin_img_writer import ProcessedTile
     from .processor.rasterio_warp import compute_bounds_4326
+
+    _stac_mosaics = stac_mosaics or {}
 
     def composite_processor(
         source_path: Path,
@@ -1369,46 +1673,56 @@ def _make_composite_processor(
         """Load all sub-layer tiles for (x, y, zoom), composite, return JPEG."""
         images: list[tuple] = []
 
-        for sub in sub_layers:
+        for idx, sub in enumerate(sub_layers):
             # Skip sub-layers that don't cover this zoom level
             if zoom not in sub.zoom_levels:
                 continue
 
-            # Get the sub-layer's cached tile path
-            tile_path = _sub_layer_cache_path(sub, sources, cache_dir, x, y, zoom)
-
             rgba = None
 
-            if tile_path is not None and tile_path.exists():
-                # Load and reproject if needed
-                if source_crs != "EPSG:4326":
-                    result = warp_tile_to_rgba(
-                        tile_path, x, y, zoom, source_crs, "EPSG:4326"
-                    )
-                    if result is not None:
-                        rgba = result[0]
-                else:
-                    rgba = load_tile_as_rgba(tile_path)
-
-            # Try fallback if tile is unavailable
-            if rgba is None:
-                # Compute cache key from resolved URL (same as downloader)
-                fb_cache_key = ""
-                if sub.source and sub.source in sources:
-                    resolved_url = _resolve_wmts_urls(
-                        sources[sub.source], sub.source_args
-                    )
-                    if resolved_url:
-                        fb_cache_key = _url_cache_key(resolved_url)
-                rgba = find_fallback_tile(
-                    sub,
-                    x,
-                    y,
-                    zoom,
-                    cache_dir,
-                    sub.source,
-                    cache_key=fb_cache_key,
+            # STAC sub-layer: read from pre-warped mosaic
+            if idx in _stac_mosaics:
+                mosaic_path = _stac_mosaics[idx]
+                result = read_tile_from_warped_geotiff(
+                    mosaic_path, x, y, zoom, quality=quality
                 )
+                if result is not None:
+                    jpeg_bytes, _bounds = result
+                    rgba = Image.open(io.BytesIO(jpeg_bytes))
+            else:
+                # WMTS sub-layer: load from cached tile
+                tile_path = _sub_layer_cache_path(sub, sources, cache_dir, x, y, zoom)
+
+                if tile_path is not None and tile_path.exists():
+                    # Load and reproject if needed
+                    if source_crs != "EPSG:4326":
+                        result = warp_tile_to_rgba(
+                            tile_path, x, y, zoom, source_crs, "EPSG:4326"
+                        )
+                        if result is not None:
+                            rgba = result[0]
+                    else:
+                        rgba = load_tile_as_rgba(tile_path)
+
+                # Try fallback if tile is unavailable
+                if rgba is None:
+                    # Compute cache key from resolved URL (same as downloader)
+                    fb_cache_key = ""
+                    if sub.source and sub.source in sources:
+                        resolved_url = _resolve_wmts_urls(
+                            sources[sub.source], sub.source_args
+                        )
+                        if resolved_url:
+                            fb_cache_key = _url_cache_key(resolved_url)
+                    rgba = find_fallback_tile(
+                        sub,
+                        x,
+                        y,
+                        zoom,
+                        cache_dir,
+                        sub.source,
+                        cache_key=fb_cache_key,
+                    )
 
             if rgba is not None:
                 opacity = resolve_opacity(sub, zoom)

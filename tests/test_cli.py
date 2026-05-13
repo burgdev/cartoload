@@ -161,16 +161,16 @@ class TestParseZoom:
 
 class TestHumanSize:
     def test_bytes(self):
-        assert _human_size(500) == "500.0 B"
+        assert _human_size(500) == "500 B"
 
     def test_kb(self):
-        assert _human_size(2048) == "2.0 KB"
+        assert _human_size(2048) == "2 KB"
 
     def test_mb(self):
-        assert _human_size(5 * 1024 * 1024) == "5.0 MB"
+        assert _human_size(5 * 1024 * 1024) == "5 MB"
 
     def test_gb(self):
-        assert _human_size(2 * 1024**3) == "2.0 GB"
+        assert _human_size(2 * 1024**3) == "2 GB"
 
 
 # ---------------------------------------------------------------------------

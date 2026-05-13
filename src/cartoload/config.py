@@ -44,6 +44,7 @@ class CompositeSubLayer:
     opacity: float | dict[int, float] = 1.0
     ref: str | None = None
     source_args: dict[str, str] = field(default_factory=dict)
+    asset_filter: dict[str, str] | None = None
 
     @property
     def extension(self) -> str:
@@ -495,14 +496,19 @@ def _extract_source_id(raw_source: str | dict) -> str:
     return source_id
 
 
-def _build_sub_source_args(sub_dict: dict) -> dict[str, str]:
+def _build_sub_source_args(
+    sub_dict: dict,
+) -> tuple[dict[str, str], dict[str, str] | None]:
     """Build source_args for a sub-layer from its YAML dict.
 
     Handles both dict-style source (extract args from dict) and
     backward-compat wmts_layer and extension fields.
+
+    Returns:
+        Tuple of (source_args, asset_filter or None)
     """
     raw_source = sub_dict.get("source", "")
-    _, source_args, _ = _parse_source_field(raw_source)
+    _, source_args, asset_filter = _parse_source_field(raw_source)
 
     # Backward compat: merge wmts_layer into source_args as 'layer'
     wmts_layer = sub_dict.get("wmts_layer")
@@ -514,7 +520,7 @@ def _build_sub_source_args(sub_dict: dict) -> dict[str, str]:
     if extension is not None and "extension" not in source_args:
         source_args["extension"] = extension
 
-    return source_args
+    return source_args, asset_filter
 
 
 def _parse_sub_layers(
@@ -591,6 +597,8 @@ def _parse_sub_layers(
                         f"'zoom_levels' must contain integers"
                     )
 
+        source_args, sub_asset_filter = _build_sub_source_args(sub_dict)
+
         result.append(
             CompositeSubLayer(
                 name=sub_dict.get("name", ""),
@@ -598,7 +606,8 @@ def _parse_sub_layers(
                 zoom_levels=zoom_levels,
                 opacity=opacity,
                 ref=sub_dict.get("ref") if has_ref else None,
-                source_args=_build_sub_source_args(sub_dict),
+                source_args=source_args,
+                asset_filter=sub_asset_filter,
             )
         )
 

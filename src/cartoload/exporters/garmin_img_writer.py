@@ -2754,22 +2754,27 @@ class StreamingIMGWriter:
                     # Parallel processing
                     future_to_idx: dict = {}
                     for i, tile_entry in enumerate(batch):
-                        if (
-                            isinstance(tile_entry, TileMetadata)
-                            and tile_entry.source_path is not None
-                            and tile_entry.source_path.exists()
-                        ):
+                        if isinstance(tile_entry, TileMetadata):
+                            has_source = (
+                                tile_entry.source_path is not None
+                                and tile_entry.source_path.exists()
+                            )
                             if sequential_only and tile_processor is not None:
                                 # Custom processor: use _process_tile_jpeg
-                                # which respects the tile_processor override
-                                future = executor.submit(
-                                    _process_tile_jpeg,
-                                    tile_entry,
-                                    tile_processor,
-                                    source_crs,
-                                    jpeg_quality,
-                                )
-                            else:
+                                # which respects the tile_processor override.
+                                # Submit even if source_path is missing — the
+                                # custom processor may read from elsewhere
+                                # (e.g. a GeoTIFF mosaic).
+                                if has_source or tile_processor is not None:
+                                    future = executor.submit(
+                                        _process_tile_jpeg,
+                                        tile_entry,
+                                        tile_processor,
+                                        source_crs,
+                                        jpeg_quality,
+                                    )
+                                    future_to_idx[future] = i
+                            elif has_source:
                                 # Standard warp path
                                 future = executor.submit(
                                     _warp_tile_worker,
@@ -2781,7 +2786,7 @@ class StreamingIMGWriter:
                                     "EPSG:4326",
                                     jpeg_quality,
                                 )
-                            future_to_idx[future] = i
+                                future_to_idx[future] = i
                         elif isinstance(tile_entry, tuple):
                             batch_jpegs[i] = tile_entry[0]
                         else:
@@ -3015,12 +3020,10 @@ def _process_tile_jpeg(
     Returns:
         JPEG bytes, or None if processing failed
     """
-    if tile.source_path is None or not tile.source_path.exists():
-        return None
-
     if tile_processor is not None:
         # Custom processor (e.g. composite blending): always call it,
-        # regardless of jpeg_quality. The processor handles quality internally.
+        # regardless of jpeg_quality and source_path. The processor
+        # reads from its own data sources (e.g. sub-layer caches).
         result = tile_processor(
             tile.source_path,
             tile.x,
@@ -3031,6 +3034,9 @@ def _process_tile_jpeg(
         )
         if result is not None:
             return result[0]  # (jpeg_bytes, bounds)
+        return None
+
+    if tile.source_path is None or not tile.source_path.exists():
         return None
 
     # No processor: read raw bytes

@@ -276,6 +276,109 @@ def read_tile_from_geotiff(
         return None
 
 
+def read_tile_from_warped_geotiff(
+    geotiff_path: Path,
+    x: int,
+    y: int,
+    zoom: int,
+    quality: int = 85,
+) -> ProcessedTile | None:
+    """Read a tile from a pre-warped (EPSG:4326, RGB) GeoTIFF.
+
+    Uses reproject to correctly map the mosaic data into the tile's
+    geographic extent. This handles the case where the mosaic extent
+    is smaller than the tile — data is placed at the correct position
+    in the 256x256 output instead of being stretched to fill it.
+
+    Args:
+        geotiff_path: Path to pre-warped GeoTIFF (must be EPSG:4326, 3-band RGB)
+        x, y, zoom: Web Mercator tile coordinates
+        quality: JPEG output quality (1-100)
+
+    Returns:
+        (jpeg_bytes, (lat_min, lon_min, lat_max, lon_max)) or None
+    """
+    if not geotiff_path.exists():
+        return None
+
+    bounds = compute_bounds_4326(x, y, zoom)
+    lat_min, lon_min, lat_max, lon_max = bounds
+
+    try:
+        src = _dataset_cache.get(geotiff_path)
+
+        # Compute the intersection of tile bounds and mosaic extent.
+        # If no overlap, skip this tile.
+        src_left = max(lon_min, src.bounds.left)
+        src_right = min(lon_max, src.bounds.right)
+        src_bottom = max(lat_min, src.bounds.bottom)
+        src_top = min(lat_max, src.bounds.top)
+
+        if src_left >= src_right or src_bottom >= src_top:
+            return None
+
+        # Compute source pixel window for the intersection (with buffer).
+        col_off, row_off, width, height = _compute_window(
+            src, src_left, src_bottom, src_right, src_top
+        )
+
+        if width <= 0 or height <= 0:
+            return None
+
+        # Read the source window at native resolution.
+        window = rasterio.windows.Window(col_off, row_off, width, height)
+        src_data = src.read(window=window)
+
+        if src_data.size == 0:
+            return None
+
+        # Build source transform for the read window.
+        src_transform = rasterio.windows.transform(window, src.transform)
+
+        # Destination: the tile's full geographic extent mapped to TILE_SIZE x TILE_SIZE.
+        dst_transform = rasterio.transform.from_bounds(
+            lon_min, lat_min, lon_max, lat_max, TILE_SIZE, TILE_SIZE
+        )
+
+        dst_data = np.zeros((3, TILE_SIZE, TILE_SIZE), dtype="uint8")
+        reproject(
+            source=src_data,
+            destination=dst_data,
+            src_transform=src_transform,
+            src_crs=src.crs,
+            dst_transform=dst_transform,
+            dst_crs=src.crs,  # Same CRS, but reproject handles the spatial mapping
+            resampling=Resampling.nearest,
+            init_dest_nodata=True,
+        )
+
+        del src_data
+
+        # Skip tiles that are entirely nodata (all zeros).
+        if not np.any(dst_data):
+            return None
+
+        # Encode to JPEG
+        dst_rgb = np.moveaxis(dst_data, 0, -1)  # (C, H, W) -> (H, W, C)
+        img = Image.fromarray(dst_rgb, mode="RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality, optimize=True)
+        jpeg_bytes = buf.getvalue()
+
+        return (jpeg_bytes, bounds)
+
+    except Exception as e:
+        logger.warning(
+            "Failed to read tile (%d, %d, z=%d) from pre-warped %s: %s",
+            x,
+            y,
+            zoom,
+            geotiff_path,
+            e,
+        )
+        return None
+
+
 def _expand_palette(
     src_data: np.ndarray,
     colormap: dict[int, tuple[int, int, int, int]],
