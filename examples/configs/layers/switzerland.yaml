@@ -36,6 +36,18 @@ layers:
     exporter: garmin_img
     output: ch_basemap_test.img
 
+  ch_swisstopo:
+    name: "Switzerland 1:25k"
+    description: "swisstopo national map, colour, 1:25000"
+    type: raster
+    source:
+      ref: swisstopo_stac
+    source_args:
+      layer: ch.swisstopo.pixelkarte-farbe-pk25.noscale
+    zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16]
+    exporter: garmin_img
+    output: ch_basemap_stac.img
+
   ch_basemap_25k:
     name: "Switzerland 1:25k"
     description: "swisstopo national map, colour, 1:25000"

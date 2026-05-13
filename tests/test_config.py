@@ -38,14 +38,14 @@ def test_source_config_wmts():
 def test_source_config_geotiff():
     source = SourceConfig(
         id="swisstopo_stac",
-        type="geotiff",
-        stac_url="https://data.geo.admin.ch/api/stac/v0.9/",
+        type="stac",
+        urls=["https://data.geo.admin.ch/api/stac/v1/collections/test"],
         attribution="© swisstopo",
     )
     assert source.id == "swisstopo_stac"
-    assert source.type == "geotiff"
+    assert source.type == "stac"
     assert source.url_template is None
-    assert source.stac_url is not None
+    assert source.urls is not None
 
 
 def test_source_config_defaults():
@@ -97,8 +97,8 @@ def test_load_sources_file_valid():
                         "attribution": "Test",
                     },
                     "test_geotiff": {
-                        "type": "geotiff",
-                        "stac_url": "https://stac.example.com",
+                        "type": "stac",
+                        "urls": ["https://stac.example.com"],
                     },
                 }
             },
@@ -116,7 +116,7 @@ def test_load_sources_file_valid():
         assert (
             sources["test_wmts"].url_template == "https://example.com/{z}/{x}/{y}.png"
         )
-        assert sources["test_geotiff"].stac_url == "https://stac.example.com"
+        assert sources["test_geotiff"].urls == ["https://stac.example.com"]
 
 
 def test_load_sources_file_missing_sources_key():
@@ -344,7 +344,7 @@ def test_load_layers_file_invalid_bounds():
 def test_merge_sources():
     sources1 = {
         "source1": SourceConfig(id="source1", type="wmts"),
-        "source2": SourceConfig(id="source2", type="geotiff"),
+        "source2": SourceConfig(id="source2", type="stac"),
     }
     sources2 = {
         "source2": SourceConfig(id="source2", type="wmts"),  # overwrite
@@ -662,3 +662,144 @@ def test_read_cache_crs_corrupt(tmp_path):
     (source_dir / "metadata.json").write_text("not valid json{{{")
 
     assert BaseDownloader.read_cache_crs(tmp_path, "broken_source") is None
+
+
+# --- asset_filter tests ---
+
+
+def test_load_sources_file_asset_filter():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(
+            {
+                "sources": {
+                    "test_stac": {
+                        "type": "stac",
+                        "urls": ["https://stac.example.com"],
+                        "defaults": {
+                            "layer": "my_collection",
+                            "asset_filter": {"geoadmin:variant": "komb"},
+                        },
+                    }
+                }
+            },
+            f,
+        )
+        f.flush()
+
+        sources = load_sources_file(f.name)
+        Path(f.name).unlink()
+
+        assert sources["test_stac"].asset_filter == {"geoadmin:variant": "komb"}
+        # asset_filter should NOT appear in defaults (it's extracted)
+        assert "asset_filter" not in sources["test_stac"].defaults
+        assert sources["test_stac"].defaults == {"layer": "my_collection"}
+
+
+def test_load_sources_file_no_asset_filter():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(
+            {
+                "sources": {
+                    "test_stac": {
+                        "type": "stac",
+                        "urls": ["https://stac.example.com"],
+                        "defaults": {"layer": "my_collection"},
+                    }
+                }
+            },
+            f,
+        )
+        f.flush()
+
+        sources = load_sources_file(f.name)
+        Path(f.name).unlink()
+
+        assert sources["test_stac"].asset_filter is None
+
+
+def test_load_sources_file_asset_filter_invalid_type():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(
+            {
+                "sources": {
+                    "test_stac": {
+                        "type": "stac",
+                        "urls": ["https://stac.example.com"],
+                        "defaults": {
+                            "layer": "my_collection",
+                            "asset_filter": "not_a_dict",
+                        },
+                    }
+                }
+            },
+            f,
+        )
+        f.flush()
+
+        with pytest.raises(ValueError, match="defaults.asset_filter.*must be a dict"):
+            load_sources_file(f.name)
+        Path(f.name).unlink()
+
+
+def test_load_layers_file_asset_filter_in_source_dict():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(
+            {
+                "bounds": {
+                    "west": 5.0,
+                    "east": 10.0,
+                    "south": 45.0,
+                    "north": 48.0,
+                },
+                "layers": {
+                    "test_layer": {
+                        "name": "Test Layer",
+                        "source": {
+                            "ref": "test_stac",
+                            "asset_filter": {"geoadmin:variant": "krel"},
+                        },
+                        "zoom_levels": [10],
+                        "exporter": "garmin_img",
+                        "output": "test.img",
+                    }
+                },
+            },
+            f,
+        )
+        f.flush()
+
+        layers, _ = load_layers_file(f.name)
+        Path(f.name).unlink()
+
+        assert layers["test_layer"].asset_filter == {"geoadmin:variant": "krel"}
+        assert "asset_filter" not in layers["test_layer"].source_args
+
+
+def test_load_layers_file_no_asset_filter():
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(
+            {
+                "bounds": {
+                    "west": 5.0,
+                    "east": 10.0,
+                    "south": 45.0,
+                    "north": 48.0,
+                },
+                "layers": {
+                    "test_layer": {
+                        "name": "Test Layer",
+                        "source": "test_source",
+                        "zoom_levels": [10],
+                        "exporter": "garmin_img",
+                        "output": "test.img",
+                    }
+                },
+            },
+            f,
+        )
+        f.flush()
+
+        layers, _ = load_layers_file(f.name)
+        Path(f.name).unlink()
+
+        assert layers["test_layer"].asset_filter is None

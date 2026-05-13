@@ -33,13 +33,64 @@ sources:
     attribution: "© Example"
 ```
 
-### GeoTIFF (STAC)
+### STAC
+
+Queries a STAC API collection endpoint, downloads GeoTIFF assets, and processes them into map tiles.
 
 ```yaml
 sources:
   my_stac:
+    type: stac
+    defaults:
+      layer: my_collection_id
+    urls:
+      - "https://stac.example.com/api/v1/collections/${layer}"
+    attribution: "© Example"
+```
+
+The `${layer}` variable resolves to the collection ID from `defaults` or `source_args`.
+
+#### Asset filtering
+
+When a STAC collection has multiple GeoTIFF assets per item (e.g. different variants or resolutions), use `asset_filter` to select which one to download. Specify key-value pairs that must match the asset's properties:
+
+```yaml
+sources:
+  swisstopo_stac:
+    type: stac
+    defaults:
+      layer: ch.swisstopo.pixelkarte-farbe-pk25.noscale
+      asset_filter:
+        geoadmin:variant: komb
+    urls:
+      - "https://data.geo.admin.ch/api/stac/v1/collections/${layer}"
+```
+
+`asset_filter` can also be set per-layer via the dict source syntax:
+
+```yaml
+layers:
+  my_layer:
+    source:
+      ref: swisstopo_stac
+      asset_filter:
+        geoadmin:variant: krel
+```
+
+Layer-level `asset_filter` overrides the source-level default. When no filter is set, the first GeoTIFF asset by media type is selected.
+
+### GeoTIFF
+
+References GeoTIFF files directly — local paths (relative to config file or absolute), directories (scanned recursively), or HTTP URLs.
+
+```yaml
+sources:
+  my_geotiff:
     type: geotiff
-    stac_url: "https://stac.example.com/"
+    urls:
+      - "/data/geotiffs/"                    # directory, scanned recursively
+      - "../cache/my_stac/my_collection/"    # relative path to directory
+      - "https://example.com/tile.tif"       # remote URL, downloaded to cache
     attribution: "© Example"
 ```
 
@@ -47,15 +98,15 @@ sources:
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `type` | yes | Source type: `wmts` or `geotiff` |
-| `url_template` | conditional | URL template for WMTS (use instead of `urls`) |
-| `urls` | conditional | List of URL templates for WMTS (use instead of `url_template`) |
-| `stac_url` | conditional | STAC API URL for GeoTIFF sources |
+| `type` | yes | Source type: `wmts`, `stac`, or `geotiff` |
+| `url_template` | conditional | URL template (use instead of `urls`) |
+| `urls` | conditional | List of URLs or paths (use instead of `url_template`) |
 | `attribution` | no | Attribution string |
 | `defaults` | no | Default variable values for template substitution |
+| `asset_filter` | no | Key-value filter for STAC asset selection (nested dict under `defaults` or layer source) |
 | `rate_limit_ms` | no | Delay between requests in ms (default: 150) |
 | `max_threads` | no | Max download threads (default: 4) |
-| `crs` | no | Override source CRS (default: EPSG:3857 for WMTS) |
+| `crs` | no | Override source CRS (default: EPSG:3857 for WMTS, auto-detected for stac/geotiff) |
 
 ## Template variables
 
@@ -78,11 +129,11 @@ Variable resolution order (later overrides earlier):
 2. Source `defaults` dict
 3. Layer `source_args` (from layer config)
 
-Common config-level variables include `${layer}` (WMTS layer name) and `${extension}` (tile format), but these are not predefined — they must be set via `defaults` or `source_args`.
+Common config-level variables include `${layer}` (WMTS layer name, STAC collection ID) and `${extension}` (tile format), but these are not predefined — they must be set via `defaults` or `source_args`.
 
 ### Per-tile variables
 
-Resolved at download time for each tile:
+Resolved at download time for each tile (WMTS only):
 
 | Variable | Description |
 |----------|-------------|

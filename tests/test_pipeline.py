@@ -10,7 +10,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from cartoload.config import LayerConfig, SourceConfig
-from cartoload.downloader.geotiff import GeoTIFFDownloader
 from cartoload.downloader.wmts import WMTSDownloader
 from cartoload.exporters.garmin_img import GarminImgExporter
 from cartoload.pipeline import (
@@ -57,11 +56,12 @@ def _write_tile_with_world_file(
 
 
 @pytest.fixture
-def geotiff_source() -> SourceConfig:
+def stac_source() -> SourceConfig:
     return SourceConfig(
         id="swiss_topo",
-        type="geotiff",
-        stac_url="https://stac.example.com",
+        type="stac",
+        urls=["https://stac.example.com/collections/${layer}"],
+        defaults={"layer": "test_collection"},
     )
 
 
@@ -80,11 +80,11 @@ def unknown_source() -> SourceConfig:
 
 
 @pytest.fixture
-def layer(geotiff_source: SourceConfig) -> LayerConfig:
+def layer(wmts_source: SourceConfig) -> LayerConfig:
     return LayerConfig(
         id="test_layer",
         name="Test Layer",
-        source=geotiff_source.id,
+        source=wmts_source.id,
         zoom_levels=[12, 14],
         exporter="garmin-img",
         output="test_layer.img",
@@ -93,8 +93,8 @@ def layer(geotiff_source: SourceConfig) -> LayerConfig:
 
 
 @pytest.fixture
-def sources(geotiff_source: SourceConfig) -> dict[str, SourceConfig]:
-    return {geotiff_source.id: geotiff_source}
+def sources(wmts_source: SourceConfig) -> dict[str, SourceConfig]:
+    return {wmts_source.id: wmts_source}
 
 
 # ---------------------------------------------------------------------------
@@ -103,11 +103,10 @@ def sources(geotiff_source: SourceConfig) -> dict[str, SourceConfig]:
 
 
 class TestGetDownloader:
-    def test_geotiff_returns_geotiff_downloader(self, geotiff_source, tmp_path):
-        from cartoload.downloader.geotiff import GeoTIFFDownloader
-
-        dl = get_downloader(geotiff_source, tmp_path)
-        assert isinstance(dl, GeoTIFFDownloader)
+    def test_stac_raises_pipeline_error(self, stac_source, tmp_path):
+        """STAC sources are handled by build_geotiff_layer, not get_downloader."""
+        with pytest.raises(PipelineError, match="Unknown source type"):
+            get_downloader(stac_source, tmp_path)
 
     def test_wmts_returns_wmts_downloader(self, wmts_source, tmp_path):
         from cartoload.downloader.wmts import WMTSDownloader
@@ -164,14 +163,14 @@ class TestGetExporter:
 class TestResolveSource:
     def test_found(self, layer, sources):
         result = resolve_source(layer, sources)
-        assert result.id == "swiss_topo"
+        assert result.id == "wmts_src"
 
     def test_missing_raises(self, layer):
         with pytest.raises(PipelineError, match="unknown source"):
             resolve_source(layer, {})
 
     def test_missing_with_available(self, layer):
-        extra = SourceConfig(id="other", type="geotiff", stac_url="https://x")
+        extra = SourceConfig(id="other", type="stac", urls=["https://x"])
         with pytest.raises(PipelineError, match="other"):
             resolve_source(layer, {"other": extra})
 
@@ -198,9 +197,10 @@ class TestBuildLayerMocked:
     ):
         from cartoload.exporters.garmin_img_model import TileMetadata
 
-        # --- download mock (spec=GeoTIFFDownloader so isinstance passes) ---
-        mock_dl = MagicMock(spec=GeoTIFFDownloader)
-        mock_dl.run.return_value = [tmp_path / "tile1.tif"]
+        # --- download mock (spec=WMTSDownloader so isinstance passes) ---
+        mock_dl = MagicMock(spec=WMTSDownloader)
+        mock_dl.download_grid.return_value = [tmp_path / "tile1.jpeg"]
+        mock_dl._bbox_to_tile_indices.return_value = [(0, 0)]
         mock_get_dl.return_value = mock_dl
 
         # --- metadata mock ---
@@ -245,7 +245,7 @@ class TestBuildLayerMocked:
         )
 
         assert result == [output_img]
-        mock_dl.run.assert_called_once()
+        mock_get_dl.assert_called()
         mock_compute_metadata.assert_called()
         mock_exporter.export_from_metadata.assert_called_once()
 
@@ -263,8 +263,9 @@ class TestBuildLayerMocked:
     ):
         from cartoload.exporters.garmin_img_model import TileMetadata
 
-        mock_dl = MagicMock(spec=GeoTIFFDownloader)
-        mock_dl.run.return_value = [tmp_path / "tile.tif"]
+        mock_dl = MagicMock(spec=WMTSDownloader)
+        mock_dl.download_grid.return_value = [tmp_path / "tile.jpeg"]
+        mock_dl._bbox_to_tile_indices.return_value = [(0, 0)]
         mock_get_dl.return_value = mock_dl
 
         jpeg_bytes = _make_jpeg()
@@ -400,8 +401,9 @@ class TestErrorPropagation:
 
     @patch("cartoload.pipeline.get_downloader")
     def test_processing_error(self, mock_get_dl, layer, sources, tmp_path):
-        mock_dl = MagicMock(spec=GeoTIFFDownloader)
-        mock_dl.run.return_value = [tmp_path / "tile.tif"]
+        mock_dl = MagicMock(spec=WMTSDownloader)
+        mock_dl.download_grid.return_value = [tmp_path / "tile.jpeg"]
+        mock_dl._bbox_to_tile_indices.return_value = [(0, 0)]
         mock_get_dl.return_value = mock_dl
 
         with patch("cartoload.pipeline.compute_tile_metadata") as mock_compute:
@@ -424,8 +426,9 @@ class TestErrorPropagation:
     ):
         from cartoload.exporters.garmin_img_model import TileMetadata
 
-        mock_dl = MagicMock(spec=GeoTIFFDownloader)
-        mock_dl.run.return_value = [tmp_path / "tile.tif"]
+        mock_dl = MagicMock(spec=WMTSDownloader)
+        mock_dl.download_grid.return_value = [tmp_path / "tile.jpeg"]
+        mock_dl._bbox_to_tile_indices.return_value = [(0, 0)]
         mock_get_dl.return_value = mock_dl
 
         jpeg_bytes = _make_jpeg()
@@ -483,8 +486,9 @@ class TestErrorPropagation:
         self, mock_get_dl, mock_compute_metadata, layer, sources, tmp_path
     ):
         """When no tiles are processed, processing should fail."""
-        mock_dl = MagicMock(spec=GeoTIFFDownloader)
-        mock_dl.run.return_value = []
+        mock_dl = MagicMock(spec=WMTSDownloader)
+        mock_dl.download_grid.return_value = []
+        mock_dl._bbox_to_tile_indices.return_value = [(0, 0)]
         mock_get_dl.return_value = mock_dl
 
         # compute_tile_metadata returns empty results for both zoom levels

@@ -9,10 +9,13 @@ from typing import Callable
 
 from .config import CompositeSubLayer, LayerConfig, SourceConfig
 from .downloader.base import BaseDownloader
-from .downloader.geotiff import GeoTIFFDownloader
+from .downloader.stac import STACDownloader
 from .downloader.wmts import WMTSDownloader
 from .downloader.wmts import _url_cache_key
 from .exporters.garmin_img import GarminImgExporter
+from .processor.geotiff_collector import collect_geotiff_files
+from .processor.geotiff_index import GeoTIFFIndex
+from .processor.geotiff_tile_reader import read_tile_from_geotiff
 from .processor.checkpoint import (
     CheckpointData,
     delete_checkpoint,
@@ -113,7 +116,7 @@ def get_downloader(
     *,
     source_args: dict[str, str] | None = None,
     display_name: str = "",
-) -> GeoTIFFDownloader | WMTSDownloader:
+) -> WMTSDownloader:
     """Return the correct downloader for the given source type.
 
     Args:
@@ -130,8 +133,6 @@ def get_downloader(
     Raises:
         PipelineError: If the source type is not supported
     """
-    if source.type == "geotiff":
-        return GeoTIFFDownloader(cache_dir)
     if source.type == "wmts":
         if not source.url_template and not source.urls:
             raise PipelineError(
@@ -185,7 +186,7 @@ def get_downloader(
         )
     raise PipelineError(
         f"Unknown source type '{source.type}' for source '{source.id}'. "
-        f"Supported types: geotiff, wmts"
+        f"Supported types: wmts"
     )
 
 
@@ -268,6 +269,8 @@ async def build_layer(
     export_progress_callback: ExportProgressCallback | None = None,
     checkpoint: bool = True,
     warmup_only: bool = False,
+    preview: bool = False,
+    preview_tiles: int = 9,
 ) -> list[Path]:
     """Orchestrate download → batch process → export for a single layer.
 
@@ -289,6 +292,8 @@ async def build_layer(
         export_progress_callback: Called with (stage, current, total) for export progress
         checkpoint: If True, write checkpoint after each zoom level for resume support
         warmup_only: If True, download and process tiles but skip IMG export
+        preview: If True, generate preview images after export
+        preview_tiles: Max tiles per zoom level in preview mosaics
 
     Returns:
         List of paths to output files (may be multiple if >4GB split)
@@ -311,10 +316,30 @@ async def build_layer(
             force=force,
             progress_callback=progress_callback,
             export_progress_callback=export_progress_callback,
+            preview=preview,
+            preview_tiles=preview_tiles,
         )
 
     # Resolve source
     source = resolve_source(layer, sources)
+
+    # STAC and GeoTIFF sources use a separate pipeline
+    if source.type in ("stac", "geotiff"):
+        return await build_geotiff_layer(
+            effective_layer,
+            source,
+            cache_dir,
+            output_dir,
+            no_download=no_download,
+            force=force,
+            quality=quality,
+            progress_callback=progress_callback,
+            export_progress_callback=export_progress_callback,
+            checkpoint=checkpoint,
+            warmup_only=warmup_only,
+            preview=preview,
+            preview_tiles=preview_tiles,
+        )
 
     # --- Checkpoint: detect and resume ---
     cp_data: CheckpointData | None = None
@@ -377,9 +402,7 @@ async def build_layer(
                 cache_dir,
                 source_args=effective_layer.source_args,
             )
-            if isinstance(downloader, GeoTIFFDownloader):
-                downloader.run(source, effective_layer)
-            elif isinstance(downloader, WMTSDownloader):
+            if isinstance(downloader, WMTSDownloader):
                 bounds = effective_layer.bounds
                 if not bounds:
                     raise DownloadError(
@@ -525,6 +548,387 @@ async def build_layer(
     return output_paths
 
 
+# ---------------------------------------------------------------------------
+# GeoTIFF / STAC layer pipeline
+# ---------------------------------------------------------------------------
+
+
+async def build_geotiff_layer(
+    layer: LayerConfig,
+    source: SourceConfig,
+    cache_dir: Path,
+    output_dir: Path,
+    *,
+    no_download: bool = False,
+    force: bool = False,
+    quality: int | None = None,
+    progress_callback: ProgressCallback | None = None,
+    export_progress_callback: ExportProgressCallback | None = None,
+    checkpoint: bool = True,
+    warmup_only: bool = False,
+    preview: bool = False,
+    preview_tiles: int = 9,
+) -> list[Path]:
+    """Build a layer from GeoTIFF files (STAC download or local path source).
+
+    For ``stac`` sources: resolves the URL template, runs the STAC downloader
+    to fetch GeoTIFF assets, then builds a spatial index.
+
+    For ``geotiff`` sources: resolves local/remote paths via
+    ``collect_geotiff_files``, then builds a spatial index.
+
+    In both cases, the spatial index is used to look up which GeoTIFF covers
+    each (x, y, zoom) tile, and a tile_processor_override reads pixel windows
+    on-the-fly and feeds JPEG bytes into the existing streaming export pipeline.
+
+    Args:
+        layer: Layer configuration
+        source: Source configuration (type must be 'stac' or 'geotiff')
+        cache_dir: Directory for caching downloaded files
+        output_dir: Directory for output files
+        no_download: If True, skip the download stage
+        force: If True, overwrite existing output files
+        quality: JPEG quality for tile encoding
+        progress_callback: Called with (stage_id, description) at each stage
+        export_progress_callback: Called with (stage, current, total) for export progress
+        checkpoint: If True, write checkpoint after each zoom level
+        warmup_only: If True, download and index but skip IMG export
+
+    Returns:
+        List of paths to output files
+    """
+    from .exporters.garmin_img_model import TileMetadata as ExportTileMetadata
+    from .exporters.garmin_img_writer import _get_worker_count
+    from .processor.rasterio_warp import compute_bounds_4326
+
+    # --- Collect GeoTIFF files ---
+    geotiff_paths: list[Path]
+    collection_id: str = ""
+
+    if source.type == "stac":
+        # Resolve URL template with source defaults + layer source_args
+        variables: dict[str, str] = dict(source.defaults)
+        if layer.source_args:
+            variables.update(layer.source_args)
+
+        collection_id = variables.get("layer", "")
+        resolved_urls = resolve_templates(source.urls, variables) if source.urls else []
+        resolved_url = resolved_urls[0] if resolved_urls else ""
+
+        if not resolved_url:
+            raise PipelineError(f"STAC source '{source.id}' has no resolved URL")
+
+        if not collection_id:
+            raise PipelineError(
+                f"STAC source '{source.id}' requires a 'layer' variable "
+                f"(collection ID) — set in source.defaults or layer source_args"
+            )
+
+        if not no_download:
+            if progress_callback:
+                progress_callback(
+                    "download", f"Downloading GeoTIFFs from STAC '{collection_id}'..."
+                )
+            try:
+                downloader = STACDownloader(cache_dir)
+                # Layer asset_filter overrides source asset_filter
+                effective_filter = layer.asset_filter or source.asset_filter
+                geotiff_paths = downloader.run(
+                    source,
+                    layer,
+                    resolved_url,
+                    collection_id,
+                    asset_filter=effective_filter,
+                )
+            except Exception as e:
+                raise DownloadError(source.id, str(e), cause=e) from e
+        else:
+            logger.info("Skipping STAC download (--no-download)")
+            # Reconstruct cache paths from previous download
+            stac_dl = STACDownloader(cache_dir)
+            # Layer asset_filter overrides source asset_filter
+            effective_filter = layer.asset_filter or source.asset_filter
+            geotiff_paths = []
+            cache_subdir = stac_dl._get_cache_path(
+                source.id, resolved_url, "", effective_filter
+            ).parent
+            if cache_subdir.exists():
+                geotiff_paths = sorted(
+                    p
+                    for p in cache_subdir.rglob("*")
+                    if p.is_file() and p.suffix.lstrip(".") in ("tif", "tiff")
+                )
+            if not geotiff_paths:
+                raise DownloadError(
+                    source.id,
+                    f"No cached GeoTIFFs found for STAC collection '{collection_id}'",
+                )
+            logger.info("Using %d cached GeoTIFF(s)", len(geotiff_paths))
+
+    elif source.type == "geotiff":
+        if not source.urls:
+            raise PipelineError(f"GeoTIFF source '{source.id}' requires 'urls'")
+
+        # Determine config_dir for relative path resolution.
+        config_dir = Path(source.config_dir) if source.config_dir else None
+
+        if not no_download:
+            if progress_callback:
+                progress_callback("download", "Collecting GeoTIFF files...")
+            try:
+                geotiff_paths = collect_geotiff_files(
+                    source.urls, cache_dir, config_dir=config_dir
+                )
+            except Exception as e:
+                raise DownloadError(source.id, str(e), cause=e) from e
+        else:
+            logger.info("Skipping GeoTIFF collection (--no-download)")
+            try:
+                geotiff_paths = collect_geotiff_files(
+                    source.urls, cache_dir, config_dir=config_dir
+                )
+            except Exception as e:
+                raise DownloadError(source.id, str(e), cause=e) from e
+    else:
+        raise PipelineError(
+            f"build_geotiff_layer called with unsupported source type '{source.type}'"
+        )
+
+    if not geotiff_paths:
+        raise ProcessingError(layer.id, "No GeoTIFF files available for processing")
+
+    # --- Build spatial index ---
+    if progress_callback:
+        progress_callback("process", "Building GeoTIFF spatial index...")
+
+    try:
+        index = GeoTIFFIndex.from_paths(geotiff_paths)
+    except Exception as e:
+        raise ProcessingError(layer.id, str(e), cause=e) from e
+
+    # Determine effective bounds: layer bounds override, or union of all GeoTIFFs
+    if layer.bounds:
+        effective_bounds = layer.bounds
+    else:
+        west, south, east, north = index.total_bounds
+        effective_bounds = {"west": west, "south": south, "east": east, "north": north}
+        logger.info(
+            "Using GeoTIFF union bounds for layer '%s': %s",
+            layer.id,
+            effective_bounds,
+        )
+
+    # --- Compute tile metadata ---
+    if progress_callback:
+        progress_callback("process", "Computing tile metadata...")
+
+    tile_metadata: dict[int, list[ExportTileMetadata]] = {}
+    try:
+        for zoom in layer.zoom_levels:
+            tile_coords = _compute_tile_coords_from_bounds(effective_bounds, zoom)
+            if not tile_coords:
+                tile_metadata[zoom] = []
+                continue
+
+            metadata = []
+            for x, y in tile_coords:
+                lat_min, lon_min, lat_max, lon_max = compute_bounds_4326(x, y, zoom)
+
+                # Pre-resolve which GeoTIFF covers this tile.
+                # This avoids per-tile spatial index lookups during export.
+                geotiff_path = index.find(lon_min, lat_min, lon_max, lat_max)
+                if geotiff_path is None:
+                    continue  # skip tiles with no GeoTIFF coverage
+
+                # Estimate jpeg_size — use a rough estimate for GeoTIFF-sourced tiles
+                jpeg_size = 50_000  # ~50KB per tile estimate
+
+                metadata.append(
+                    ExportTileMetadata(
+                        x=x,
+                        y=y,
+                        zoom=zoom,
+                        lat_min=lat_min,
+                        lon_min=lon_min,
+                        lat_max=lat_max,
+                        lon_max=lon_max,
+                        jpeg_size=jpeg_size,
+                        source_path=geotiff_path,
+                    )
+                )
+
+            tile_metadata[zoom] = metadata
+    except Exception as e:
+        raise ProcessingError(layer.id, str(e), cause=e) from e
+
+    total_tiles = sum(len(t) for t in tile_metadata.values())
+    if total_tiles == 0:
+        raise ProcessingError(layer.id, "No tiles available for processing")
+
+    logger.info(
+        "Computed metadata for %d GeoTIFF-sourced tiles across %d zoom levels",
+        total_tiles,
+        len(tile_metadata),
+    )
+
+    if warmup_only:
+        logger.info(
+            "Warmup complete for layer '%s': %d tiles indexed", layer.id, total_tiles
+        )
+        return []
+
+    # --- Export stage: streaming write with GeoTIFF tile processor ---
+    if progress_callback:
+        workers = _get_worker_count()
+        if workers > 1:
+            progress_callback(
+                "export",
+                f"Exporting GeoTIFF layer to Garmin IMG ({workers}x parallel)...",
+            )
+        else:
+            progress_callback("export", "Exporting GeoTIFF layer to Garmin IMG...")
+
+    output_paths: list[Path]
+    try:
+        exporter = get_exporter(layer, output_dir)
+        output_file = output_dir / layer.output
+
+        if output_file.exists():
+            if force:
+                output_file.unlink()
+            else:
+                raise ExportError(
+                    layer.id,
+                    f"Output file already exists: {output_file}. "
+                    f"Use --force to overwrite.",
+                )
+
+        # Build a GeoTIFF-aware tile processor
+        geotiff_processor = _make_geotiff_processor(quality)
+
+        output_paths = exporter.export_from_metadata(
+            tile_metadata,
+            layer,
+            output_file,
+            source_crs="EPSG:4326",  # GeoTIFF tile reader already warps to 4326
+            quality=quality,
+            progress_callback=export_progress_callback,
+            tile_processor_override=geotiff_processor,
+        )
+    except ExportError:
+        raise
+    except Exception as e:
+        raise ExportError(layer.id, str(e), cause=e) from e
+
+    logger.info(
+        f"GeoTIFF build complete for layer '{layer.id}': "
+        f"{len(output_paths)} file(s) produced"
+    )
+
+    # Generate previews if requested
+    if preview and tile_metadata:
+        from .processor.preview import generate_previews_from_processor
+
+        try:
+            if progress_callback:
+                progress_callback("preview", "Generating preview images...")
+            preview_paths = generate_previews_from_processor(
+                layer,
+                tile_metadata,
+                geotiff_processor,
+                "EPSG:4326",
+                output_dir,
+                max_tiles_per_zoom=preview_tiles,
+                quality=quality or 85,
+            )
+            if progress_callback:
+                for pp in preview_paths:
+                    progress_callback("preview", f"  Preview: {pp}")
+        except Exception as e:
+            logger.warning("Preview generation failed: %s", e)
+
+    return output_paths
+
+
+def _compute_tile_coords_from_bounds(
+    bounds: dict[str, float], zoom: int
+) -> list[tuple[int, int]]:
+    """Compute tile grid coordinates for a zoom level within given bounds."""
+    n = 2**zoom
+    west = bounds["west"]
+    east = bounds["east"]
+    north = bounds["north"]
+    south = bounds["south"]
+
+    def lon_to_x(lon: float) -> int:
+        return max(0, min(int((lon + 180.0) / 360.0 * n), n - 1))
+
+    def lat_to_y(lat: float) -> int:
+        lat_rad = math.radians(lat)
+        return max(
+            0,
+            min(
+                int(
+                    (
+                        1.0
+                        - math.log(
+                            max(math.tan(lat_rad), 1e-10)
+                            + 1.0 / max(math.cos(lat_rad), 1e-10)
+                        )
+                        / math.pi
+                    )
+                    / 2.0
+                    * n
+                ),
+                n - 1,
+            ),
+        )
+
+    x_min = lon_to_x(west)
+    x_max = lon_to_x(east)
+    y_min = lat_to_y(north)
+    y_max = lat_to_y(south)
+
+    coords = []
+    for x in range(x_min, x_max + 1):
+        for y in range(y_min, y_max + 1):
+            coords.append((x, y))
+    return coords
+
+
+def _make_geotiff_processor(
+    quality: int | None = None,
+):
+    """Create a tile processor callable that reads from GeoTIFF files.
+
+    Returns a callable with the signature expected by the streaming writer:
+    (source_path, x, y, zoom, source_crs, quality) -> (jpeg_bytes, bounds) | None
+
+    The source_path is pre-resolved by build_geotiff_layer, so no spatial
+    index lookup is needed at read time.
+    """
+    from .exporters.garmin_img_writer import ProcessedTile
+
+    def geotiff_processor(
+        source_path: Path | None,
+        x: int,
+        y: int,
+        zoom: int,
+        crs: str,
+        jpeg_quality: int | None,
+    ) -> ProcessedTile | None:
+        """Read a tile window from the pre-resolved GeoTIFF."""
+        if source_path is None:
+            return None
+
+        effective_quality = quality if quality is not None else jpeg_quality or 85
+        return read_tile_from_geotiff(
+            source_path, x, y, zoom, quality=effective_quality
+        )
+
+    return geotiff_processor
+
+
 def _compute_tile_coords(layer: LayerConfig, zoom: int) -> list[tuple[int, int]]:
     """Compute tile grid coordinates for a zoom level within the layer bounds.
 
@@ -642,6 +1046,8 @@ async def build_composite_layer(
     force: bool = False,
     progress_callback: ProgressCallback | None = None,
     export_progress_callback: ExportProgressCallback | None = None,
+    preview: bool = False,
+    preview_tiles: int = 9,
 ) -> list[Path]:
     """Build a composite layer from multiple sub-layers.
 
@@ -845,6 +1251,27 @@ async def build_composite_layer(
         f"Composite build complete for layer '{layer.id}': "
         f"{len(output_paths)} file(s) produced"
     )
+
+    # Generate previews if requested
+    if preview and tile_metadata:
+        from .processor.preview import generate_previews_from_processor
+
+        try:
+            if progress_callback:
+                progress_callback("preview", "Generating preview images...")
+            preview_paths = generate_previews_from_processor(
+                layer,
+                tile_metadata,
+                composite_processor,
+                source_crs or "EPSG:3857",
+                output_dir,
+                max_tiles_per_zoom=preview_tiles,
+            )
+            if progress_callback:
+                for pp in preview_paths:
+                    progress_callback("preview", f"  Preview: {pp}")
+        except Exception as e:
+            logger.warning("Preview generation failed: %s", e)
 
     return output_paths
 

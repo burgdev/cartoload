@@ -12,15 +12,18 @@ class SourceConfig:
     """Configuration for a geodata source (WMTS, GeoTIFF/STAC, etc.)."""
 
     id: str
-    type: str  # wmts, geotiff, gpkg, geojson, pbf
+    type: str  # wmts, stac, geotiff
     url_template: str | None = None
     urls: list[str] = field(default_factory=list)
-    stac_url: str | None = None
     attribution: str = ""
     rate_limit_ms: int = 150
     max_threads: int = 4
     crs: str | None = None
     defaults: dict[str, str] = field(default_factory=dict)
+    asset_filter: dict[str, str] | None = None
+    config_dir: str | None = (
+        None  # Directory of the source config file (for relative path resolution)
+    )
 
 
 @dataclass
@@ -62,8 +65,8 @@ class LayerConfig:
     type: str = "raster"  # raster, raster_overlay, vector
     source: str = ""
     wmts_fallback: str | None = None
-    geotiff_product: str | None = None
     source_args: dict[str, str] = field(default_factory=dict)
+    asset_filter: dict[str, str] | None = None
     zoom_levels: list[int] = field(default_factory=list)
     exporter: str = "garmin_img"
     output: str = ""
@@ -84,13 +87,14 @@ class Config:
     bounds: dict[str, float] | None = None
 
 
-# Allowed source types for Phase 1
-ALLOWED_SOURCE_TYPES = {"wmts", "geotiff"}
+# Allowed source types
+ALLOWED_SOURCE_TYPES = {"wmts", "stac", "geotiff"}
 
 # Required fields for each source type
 SOURCE_TYPE_REQUIRED_FIELDS = {
     "wmts": ["url_template"],
-    "geotiff": ["stac_url"],
+    "stac": ["url_template"],
+    "geotiff": ["url_template"],
 }
 
 logger = logging.getLogger(__name__)
@@ -154,15 +158,15 @@ def load_sources_file(path: str) -> dict[str, SourceConfig]:
         # Validate type-specific required fields
         if source_type in SOURCE_TYPE_REQUIRED_FIELDS:
             for required_field in SOURCE_TYPE_REQUIRED_FIELDS[source_type]:
-                # For WMTS, url_template can be replaced by urls list
-                if source_type == "wmts" and required_field == "url_template":
+                # url_template can be replaced by urls list for all types
+                if required_field == "url_template":
                     has_url = (
                         "url_template" in source_dict
                         and source_dict["url_template"] is not None
                     ) or ("urls" in source_dict and source_dict["urls"])
                     if not has_url:
                         raise ValueError(
-                            f"{path}: Source '{source_id}' (type=wmts) "
+                            f"{path}: Source '{source_id}' (type={source_type}) "
                             f"missing required field 'url_template' or 'urls'"
                         )
                 elif (
@@ -212,6 +216,17 @@ def load_sources_file(path: str) -> dict[str, SourceConfig]:
             raise ValueError(
                 f"{path}: Source '{source_id}' field 'defaults' must be a dict"
             )
+
+        # Extract asset_filter before str coercion (it's a nested dict)
+        asset_filter_raw = defaults_raw.pop("asset_filter", None)
+        asset_filter: dict[str, str] | None = None
+        if asset_filter_raw is not None:
+            if not isinstance(asset_filter_raw, dict):
+                raise ValueError(
+                    f"{path}: Source '{source_id}' field 'defaults.asset_filter' must be a dict"
+                )
+            asset_filter = {str(k): str(v) for k, v in asset_filter_raw.items()}
+
         defaults = {str(k): str(v) for k, v in defaults_raw.items()}
 
         # Create SourceConfig instance
@@ -220,12 +235,13 @@ def load_sources_file(path: str) -> dict[str, SourceConfig]:
             type=source_type,
             url_template=url_template,
             urls=urls,
-            stac_url=source_dict.get("stac_url"),
             attribution=source_dict.get("attribution", ""),
             rate_limit_ms=source_dict.get("rate_limit_ms", 150),
             max_threads=source_dict.get("max_threads", 4),
             crs=source_dict.get("crs"),
             defaults=defaults,
+            asset_filter=asset_filter,
+            config_dir=str(file_path.parent.resolve()),
         )
 
     return sources
@@ -401,7 +417,7 @@ def load_layers_file(
 
         # Parse source field: string (source ID) or dict (ref + args)
         raw_source = layer_dict.get("source", "")
-        source_id, source_args = _parse_source_field(raw_source)
+        source_id, source_args, layer_asset_filter = _parse_source_field(raw_source)
 
         # Backward compat: merge wmts_layer into source_args as 'layer'
         wmts_layer = layer_dict.get("wmts_layer")
@@ -421,8 +437,8 @@ def load_layers_file(
             type=layer_dict.get("type", "raster"),
             source=source_id,
             wmts_fallback=layer_dict.get("wmts_fallback"),
-            geotiff_product=layer_dict.get("geotiff_product"),
             source_args=source_args,
+            asset_filter=layer_asset_filter,
             zoom_levels=zoom_levels,
             exporter=layer_dict["exporter"],
             output=layer_dict["output"],
@@ -435,31 +451,47 @@ def load_layers_file(
 
 def _parse_source_field(
     raw_source: str | dict,
-) -> tuple[str, dict[str, str]]:
+) -> tuple[str, dict[str, str], dict[str, str] | None]:
     """Parse a source field that can be a string (source ID) or dict.
 
     When a dict is provided, 'ref' is the source ID and remaining keys
     become source_args. All values are converted to strings.
+    Nested dict values for 'asset_filter' are extracted separately.
 
     Returns:
-        Tuple of (source_id, source_args)
+        Tuple of (source_id, source_args, asset_filter or None)
     """
     if isinstance(raw_source, str):
-        return (raw_source, {})
+        return (raw_source, {}, None)
     if isinstance(raw_source, dict):
         if "ref" not in raw_source:
             raise ValueError(
                 f"Dict source must contain a 'ref' key, got keys: {list(raw_source.keys())}"
             )
         source_id = str(raw_source["ref"])
-        source_args = {str(k): str(v) for k, v in raw_source.items() if k != "ref"}
-        return (source_id, source_args)
-    return ("", {})
+
+        # Extract asset_filter before str coercion
+        af_raw = raw_source.get("asset_filter")
+        asset_filter: dict[str, str] | None = None
+        if af_raw is not None:
+            if not isinstance(af_raw, dict):
+                raise ValueError(
+                    f"'asset_filter' must be a dict, got {type(af_raw).__name__}"
+                )
+            asset_filter = {str(k): str(v) for k, v in af_raw.items()}
+
+        source_args = {
+            str(k): str(v)
+            for k, v in raw_source.items()
+            if k not in ("ref", "asset_filter")
+        }
+        return (source_id, source_args, asset_filter)
+    return ("", {}, None)
 
 
 def _extract_source_id(raw_source: str | dict) -> str:
     """Extract just the source ID from a string or dict source field."""
-    source_id, _ = _parse_source_field(raw_source)
+    source_id, _, _ = _parse_source_field(raw_source)
     return source_id
 
 
@@ -470,7 +502,7 @@ def _build_sub_source_args(sub_dict: dict) -> dict[str, str]:
     backward-compat wmts_layer and extension fields.
     """
     raw_source = sub_dict.get("source", "")
-    _, source_args = _parse_source_field(raw_source)
+    _, source_args, _ = _parse_source_field(raw_source)
 
     # Backward compat: merge wmts_layer into source_args as 'layer'
     wmts_layer = sub_dict.get("wmts_layer")

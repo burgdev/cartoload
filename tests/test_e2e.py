@@ -95,8 +95,9 @@ def small_geotiff(tmp_path: Path) -> Path:
 def e2e_source() -> SourceConfig:
     return SourceConfig(
         id="test_source",
-        type="geotiff",
-        stac_url="https://stac.example.com",
+        type="stac",
+        urls=["https://stac.example.com/collections/${layer}"],
+        defaults={"layer": "test_collection"},
     )
 
 
@@ -130,14 +131,18 @@ class TestEndToEnd:
         """Run the full pipeline end-to-end: download → process → export."""
         import asyncio
 
-        # Place the tile in the cache dir structure that no-download mode expects
+        from cartoload.downloader.stac import STACDownloader
+        from cartoload.template import expand
+
+        # Place the GeoTIFF in the STAC cache structure
         cache_dir = tmp_path / "cache"
-        source_cache = cache_dir / e2e_source.id
-        source_cache.mkdir(parents=True, exist_ok=True)
+        resolved_url = expand(e2e_source.urls[0], {"layer": "test_collection"})
+        stac_dl = STACDownloader(cache_dir)
+        cache_path = stac_dl._get_cache_path(e2e_source.id, resolved_url, "tile")
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Copy the small geotiff into the cache
-        cached_tile = source_cache / "tile.tif"
-        cached_tile.write_bytes(small_geotiff.read_bytes())
+        cache_path.write_bytes(small_geotiff.read_bytes())
 
         output_dir = tmp_path / "output"
 
@@ -167,11 +172,15 @@ class TestEndToEnd:
         """Verify the output file starts with the DSKIMG magic bytes."""
         import asyncio
 
+        from cartoload.downloader.stac import STACDownloader
+        from cartoload.template import expand
+
         cache_dir = tmp_path / "cache"
-        source_cache = cache_dir / e2e_source.id
-        source_cache.mkdir(parents=True, exist_ok=True)
-        cached_tile = source_cache / "tile.tif"
-        cached_tile.write_bytes(small_geotiff.read_bytes())
+        resolved_url = expand(e2e_source.urls[0], {"layer": "test_collection"})
+        stac_dl = STACDownloader(cache_dir)
+        cache_path = stac_dl._get_cache_path(e2e_source.id, resolved_url, "tile")
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_bytes(small_geotiff.read_bytes())
 
         output_dir = tmp_path / "output"
 

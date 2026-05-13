@@ -29,7 +29,7 @@ from cartoload.pipeline import DownloadError
 def _make_config_files(
     tmp_path: Path,
     source_id: str = "test_src",
-    source_type: str = "geotiff",
+    source_type: str = "stac",
     layer_id: str = "test_layer",
     **layer_overrides,
 ) -> tuple[Path, Path]:
@@ -38,7 +38,7 @@ def _make_config_files(
         "sources": {
             source_id: {
                 "type": source_type,
-                "stac_url": "https://stac.example.com",
+                "urls": ["https://stac.example.com/collections/test"],
             }
         }
     }
