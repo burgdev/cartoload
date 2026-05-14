@@ -1,29 +1,171 @@
 """Pre-warp GeoTIFF files to a target CRS with palette expansion.
 
 Converts source GeoTIFFs (any CRS, possibly paletted) to 3-band RGB
-GeoTIFFs in EPSG:4326, cached alongside the originals. This eliminates
-per-tile CRS transforms and palette expansion during export, dramatically
-improving performance at low zoom levels where large pixel windows would
-otherwise be read, expanded, and then downsampled.
+GeoTIFFs in EPSG:4326 using the ``gdalwarp`` CLI for multi-threaded,
+block-streamed processing. Results are cached alongside the originals.
 
-After pre-warping, individual files are merged into a single mosaic so
-that tiles spanning multiple source GeoTIFFs can read all data at once.
+After pre-warping, individual files are assembled into a VRT (Virtual
+Raster Table) so that tiles spanning multiple source GeoTIFFs can read
+all data at once — without allocating a full mosaic in memory.
 """
 
 from __future__ import annotations
 
+import json
 import logging
-import math
+import shutil
+import subprocess
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-import numpy as np
 import rasterio
+from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 from rasterio.crs import CRS
 from rasterio.enums import ColorInterp
-from rasterio.warp import calculate_default_transform, reproject, Resampling
 
 logger = logging.getLogger(__name__)
+
+# Maximum number of concurrent gdalwarp processes
+MAX_WARP_WORKERS = 4
+
+
+def _geo_overlaps_bbox(
+    path: Path,
+    bbox: tuple[float, float, float, float] | None,
+) -> bool:
+    """Check whether a GeoTIFF's bounds overlap the given bbox.
+
+    Args:
+        path: Path to the GeoTIFF file
+        bbox: (west, south, east, north) in EPSG:4326, or None to accept all
+
+    Returns:
+        True if the file overlaps the bbox (or bbox is None)
+    """
+    if bbox is None:
+        return True
+    try:
+        with rasterio.open(path) as src:
+            if src.crs is None:
+                return True
+            from rasterio.warp import transform_bounds
+
+            file_bounds = transform_bounds(src.crs, CRS.from_epsg(4326), *src.bounds)
+            # file_bounds: (left, bottom, right, top)
+            return not (
+                file_bounds[2] < bbox[0]
+                or file_bounds[0] > bbox[2]
+                or file_bounds[3] < bbox[1]
+                or file_bounds[1] > bbox[3]
+            )
+    except Exception:
+        return True
+
+
+def _run_gdal_translate_expand(
+    source_path: Path,
+    dest_path: Path,
+) -> None:
+    """Run gdal_translate to expand a paletted GeoTIFF to RGB.
+
+    Args:
+        source_path: Input paletted GeoTIFF path
+        dest_path: Output 3-band RGB GeoTIFF path
+    """
+    cmd = [
+        shutil.which("gdal_translate") or "gdal_translate",
+        "-expand",
+        "rgb",
+        "-of",
+        "GTiff",
+        "-co",
+        "COMPRESS=LZW",
+        "-co",
+        "TILED=YES",
+        "-co",
+        "BLOCKXSIZE=256",
+        "-co",
+        "BLOCKYSIZE=256",
+        str(source_path),
+        str(dest_path),
+    ]
+
+    logger.debug("Running: %s", " ".join(cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"gdal_translate failed (exit {result.returncode}): {result.stderr.strip()}"
+        )
+
+
+def _run_gdalwarp(
+    source_path: Path,
+    dest_path: Path,
+    target_crs: str = "EPSG:4326",
+) -> None:
+    """Run gdalwarp CLI to warp a GeoTIFF to the target CRS.
+
+    Uses multi-threaded warping and LZW-compressed tiled output.
+
+    Args:
+        source_path: Input GeoTIFF path (must be RGB if originally paletted)
+        dest_path: Output GeoTIFF path
+        target_crs: Target CRS string
+    """
+    cmd = [
+        shutil.which("gdalwarp") or "gdalwarp",
+        "-overwrite",
+        "-r",
+        "cubic",
+        "-t_srs",
+        target_crs,
+        "-of",
+        "GTiff",
+        "-co",
+        "COMPRESS=LZW",
+        "-co",
+        "TILED=YES",
+        "-co",
+        "BLOCKXSIZE=256",
+        "-co",
+        "BLOCKYSIZE=256",
+        "-wo",
+        "NUM_THREADS=2",
+        "-wm",
+        "512",
+        "-multi",
+        str(source_path),
+        str(dest_path),
+    ]
+
+    logger.debug("Running: %s", " ".join(cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"gdalwarp failed (exit {result.returncode}): {result.stderr.strip()}"
+        )
+
+
+def _run_gdalbuildvrt(vrt_path: Path, source_paths: list[Path]) -> None:
+    """Run gdalbuildvrt CLI to create a VRT from multiple GeoTIFFs.
+
+    Args:
+        vrt_path: Output VRT file path
+        source_paths: Input GeoTIFF paths to mosaic
+    """
+    cmd = [
+        shutil.which("gdalbuildvrt") or "gdalbuildvrt",
+        str(vrt_path),
+        *[str(p) for p in source_paths],
+    ]
+
+    logger.debug("Running: %s", " ".join(cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"gdalbuildvrt failed (exit {result.returncode}): {result.stderr.strip()}"
+        )
 
 
 def prewarp_geotiff(
@@ -49,13 +191,32 @@ def prewarp_geotiff(
     """
     dst_crs = CRS.from_user_input(target_crs)
 
+    # If the source was cleaned up after a previous successful warp,
+    # return the warped file directly.
+    if not source_path.exists():
+        cache_path = source_path.parent / f"{source_path.stem}_4326.tif"
+        cache_meta_path = source_path.parent / f"{source_path.stem}_4326.json"
+        if cache_path.exists() and cache_meta_path.exists():
+            logger.debug("Source deleted, using warped cache: %s", cache_path)
+            return cache_path
+        logger.warning("Source file missing: %s", source_path)
+        return source_path
+
     # Check if source is already in target CRS and not paletted
     with rasterio.open(source_path) as src:
+        if src.crs is None:
+            logger.warning("No CRS in %s, skipping pre-warp", source_path)
+            return source_path
+
         already_ok = (
-            src.crs is not None
-            and src.crs == dst_crs
+            src.crs == dst_crs
             and (len(src.colorinterp) == 0 or src.colorinterp[0] != ColorInterp.palette)
             and src.count >= 3
+        )
+        is_paletted = (
+            src.count == 1
+            and len(src.colorinterp) > 0
+            and src.colorinterp[0] == ColorInterp.palette
         )
 
     if already_ok:
@@ -63,113 +224,90 @@ def prewarp_geotiff(
 
     cache_path = source_path.parent / f"{source_path.stem}_4326.tif"
 
-    # Check cache freshness
-    if not force and cache_path.exists():
+    # Check cache freshness: _4326.tif must exist AND have a completion
+    # marker ({stem}_4326.json).  Without the marker the warp was aborted.
+    cache_meta_path = source_path.parent / f"{source_path.stem}_4326.json"
+    if not force and cache_path.exists() and cache_meta_path.exists():
         if cache_path.stat().st_mtime >= source_path.stat().st_mtime:
             logger.debug("Using cached pre-warp: %s", cache_path)
             return cache_path
 
     logger.info("Pre-warping %s -> %s", source_path.name, cache_path.name)
 
-    with rasterio.open(source_path) as src:
-        src_crs = src.crs
-        if src_crs is None:
-            logger.warning("No CRS in %s, skipping pre-warp", source_path)
-            return source_path
+    warp_input = source_path
+    intermediate_path: Path | None = None
+    if is_paletted:
+        # Palette expansion must be done via gdal_translate (-expand is not
+        # a valid gdalwarp option).  Create an intermediate RGB file first.
+        intermediate_path = source_path.parent / f"{source_path.stem}_rgb.tif"
+        _run_gdal_translate_expand(source_path, intermediate_path)
+        warp_input = intermediate_path
 
-        # Compute output dimensions and transform
-        transform, width, height = calculate_default_transform(
-            src_crs, dst_crs, src.width, src.height, *src.bounds
-        )
+    _run_gdalwarp(warp_input, cache_path, target_crs=target_crs)
 
-        if width <= 0 or height <= 0:
-            logger.warning("Invalid output dimensions for %s, skipping", source_path)
-            return source_path
+    # Clean up intermediate file
+    if intermediate_path and intermediate_path.exists():
+        intermediate_path.unlink()
 
-        # Detect palette
-        is_paletted = (
-            src.count == 1
-            and len(src.colorinterp) > 0
-            and src.colorinterp[0] == ColorInterp.palette
-        )
+    # Write completion marker so we can detect aborted warps
+    cache_meta_path.write_text(json.dumps({"warped": True}))
+    logger.debug("Wrote warp completion marker: %s", cache_meta_path.name)
 
-        # Build colormap LUT if paletted
-        lut: np.ndarray | None = None
-        if is_paletted:
-            try:
-                cm = src.colormap(1)
-                lut = np.zeros((256, 3), dtype=np.uint8)
-                for idx, rgba in cm.items():
-                    if 0 <= idx < 256:
-                        lut[idx] = [rgba[0], rgba[1], rgba[2]]
-            except ValueError:
-                lut = None
-
-        # Write pre-warped file
-        profile = {
-            "driver": "GTiff",
-            "width": width,
-            "height": height,
-            "count": 3,
-            "dtype": "uint8",
-            "crs": dst_crs,
-            "transform": transform,
-            "compress": "lzw",
-            "tiled": True,
-            "blockxsize": 256,
-            "blockysize": 256,
-        }
-
-        with rasterio.open(cache_path, "w", **profile) as dst:
-            if is_paletted and lut is not None:
-                # Warp palette indices first (preserving exact pixel identity),
-                # then expand to RGB. This avoids color fringing that occurs
-                # when warping RGB bands independently — nearest-neighbor on
-                # each band can pick from different source pixels due to
-                # sub-pixel rounding in the CRS transform.
-                indices = src.read(1)  # (H, W) uint8
-                warped_indices = np.zeros((height, width), dtype="uint8")
-                reproject(
-                    source=indices,
-                    destination=warped_indices,
-                    src_transform=src.transform,
-                    src_crs=src_crs,
-                    dst_transform=transform,
-                    dst_crs=dst_crs,
-                    resampling=Resampling.nearest,
-                    dst_nodata=0,
-                )
-
-                # Now expand the warped indices to RGB
-                rgb = lut[warped_indices]  # (H, W, 3)
-                src_rgb = rgb.transpose(2, 0, 1)  # (3, H, W)
-                for band_idx in range(3):
-                    dst.write(src_rgb[band_idx], band_idx + 1)
-            else:
-                # Non-paletted: warp existing bands to RGB
-                src_bands = min(src.count, 3)
-                for band_idx in range(3):
-                    src_band_idx = min(band_idx, src_bands - 1) + 1
-                    band_out = np.zeros((height, width), dtype="uint8")
-                    reproject(
-                        source=rasterio.band(src, src_band_idx),
-                        destination=band_out,
-                        src_transform=src.transform,
-                        src_crs=src_crs,
-                        dst_transform=transform,
-                        dst_crs=dst_crs,
-                        resampling=Resampling.bilinear,
-                        src_nodata=src.nodata,
-                        dst_nodata=0,
-                    )
-                    dst.write(band_out, band_idx + 1)
-
-    logger.info("Pre-warp complete: %s (%dx%d)", cache_path.name, width, height)
+    logger.info("Pre-warp complete: %s", cache_path.name)
     return cache_path
+
+
+def cleanup_after_warp(
+    source_path: Path,
+    warped_path: Path,
+    metadata: dict | None = None,
+) -> None:
+    """Delete the original GeoTIFF after successful warp and write metadata JSON.
+
+    Preserves existing metadata (etag, url, etc.) from the download sidecar
+    and adds warp completion info.
+
+    Args:
+        source_path: Path to the original GeoTIFF (will be deleted)
+        warped_path: Path to the pre-warped GeoTIFF (kept)
+        metadata: Optional dict with cache metadata (etag, url, etc.)
+    """
+    if warped_path == source_path or not source_path.exists():
+        return
+
+    # Read existing download metadata (written by _write_metadata) so we
+    # don't lose etag/url/last_modified when overwriting.
+    meta_path = source_path.parent / f"{source_path.stem}.json"
+    existing: dict = {}
+    if meta_path.exists():
+        try:
+            existing = json.loads(meta_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    from datetime import datetime, timezone
+
+    meta = {
+        **existing,
+        "item_id": source_path.stem,
+        "original_size": source_path.stat().st_size,
+        "warp_date": datetime.now(timezone.utc).isoformat(),
+        **(metadata or {}),
+    }
+    meta_path.write_text(json.dumps(meta, indent=2))
+    logger.debug("Wrote metadata: %s", meta_path.name)
+
+    # Delete original
+    source_path.unlink()
+    logger.debug("Deleted original: %s", source_path.name)
 
 
 def _needs_warp(source_path: Path, target_crs: str = "EPSG:4326") -> bool:
     """Check whether a GeoTIFF needs pre-warping (no fresh cache exists)."""
+    # Source was cleaned up after a previous warp — no warp needed.
+    if not source_path.exists():
+        return False
+
     dst_crs = CRS.from_user_input(target_crs)
 
     with rasterio.open(source_path) as src:
@@ -183,8 +321,10 @@ def _needs_warp(source_path: Path, target_crs: str = "EPSG:4326") -> bool:
             return False
 
     cache_path = source_path.parent / f"{source_path.stem}_4326.tif"
+    cache_meta_path = source_path.parent / f"{source_path.stem}_4326.json"
     if (
         cache_path.exists()
+        and cache_meta_path.exists()
         and cache_path.stat().st_mtime >= source_path.stat().st_mtime
     ):
         return False
@@ -197,14 +337,34 @@ def prewarp_all_geotiffs(
     target_crs: str = "EPSG:4326",
     force: bool = False,
     progress_callback: Callable[[str, str], None] | None = None,
+    cleanup: bool = False,
+    item_metadata: dict[str, dict] | None = None,
+    max_workers: int = MAX_WARP_WORKERS,
+    bbox: tuple[float, float, float, float] | None = None,
+    label: str | None = None,
 ) -> dict[Path, Path]:
     """Pre-warp all GeoTIFFs, returning mapping from original to pre-warped paths.
+
+    Runs up to ``max_workers`` gdalwarp processes in parallel with a Rich
+    progress bar.  Cached files (already in target CRS or fresh _4326.tif)
+    are resolved sequentially before the parallel warp starts.
+
+    Files whose spatial extent does not overlap ``bbox`` are skipped
+    entirely (mapped to themselves, no warp).
 
     Args:
         geotiff_paths: List of original GeoTIFF file paths
         target_crs: Target CRS for pre-warping
         force: Force re-warp even if cache exists
         progress_callback: Called with (stage, description) for progress
+        cleanup: If True, delete originals after successful warp and write
+            metadata JSON sidecar files
+        item_metadata: Optional dict mapping item_id (file stem) to metadata
+            dict (etag, url, etc.) to include in the JSON sidecar. Only
+            used when cleanup=True.
+        max_workers: Maximum concurrent gdalwarp processes (default 4)
+        bbox: Optional (west, south, east, north) in EPSG:4326 to filter
+            files — only GeoTIFFs overlapping this bbox are warped.
 
     Returns:
         Dict mapping original_path -> prewarped_path
@@ -212,24 +372,65 @@ def prewarp_all_geotiffs(
     """
     mapping: dict[Path, Path] = {}
 
-    # Check which files actually need warping
-    to_warp = [p for p in geotiff_paths if force or _needs_warp(p, target_crs)]
-
-    if to_warp and progress_callback:
-        progress_callback(
-            "prewarp", f"Pre-warping {len(to_warp)} GeoTIFF(s) to EPSG:4326..."
-        )
-
-    for i, path in enumerate(to_warp, 1):
-        if progress_callback and len(to_warp) > 1:
-            progress_callback("prewarp", f"Pre-warping GeoTIFF {i}/{len(to_warp)}...")
-
-        mapping[path] = prewarp_geotiff(path, target_crs=target_crs, force=force)
-
-    # Fill in the rest (cached or already in target CRS)
+    # Resolve cached/already-correct files first (no warp needed).
+    # Also skip files outside the bbox.
+    to_warp: list[Path] = []
     for path in geotiff_paths:
-        if path not in mapping:
-            mapping[path] = prewarp_geotiff(path, target_crs=target_crs, force=force)
+        if bbox is not None and not _geo_overlaps_bbox(path, bbox):
+            logger.debug("Skipping %s — outside bbox", path.name)
+            mapping[path] = path
+            continue
+        if not force and not _needs_warp(path, target_crs):
+            warped = prewarp_geotiff(path, target_crs=target_crs, force=force)
+            mapping[path] = warped
+            if cleanup and warped != path and path.exists():
+                meta = (item_metadata or {}).get(path.stem)
+                cleanup_after_warp(path, warped, metadata=meta)
+        else:
+            to_warp.append(path)
+
+    if not to_warp:
+        return mapping
+
+    logger.info(
+        "Pre-warping %d GeoTIFF(s) to %s (%d workers)",
+        len(to_warp),
+        target_crs,
+        max_workers,
+    )
+
+    with Progress(
+        TextColumn(
+            f"[bold blue]Pre-warping {label}" if label else "[bold blue]Pre-warping"
+        ),
+        BarColumn(bar_width=None),
+        TextColumn("{task.completed}/{task.total}"),
+        "•",
+        TimeElapsedColumn(),
+        transient=True,
+    ) as progress:
+        task_id = progress.add_task("warp", total=len(to_warp))
+
+        def _warp_one(path: Path) -> tuple[Path, Path]:
+            warped = prewarp_geotiff(path, target_crs=target_crs, force=force)
+            if cleanup and warped != path:
+                meta = (item_metadata or {}).get(path.stem)
+                cleanup_after_warp(path, warped, metadata=meta)
+            return (path, warped)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_path = {
+                executor.submit(_warp_one, path): path for path in to_warp
+            }
+            for future in as_completed(future_to_path):
+                path = future_to_path[future]
+                try:
+                    orig, warped = future.result()
+                    mapping[orig] = warped
+                except Exception as e:
+                    logger.error("Pre-warp failed for %s: %s", path.name, e)
+                    mapping[path] = path
+                progress.advance(task_id)
 
     return mapping
 
@@ -237,130 +438,45 @@ def prewarp_all_geotiffs(
 def merge_prewarped_geotiffs(
     prewarped_paths: list[Path],
     cache_dir: Path,
-    mosaic_name: str = "mosaic_4326.tif",
+    mosaic_name: str = "mosaic.vrt",
     force: bool = False,
     progress_callback: Callable[[str, str], None] | None = None,
 ) -> Path:
-    """Merge all pre-warped GeoTIFFs into a single mosaic file.
+    """Create a VRT mosaicking all pre-warped GeoTIFFs.
 
     This is essential for low-zoom tiles that span multiple source GeoTIFFs.
-    Without merging, each tile only reads from one GeoTIFF and misses data
-    from others.
+    The VRT is a tiny XML file that virtually references the underlying
+    GeoTIFFs — no pixel data is copied and memory usage is minimal.
 
-    The mosaic is cached in cache_dir. It is re-created only when any source
-    file has a newer mtime than the existing mosaic (or force=True).
+    The VRT is cached in cache_dir. It is re-created only when any source
+    file has a newer mtime than the existing VRT (or force=True).
 
     Args:
         prewarped_paths: List of pre-warped GeoTIFF paths (EPSG:4326, 3-band RGB)
-        cache_dir: Directory to store the mosaic file
-        mosaic_name: Filename for the mosaic (default "mosaic_4326.tif")
-        force: Force re-merge even if cached mosaic exists
+        cache_dir: Directory to store the VRT file
+        mosaic_name: Filename for the VRT (default "mosaic.vrt")
+        force: Force re-merge even if cached VRT exists
         progress_callback: Called with (stage, description) for progress
 
     Returns:
-        Path to the merged mosaic GeoTIFF
+        Path to the VRT file
     """
     if not prewarped_paths:
         raise ValueError("No pre-warped GeoTIFFs to merge")
 
-    mosaic_path = cache_dir / mosaic_name
+    vrt_path = cache_dir / mosaic_name
 
-    # Check if we can skip merging (all source files older than mosaic)
-    if not force and mosaic_path.exists():
-        mosaic_mtime = mosaic_path.stat().st_mtime
-        if all(p.stat().st_mtime <= mosaic_mtime for p in prewarped_paths):
-            logger.debug("Using cached mosaic: %s", mosaic_path)
-            return mosaic_path
+    # Check if we can skip VRT creation (all source files older than VRT)
+    if not force and vrt_path.exists():
+        vrt_mtime = vrt_path.stat().st_mtime
+        if all(p.stat().st_mtime <= vrt_mtime for p in prewarped_paths):
+            logger.debug("Using cached VRT: %s", vrt_path)
+            return vrt_path
 
     if progress_callback:
-        progress_callback("merge", "Merging GeoTIFFs into mosaic...")
+        progress_callback("merge", "Building VRT mosaic...")
 
-    # Open all datasets for merging
-    datasets = [rasterio.open(p) for p in prewarped_paths]
+    _run_gdalbuildvrt(vrt_path, prewarped_paths)
 
-    try:
-        # Compute a shared pixel grid that encompasses all datasets.
-        # Pre-warped files share the same CRS but may have slightly different
-        # pixel resolutions after the CRS warp (e.g., 1.494e-5 vs 1.499e-5).
-        # We use reproject with nearest-neighbor instead of direct pixel copy
-        # to correctly handle sub-pixel misalignment and avoid seam gaps.
-        dst_crs = datasets[0].crs
-
-        # Use the median resolution as the target pixel size
-        resolutions = [abs(ds.res[0]) for ds in datasets]
-        res = sorted(resolutions)[len(resolutions) // 2]
-
-        # Find bounding box across all datasets
-        all_left = min(ds.bounds.left for ds in datasets)
-        all_bottom = min(ds.bounds.bottom for ds in datasets)
-        all_right = max(ds.bounds.right for ds in datasets)
-        all_top = max(ds.bounds.top for ds in datasets)
-
-        # Compute output dimensions
-        dst_width = int(math.ceil((all_right - all_left) / res))
-        dst_height = int(math.ceil((all_top - all_bottom) / res))
-
-        dst_transform = rasterio.transform.from_bounds(
-            all_left,
-            all_bottom,
-            all_right,
-            all_top,
-            dst_width,
-            dst_height,
-        )
-
-        # Allocate output (3 bands, initialized to nodata=0)
-        mosaic_arr = np.zeros((3, dst_height, dst_width), dtype="uint8")
-
-        for ds in datasets:
-            # Use reproject with nearest-neighbor to handle sub-pixel offsets.
-            # This correctly fills every destination pixel from the closest
-            # source pixel, avoiding 1-pixel seam gaps that occur with direct
-            # integer-offset pixel copying when source files have slightly
-            # different resolutions.
-            band_out = np.zeros((3, dst_height, dst_width), dtype="uint8")
-            for band_idx in range(3):
-                reproject(
-                    source=rasterio.band(ds, band_idx + 1),
-                    destination=band_out[band_idx],
-                    src_transform=ds.transform,
-                    src_crs=ds.crs,
-                    dst_transform=dst_transform,
-                    dst_crs=dst_crs,
-                    resampling=Resampling.nearest,
-                    src_nodata=0,
-                    dst_nodata=0,
-                )
-
-            # Only overwrite where the source has data (any band nonzero)
-            valid = np.any(band_out != 0, axis=0)
-            for b in range(3):
-                mosaic_arr[b][valid] = band_out[b][valid]
-
-        profile = {
-            "driver": "GTiff",
-            "width": dst_width,
-            "height": dst_height,
-            "count": 3,
-            "dtype": "uint8",
-            "crs": dst_crs,
-            "transform": dst_transform,
-            "compress": "lzw",
-            "tiled": True,
-            "blockxsize": 256,
-            "blockysize": 256,
-            "nodata": 0,
-        }
-
-        with rasterio.open(mosaic_path, "w", **profile) as dst:
-            dst.write(mosaic_arr)
-
-    finally:
-        for ds in datasets:
-            try:
-                ds.close()
-            except Exception:
-                pass
-
-    logger.info("Mosaic complete: %s (%dx%d)", mosaic_path.name, dst_width, dst_height)
-    return mosaic_path
+    logger.info("VRT mosaic complete: %s", vrt_path.name)
+    return vrt_path

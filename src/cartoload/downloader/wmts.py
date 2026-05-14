@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import logging
 import math
 import os
@@ -22,6 +21,7 @@ from rich.progress import (
 )
 
 from cartoload.downloader.base import BaseDownloader
+from cartoload.downloader.cache_key import migrate_cache_key, url_to_cache_key
 
 logger = logging.getLogger(__name__)
 
@@ -86,16 +86,6 @@ class _UrlSelector:
                 )
 
 
-def _url_cache_key(url: str) -> str:
-    """Compute a short filesystem-safe cache key from a URL template.
-
-    Uses the first 12 hex chars of a SHA-256 hash. This differentiates
-    tile sets that share a source but differ in any template variable
-    (layer, extension, etc.).
-    """
-    return hashlib.sha256(url.encode()).hexdigest()[:12]
-
-
 class WMTSDownloader(BaseDownloader):
     """Downloads tiles from WMTS/XYZ tile services."""
 
@@ -136,14 +126,18 @@ class WMTSDownloader(BaseDownloader):
         if urls and len(urls) > 1 and max_workers == 4:
             self._max_workers = max(4, len(all_urls) * 2)
 
-        # Cache key: short hash of the resolved URL template to differentiate
+        # Cache key: human-readable key derived from URL path to differentiate
         # layers that share the same source but have different template args
         # (e.g. different WMTS layers, extensions, or other source_args).
-        self._cache_key = _url_cache_key(url_template) if url_template else ""
+        self._cache_key = url_to_cache_key(url_template) if url_template else ""
+
+        # Auto-migrate old hash-based cache directories to new format
+        if self._cache_key:
+            migrate_cache_key(self._cache_dir / self._source_id, self._cache_key)
 
     @property
     def source_cache_dir(self) -> Path:
-        """Cache directory for this source (includes cache key hash if set)."""
+        """Cache directory for this source (includes cache key if set)."""
         base = self._cache_dir / self._source_id
         if self._cache_key:
             return base / self._cache_key

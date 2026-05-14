@@ -26,9 +26,11 @@ from pathlib import Path
 
 import numpy as np
 import rasterio
+import warnings
 from PIL import Image
 from rasterio.crs import CRS
 from rasterio.enums import ColorInterp
+from rasterio.errors import NotGeoreferencedWarning
 from rasterio.transform import rowcol
 from rasterio.warp import reproject, Resampling
 
@@ -239,18 +241,20 @@ def read_tile_from_geotiff(
         nodata = src.nodata
 
         dst_data = np.zeros((3, TILE_SIZE, TILE_SIZE), dtype="uint8")
-        reproject(
-            source=src_data,
-            destination=dst_data,
-            src_transform=src_transform,
-            src_crs=src_crs,
-            dst_transform=dst_transform,
-            dst_crs=dst_crs,
-            resampling=Resampling.bilinear,
-            src_nodata=nodata,
-            dst_nodata=0,
-            init_dest_nodata=True,
-        )
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=NotGeoreferencedWarning)
+            reproject(
+                source=src_data,
+                destination=dst_data,
+                src_transform=src_transform,
+                src_crs=src_crs,
+                dst_transform=dst_transform,
+                dst_crs=dst_crs,
+                resampling=Resampling.cubic,
+                src_nodata=nodata,
+                dst_nodata=0,
+                init_dest_nodata=True,
+            )
 
         # Free source data promptly — no longer needed after warp
         del src_data
@@ -341,16 +345,18 @@ def read_tile_from_warped_geotiff(
         )
 
         dst_data = np.zeros((3, TILE_SIZE, TILE_SIZE), dtype="uint8")
-        reproject(
-            source=src_data,
-            destination=dst_data,
-            src_transform=src_transform,
-            src_crs=src.crs,
-            dst_transform=dst_transform,
-            dst_crs=src.crs,  # Same CRS, but reproject handles the spatial mapping
-            resampling=Resampling.bilinear,
-            init_dest_nodata=True,
-        )
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=NotGeoreferencedWarning)
+            reproject(
+                source=src_data,
+                destination=dst_data,
+                src_transform=src_transform,
+                src_crs=src.crs,
+                dst_transform=dst_transform,
+                dst_crs=src.crs,  # Same CRS, but reproject handles the spatial mapping
+                resampling=Resampling.cubic,
+                init_dest_nodata=True,
+            )
 
         del src_data
 

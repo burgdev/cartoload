@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import hashlib
+import json
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -14,6 +15,8 @@ from rich.progress import (
     TimeRemainingColumn,
     TransferSpeedColumn,
 )
+
+from cartoload.downloader.cache_key import migrate_cache_key, url_to_cache_key
 
 if TYPE_CHECKING:
     from cartoload.config import LayerConfig, SourceConfig
@@ -42,9 +45,17 @@ class STACDownloader:
     ``urls`` (resolved with ``${layer}`` substitution) and ``source_args.layer``.
     """
 
-    def __init__(self, cache_dir: str | Path):
+    def __init__(
+        self,
+        cache_dir: str | Path,
+        max_workers: int = 6,
+        *,
+        offline: bool = False,
+    ):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._max_workers = max_workers
+        self._offline = offline
 
     def run(
         self,
@@ -105,30 +116,63 @@ class STACDownloader:
         downloaded_files: list[Path] = []
         skipped_count = 0
 
-        with Progress(
-            TextColumn("[bold blue]{task.fields[filename]}", justify="right"),
-            BarColumn(bar_width=None),
-            "[progress.percentage]{task.percentage:>3.1f}%",
-            "•",
-            DownloadColumn(),
-            "•",
-            TransferSpeedColumn(),
-            "•",
-            TimeRemainingColumn(),
-        ) as progress:
-            for item_id, asset_url, expected_size in items:
-                cache_path = self._get_cache_path(
-                    source_config.id, resolved_url, item_id, asset_filter
-                )
+        # Phase 1: check cache/freshness for all items (sequential — fast HEAD requests)
+        to_download: list[tuple[str, str, int | None, Path]] = []
+        for item_id, asset_url, expected_size in items:
+            cache_path = self._get_cache_path(
+                source_config.id, resolved_url, item_id, asset_filter
+            )
 
-                if self._is_cached(cache_path, expected_size):
-                    logger.debug("Skipping cached file: %s", cache_path.name)
-                    downloaded_files.append(cache_path)
-                    skipped_count += 1
-                    continue
-
-                self.download(asset_url, cache_path, expected_size, progress)
+            if self._is_cached(cache_path, expected_size):
+                if not self._offline:
+                    freshness = self._check_freshness(asset_url, cache_path)
+                    if freshness is False:
+                        logger.info("Re-downloading stale file: %s", cache_path.name)
+                        to_download.append(
+                            (item_id, asset_url, expected_size, cache_path)
+                        )
+                        continue
+                logger.debug("Skipping cached file: %s", cache_path.name)
                 downloaded_files.append(cache_path)
+                skipped_count += 1
+                continue
+
+            to_download.append((item_id, asset_url, expected_size, cache_path))
+
+        # Phase 2: download in parallel
+        if to_download:
+            with Progress(
+                TextColumn("[bold blue]{task.fields[filename]}", justify="right"),
+                BarColumn(bar_width=None),
+                "[progress.percentage]{task.percentage:>3.1f}%",
+                "•",
+                DownloadColumn(),
+                "•",
+                TransferSpeedColumn(),
+                "•",
+                TimeRemainingColumn(),
+                transient=True,
+            ) as progress:
+                with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
+                    future_to_item = {
+                        executor.submit(
+                            self._download_item,
+                            asset_url,
+                            cache_path,
+                            expected_size,
+                            progress,
+                        ): (item_id, cache_path)
+                        for item_id, asset_url, expected_size, cache_path in to_download
+                    }
+                    for future in as_completed(future_to_item):
+                        item_id, cache_path = future_to_item[future]
+                        try:
+                            future.result()
+                            downloaded_files.append(cache_path)
+                        except Exception as e:
+                            logger.error(
+                                "Failed to download STAC item '%s': %s", item_id, e
+                            )
 
         logger.info(
             "Download complete: %d total files (%d downloaded, %d cached)",
@@ -184,6 +228,25 @@ class STACDownloader:
         for feature in features:
             item_id = feature.get("id", "unknown")
             assets = feature.get("assets", {})
+
+            # Client-side bbox filter: skip items whose footprint doesn't
+            # overlap the requested bbox.  STAC items include a "bbox"
+            # field [west, south, east, north] that describes the item's
+            # spatial extent.
+            item_bbox = feature.get("bbox")
+            if item_bbox and len(item_bbox) == 4:
+                if (
+                    item_bbox[2] < bbox[0]  # item east < query west
+                    or item_bbox[0] > bbox[2]  # item west > query east
+                    or item_bbox[3] < bbox[1]  # item north < query south
+                    or item_bbox[1] > bbox[3]  # item south > query north
+                ):
+                    logger.debug(
+                        "STAC item '%s' (bbox %s) does not overlap query bbox, skipping",
+                        item_id,
+                        item_bbox,
+                    )
+                    continue
 
             geotiff_url = _find_geotiff_asset(assets, asset_filter)
             if geotiff_url is None:
@@ -256,6 +319,20 @@ class STACDownloader:
 
         logger.debug("Downloaded %s (%s bytes)", dest_path.name, f"{actual_size:,}")
 
+    def _download_item(
+        self,
+        asset_url: str,
+        cache_path: Path,
+        expected_size: int | None,
+        progress: Progress,
+    ) -> None:
+        """Download a single STAC item and write metadata.
+
+        Used as a worker callable for ThreadPoolExecutor.
+        """
+        self.download(asset_url, cache_path, expected_size, progress)
+        self._write_metadata(cache_path, asset_url)
+
     def _get_cache_path(
         self,
         source_id: str,
@@ -265,44 +342,179 @@ class STACDownloader:
     ) -> Path:
         """Generate cache file path for a STAC item.
 
-        Uses the same cache-key strategy as WMTS: a SHA-256 hash of
-        the resolved URL (with asset_filter appended) produces a short
-        directory name that uniquely identifies this source+filter
-        combination.
+        Uses the same human-readable cache-key strategy as WMTS:
+        url_to_cache_key produces a filesystem-safe directory name from
+        the URL path, with the asset filter appended as extra.
         """
         safe_item_id = item_id.replace("/", "_").replace("\\", "_")
-        # Build the cache key from URL + asset_filter, matching WMTS pattern
-        key_input = collection_url
+        # Build extra string from asset filter
+        extra = ""
         if asset_filter:
-            filter_str = ",".join(f"{k}={v}" for k, v in sorted(asset_filter.items()))
-            key_input = f"{key_input}|{filter_str}"
-        cache_key = hashlib.sha256(key_input.encode()).hexdigest()[:12]
-        base = self.cache_dir / source_id / cache_key
-        return base / f"{safe_item_id}.tif"
+            extra = ",".join(f"{k}={v}" for k, v in sorted(asset_filter.items()))
+        cache_key = url_to_cache_key(collection_url, extra=extra)
+        base = self.cache_dir / source_id
+        migrate_cache_key(base, cache_key)
+        return base / cache_key / f"{safe_item_id}.tif"
 
     def _is_cached(self, cache_path: Path, expected_size: int | None) -> bool:
-        """Check if a file is already cached and valid."""
-        if not cache_path.exists():
-            return False
+        """Check if a file is already cached and valid.
 
-        actual_size = cache_path.stat().st_size
+        Checks for the original .tif file first. If the original was cleaned
+        up after pre-warping, checks for the _4326.tif warped version and
+        the .json metadata sidecar.
+        """
+        if cache_path.exists():
+            actual_size = cache_path.stat().st_size
 
-        if actual_size == 0:
-            logger.warning("Cached file is empty, will re-download: %s", cache_path)
-            cache_path.unlink()
-            return False
+            if actual_size == 0:
+                logger.warning("Cached file is empty, will re-download: %s", cache_path)
+                cache_path.unlink()
+                return False
 
-        if expected_size and actual_size < expected_size:
-            logger.warning(
-                "Cached file is incomplete (%d/%d bytes), will re-download: %s",
-                actual_size,
-                expected_size,
-                cache_path,
+            if expected_size and actual_size < expected_size:
+                logger.warning(
+                    "Cached file is incomplete (%d/%d bytes), will re-download: %s",
+                    actual_size,
+                    expected_size,
+                    cache_path,
+                )
+                cache_path.unlink()
+                return False
+
+            # Require metadata sidecar — without it the download was incomplete
+            # (e.g. aborted before _write_metadata ran).
+            meta_path = cache_path.parent / f"{cache_path.stem}.json"
+            if not meta_path.exists():
+                logger.debug(
+                    "Cached file has no metadata sidecar, will re-download: %s",
+                    cache_path.name,
+                )
+                cache_path.unlink()
+                return False
+
+            return True
+
+        # Original may have been cleaned up after pre-warping.
+        # Check if the warped version, metadata, and warp completion marker exist.
+        warped_path = cache_path.parent / f"{cache_path.stem}_4326.tif"
+        meta_path = cache_path.parent / f"{cache_path.stem}.json"
+        warp_marker = cache_path.parent / f"{cache_path.stem}_4326.json"
+        if warped_path.exists() and meta_path.exists() and warp_marker.exists():
+            logger.debug(
+                "Original cleaned up, using warped cache: %s", warped_path.name
             )
-            cache_path.unlink()
-            return False
+            return True
 
-        return True
+        return False
+
+    def _check_freshness(self, asset_url: str, cache_path: Path) -> bool | None:
+        """Check if a cached STAC item is still fresh via HTTP HEAD.
+
+        Returns:
+            True if fresh (no re-download needed)
+            False if stale (should re-download)
+            None if freshness cannot be determined (fall back to existence check)
+        """
+        meta_path = cache_path.parent / f"{cache_path.stem}.json"
+        if not meta_path.exists():
+            return None
+
+        try:
+            cached_meta = json.loads(meta_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return None
+
+        cached_etag = _strip_etag_quotes(cached_meta.get("etag", ""))
+        cached_last_modified = cached_meta.get("last_modified", "")
+
+        try:
+            resp = requests.head(asset_url, timeout=10, allow_redirects=True)
+        except requests.RequestException:
+            logger.debug(
+                "HEAD request failed for %s, skipping freshness check", asset_url
+            )
+            return None
+
+        if resp.status_code == 405:
+            logger.debug(
+                "HEAD not supported for %s, skipping freshness check", asset_url
+            )
+            return None
+
+        if not resp.ok:
+            logger.debug(
+                "HEAD returned %d for %s, skipping freshness check",
+                resp.status_code,
+                asset_url,
+            )
+            return None
+
+        remote_etag = _strip_etag_quotes(resp.headers.get("ETag", ""))
+        remote_last_modified = resp.headers.get("Last-Modified", "")
+
+        if cached_etag and remote_etag:
+            if cached_etag == remote_etag:
+                logger.debug("ETag match for %s, item is fresh", cache_path.name)
+                return True
+            else:
+                logger.info("ETag mismatch for %s, item is stale", cache_path.name)
+                return False
+
+        if cached_last_modified and remote_last_modified:
+            if cached_last_modified == remote_last_modified:
+                logger.debug(
+                    "Last-Modified match for %s, item is fresh", cache_path.name
+                )
+                return True
+            else:
+                logger.info(
+                    "Last-Modified mismatch for %s, item is stale", cache_path.name
+                )
+                return False
+
+        # No comparable headers — can't determine freshness
+        return None
+
+    def _write_metadata(self, cache_path: Path, asset_url: str) -> None:
+        """Write metadata JSON sidecar with ETag/Last-Modified from a HEAD request."""
+        from datetime import datetime, timezone
+
+        meta: dict = {
+            "item_id": cache_path.stem,
+            "url": asset_url,
+            "download_date": datetime.now(timezone.utc).isoformat(),
+        }
+
+        try:
+            resp = requests.head(asset_url, timeout=10, allow_redirects=True)
+            if resp.ok:
+                meta["etag"] = _strip_etag_quotes(resp.headers.get("ETag", ""))
+                meta["last_modified"] = resp.headers.get("Last-Modified", "")
+            else:
+                logger.debug(
+                    "HEAD returned %d, storing metadata without cache headers",
+                    resp.status_code,
+                )
+        except requests.RequestException:
+            logger.debug(
+                "HEAD failed for %s, storing metadata without cache headers", asset_url
+            )
+
+        meta_path = cache_path.parent / f"{cache_path.stem}.json"
+        meta_path.write_text(json.dumps(meta, indent=2))
+        logger.debug("Wrote metadata: %s", meta_path.name)
+
+
+def _strip_etag_quotes(etag: str) -> str:
+    """Strip surrounding double quotes from an ETag value.
+
+    HTTP ETags are often quoted (e.g. ``"abc123"``).  Stripping the
+    quotes ensures consistent storage and comparison regardless of
+    whether the server includes them.
+    """
+    if etag.startswith('"') and etag.endswith('"'):
+        return etag[1:-1]
+    return etag
 
 
 def _find_geotiff_asset(

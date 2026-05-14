@@ -1,5 +1,45 @@
 ## ADDED Requirements
 
+### Requirement: STAC ETag-based staleness detection
+
+The system SHALL use HTTP HEAD requests to check ETag and Last-Modified headers for STAC GeoTIFF assets before downloading. Cached items SHALL be validated against stored metadata to detect remote changes.
+
+#### Scenario: HEAD request returns ETag matching cached value
+
+- **WHEN** a STAC item has a cached `.json` metadata file with an `etag` field
+- **AND** a HEAD request to the asset URL returns an `ETag` header matching the cached value
+- **THEN** the system SHALL skip re-downloading the asset
+- **AND** the system SHALL skip re-warping if the pre-warped file exists and is fresh
+
+#### Scenario: HEAD request returns new ETag
+
+- **WHEN** a STAC item has a cached `.json` metadata file with an `etag` field
+- **AND** a HEAD request returns an `ETag` header that does NOT match the cached value
+- **THEN** the system SHALL re-download the asset
+- **AND** the system SHALL update the `.json` metadata with the new ETag
+- **AND** the system SHALL re-warp the new file
+
+#### Scenario: HEAD request returns Last-Modified but no ETag
+
+- **WHEN** a HEAD request does not return an `ETag` header
+- **AND** returns a `Last-Modified` header that matches the cached value
+- **THEN** the system SHALL treat the item as unchanged and skip re-downloading
+
+#### Scenario: HEAD request not supported (HTTP 405)
+
+- **WHEN** a HEAD request to the asset URL returns HTTP 405
+- **THEN** the system SHALL fall back to file-existence checking only (current behavior)
+- **AND** the system SHALL log a debug message about the unsupported HEAD method
+
+#### Scenario: New item with no cached metadata
+
+- **WHEN** a STAC item has no cached `.json` metadata file
+- **THEN** the system SHALL download the asset
+- **AND** after successful download, SHALL issue a HEAD request to capture ETag/Last-Modified
+- **AND** SHALL write the `.json` metadata file
+
+## MODIFIED Requirements
+
 ### Requirement: Download cache structure
 
 The system SHALL maintain a download cache for raw source tiles, organized by source, URL-path-derived cache key, zoom level, and tile coordinates. The cache key SHALL be produced by the following algorithm:
@@ -60,68 +100,3 @@ For STAC sources, after successful pre-warping, the original `.tif` file SHALL b
 - **WHEN** a URL template contains `${x}`, `${y}`, `${z}`, `${zoom}` (or `$x`, `$y`, `$z`, `$zoom`)
 - **THEN** these variables SHALL be removed before encoding the cache key
 - **AND** resulting empty path segments SHALL be removed (no empty segments between separators)
-
-### Requirement: STAC ETag-based staleness detection
-
-The system SHALL use HTTP HEAD requests to check ETag and Last-Modified headers for STAC GeoTIFF assets before downloading. Cached items SHALL be validated against stored metadata to detect remote changes.
-
-#### Scenario: HEAD request returns ETag matching cached value
-
-- **WHEN** a STAC item has a cached `.json` metadata file with an `etag` field
-- **AND** a HEAD request to the asset URL returns an `ETag` header matching the cached value
-- **THEN** the system SHALL skip re-downloading the asset
-- **AND** the system SHALL skip re-warping if the pre-warped file exists and is fresh
-
-#### Scenario: HEAD request returns new ETag
-
-- **WHEN** a STAC item has a cached `.json` metadata file with an `etag` field
-- **AND** a HEAD request returns an `ETag` header that does NOT match the cached value
-- **THEN** the system SHALL re-download the asset
-- **AND** the system SHALL update the `.json` metadata with the new ETag
-- **AND** the system SHALL re-warp the new file
-
-#### Scenario: HEAD request returns Last-Modified but no ETag
-
-- **WHEN** a HEAD request does not return an `ETag` header
-- **AND** returns a `Last-Modified` header that matches the cached value
-- **THEN** the system SHALL treat the item as unchanged and skip re-downloading
-
-#### Scenario: HEAD request not supported (HTTP 405)
-
-- **WHEN** a HEAD request to the asset URL returns HTTP 405
-- **THEN** the system SHALL fall back to file-existence checking only (current behavior)
-- **AND** the system SHALL log a debug message about the unsupported HEAD method
-
-#### Scenario: New item with no cached metadata
-
-- **WHEN** a STAC item has no cached `.json` metadata file
-- **THEN** the system SHALL download the asset
-- **AND** after successful download, SHALL issue a HEAD request to capture ETag/Last-Modified
-- **AND** SHALL write the `.json` metadata file
-
-### Requirement: Per-tile reprojection performed in-process
-
-The system SHALL reproject tiles in-process using rasterio without writing intermediate files to disk. No reprojection cache SHALL be maintained.
-
-#### Scenario: Reprojection always performed in-process
-
-- **WHEN** a tile requires reprojection from EPSG:3857 to EPSG:4326
-- **THEN** the system SHALL warp the tile in-process via rasterio and return JPEG bytes
-- **AND** no TIFF or other intermediate file SHALL be written to disk
-- **AND** re-warping on subsequent builds is acceptable at ~2.4ms/tile
-
-#### Scenario: No reprojection cache directory created
-
-- **WHEN** the system processes tiles requiring reprojection
-- **THEN** no `cache/{source}_4326/` directory SHALL be created
-- **AND** no `.tif` files SHALL be written as reprojection intermediates
-
-### Requirement: Skip reprojection for EPSG:4326 sources
-
-The system SHALL NOT create reprojection cache entries for tiles that are already in EPSG:4326. These tiles SHALL be used directly from the download cache.
-
-#### Scenario: Source already in EPSG:4326
-
-- **WHEN** a source's CRS is declared as EPSG:4326 in the config
-- **THEN** no reprojection SHALL occur for that source
-- **AND** the download cache tiles SHALL be used directly in the fast pipeline

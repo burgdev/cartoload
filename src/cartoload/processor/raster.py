@@ -173,6 +173,8 @@ class RasterProcessor:
         """
         cmd = [
             "gdalwarp",
+            "-r",
+            "cubic",
             "-t_srs",
             self.target_crs,
             "-of",

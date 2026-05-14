@@ -222,6 +222,9 @@ main.add_command(analyze)
 @click.option("-o", "--output-dir", default=None, help="Default: ./output")
 @click.option("-C", "--cache-dir", default=None, help="Default: ./cache")
 @click.option("--no-download", is_flag=True, help="Use existing cache only")
+@click.option(
+    "--offline", is_flag=True, help="Skip freshness checks, use cached files as-is"
+)
 @click.option("-f", "--force", is_flag=True, help="Overwrite existing output files")
 @click.option("--dry-run", is_flag=True, help="Show build plan without executing")
 @click.option(
@@ -274,6 +277,7 @@ def build(
     output_dir: str | None,
     cache_dir: str | None,
     no_download: bool,
+    offline: bool,
     force: bool,
     dry_run: bool,
     cache_warmup: bool,
@@ -432,6 +436,7 @@ def build(
                     cache,
                     out_dir,
                     no_download=no_download,
+                    offline=offline,
                     force=force,
                     bounds_override=extent,
                     zoom_override=zoom_list,

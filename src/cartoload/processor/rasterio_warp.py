@@ -16,6 +16,7 @@ import numpy as np
 import rasterio
 from PIL import Image
 from rasterio.crs import CRS
+from rasterio.errors import NotGeoreferencedWarning
 from rasterio.transform import Affine
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 
@@ -196,7 +197,7 @@ def _warp_to_rgba(
     bottom = top + src_transform.e * src_height
 
     with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", category=UserWarning)
+        warnings.filterwarnings("ignore", category=NotGeoreferencedWarning)
         with rasterio.open(source_path) as src:
             src_data = src.read()
 
@@ -241,7 +242,7 @@ def _warp_to_rgba(
                 src_crs=src_crs,
                 dst_transform=dst_transform,
                 dst_crs=dst_crs,
-                resampling=Resampling.bilinear,
+                resampling=Resampling.cubic,
             )
 
     # Convert to PIL RGBA Image
@@ -277,7 +278,7 @@ def _warp_to_jpeg(
     bottom = top + src_transform.e * src_height  # e is negative
 
     with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", category=UserWarning)
+        warnings.filterwarnings("ignore", category=NotGeoreferencedWarning)
         with rasterio.open(source_path) as src:
             src_data = src.read()
 
@@ -311,7 +312,7 @@ def _warp_to_jpeg(
                 src_crs=src_crs,
                 dst_transform=dst_transform,
                 dst_crs=dst_crs,
-                resampling=Resampling.bilinear,
+                resampling=Resampling.cubic,
             )
 
     # Encode to JPEG via PIL (rasterio's MemoryFile ignores JPEG_QUALITY)
