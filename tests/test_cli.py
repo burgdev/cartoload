@@ -26,22 +26,14 @@ from cartoload.pipeline import DownloadError
 # ---------------------------------------------------------------------------
 
 
-def _make_config_files(
+def _make_config_file(
     tmp_path: Path,
     source_id: str = "test_src",
     source_type: str = "stac",
     layer_id: str = "test_layer",
     **layer_overrides,
-) -> tuple[Path, Path]:
-    """Create minimal source + layer config YAML files."""
-    sources_data = {
-        "sources": {
-            source_id: {
-                "type": source_type,
-                "urls": ["https://stac.example.com/collections/test"],
-            }
-        }
-    }
+) -> Path:
+    """Create a unified config YAML file."""
     layer_def = {
         "name": "Test Layer",
         "source": source_id,
@@ -50,16 +42,20 @@ def _make_config_files(
         "output": "test_layer.img",
     }
     layer_def.update(layer_overrides)
-    layers_data = {
+    config_data = {
+        "sources": {
+            source_id: {
+                "type": source_type,
+                "urls": ["https://stac.example.com/collections/test"],
+            }
+        },
         "bounds": {"west": 5.0, "south": 45.0, "east": 10.0, "north": 48.0},
         "layers": {layer_id: layer_def},
     }
 
-    src_file = tmp_path / "sources.yaml"
-    src_file.write_text(yaml.dump(sources_data))
-    lyr_file = tmp_path / "layers.yaml"
-    lyr_file.write_text(yaml.dump(layers_data))
-    return src_file, lyr_file
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(yaml.dump(config_data))
+    return cfg_file
 
 
 @pytest.fixture
@@ -180,24 +176,22 @@ class TestHumanSize:
 
 class TestBuildCommand:
     def test_requires_layer_flag(self, runner, tmp_path):
-        src, lyr = _make_config_files(tmp_path)
+        cfg = _make_config_file(tmp_path)
         result = runner.invoke(
             main,
-            ["build", "--sources", str(src), "--layers", str(lyr)],
+            ["build", "-c", str(cfg)],
         )
         assert result.exit_code != 0
         assert "--layer is required" in result.output
 
     def test_missing_layer_id(self, runner, tmp_path):
-        src, lyr = _make_config_files(tmp_path, layer_id="real_layer")
+        cfg = _make_config_file(tmp_path, layer_id="real_layer")
         result = runner.invoke(
             main,
             [
                 "build",
-                "--sources",
-                str(src),
-                "--layers",
-                str(lyr),
+                "-c",
+                str(cfg),
                 "--layer",
                 "nonexistent",
             ],
@@ -207,7 +201,7 @@ class TestBuildCommand:
 
     @patch("cartoload.cli.asyncio.run")
     def test_build_invokes_pipeline(self, mock_asyncio_run, runner, tmp_path):
-        src, lyr = _make_config_files(tmp_path)
+        cfg = _make_config_file(tmp_path)
 
         # Make asyncio.run return a fake output path
         output_path = tmp_path / "output" / "test_layer.img"
@@ -219,15 +213,13 @@ class TestBuildCommand:
             main,
             [
                 "build",
-                "--sources",
-                str(src),
-                "--layers",
-                str(lyr),
+                "-c",
+                str(cfg),
                 "--layer",
                 "test_layer",
                 "--output-dir",
                 str(tmp_path / "output"),
-                "--cache-dir",
+                "-C",
                 str(tmp_path / "cache"),
             ],
         )
@@ -237,7 +229,7 @@ class TestBuildCommand:
 
     @patch("cartoload.cli.asyncio.run")
     def test_build_with_no_download(self, mock_asyncio_run, runner, tmp_path):
-        src, lyr = _make_config_files(tmp_path)
+        cfg = _make_config_file(tmp_path)
         output_path = tmp_path / "output" / "test_layer.img"
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"\x00" * 512)
@@ -247,10 +239,8 @@ class TestBuildCommand:
             main,
             [
                 "build",
-                "--sources",
-                str(src),
-                "--layers",
-                str(lyr),
+                "-c",
+                str(cfg),
                 "--layer",
                 "test_layer",
                 "--no-download",
@@ -262,15 +252,13 @@ class TestBuildCommand:
 
     @patch("cartoload.cli.asyncio.run", side_effect=DownloadError("src", "fail"))
     def test_build_download_error(self, mock_run, runner, tmp_path):
-        src, lyr = _make_config_files(tmp_path)
+        cfg = _make_config_file(tmp_path)
         result = runner.invoke(
             main,
             [
                 "build",
-                "--sources",
-                str(src),
-                "--layers",
-                str(lyr),
+                "-c",
+                str(cfg),
                 "--layer",
                 "test_layer",
             ],
@@ -280,15 +268,13 @@ class TestBuildCommand:
 
     @patch("cartoload.cli.asyncio.run", side_effect=Exception("unexpected"))
     def test_build_unexpected_error(self, mock_run, runner, tmp_path):
-        src, lyr = _make_config_files(tmp_path)
+        cfg = _make_config_file(tmp_path)
         result = runner.invoke(
             main,
             [
                 "build",
-                "--sources",
-                str(src),
-                "--layers",
-                str(lyr),
+                "-c",
+                str(cfg),
                 "--layer",
                 "test_layer",
             ],
@@ -305,18 +291,20 @@ class TestBuildCommand:
 
 class TestDownloadCommand:
     def test_requires_layer_flag(self, runner, tmp_path):
-        src, lyr = _make_config_files(tmp_path)
+        cfg = _make_config_file(tmp_path)
         result = runner.invoke(
             main,
-            ["download", "--sources", str(src), "--layers", str(lyr)],
+            ["download", "-c", str(cfg)],
         )
         assert result.exit_code != 0
         assert "--layer is required" in result.output
 
     @patch("cartoload.cli.get_downloader")
     def test_download_invokes_downloader(self, mock_get_dl, runner, tmp_path):
-        src, lyr = _make_config_files(tmp_path)
-        mock_dl = MagicMock()
+        from cartoload.downloader.stac import STACDownloader
+
+        cfg = _make_config_file(tmp_path)
+        mock_dl = MagicMock(spec=STACDownloader)
         tile = tmp_path / "cache" / "tile.tif"
         tile.parent.mkdir(parents=True, exist_ok=True)
         tile.write_bytes(b"\x00" * 1024)
@@ -327,13 +315,11 @@ class TestDownloadCommand:
             main,
             [
                 "download",
-                "--sources",
-                str(src),
-                "--layers",
-                str(lyr),
+                "-c",
+                str(cfg),
                 "--layer",
                 "test_layer",
-                "--cache-dir",
+                "-C",
                 str(tmp_path / "cache"),
             ],
         )
@@ -342,15 +328,13 @@ class TestDownloadCommand:
         mock_dl.run.assert_called_once()
 
     def test_download_missing_layer(self, runner, tmp_path):
-        src, lyr = _make_config_files(tmp_path, layer_id="other")
+        cfg = _make_config_file(tmp_path, layer_id="other")
         result = runner.invoke(
             main,
             [
                 "download",
-                "--sources",
-                str(src),
-                "--layers",
-                str(lyr),
+                "-c",
+                str(cfg),
                 "--layer",
                 "nonexistent",
             ],
@@ -427,9 +411,7 @@ class TestErrorMessages:
             main,
             [
                 "build",
-                "--sources",
-                str(tmp_path / "missing.yaml"),
-                "--layers",
+                "-c",
                 str(tmp_path / "missing.yaml"),
                 "--layer",
                 "x",
@@ -453,10 +435,8 @@ class TestErrorMessages:
             main,
             [
                 "build",
-                "--sources",
+                "-c",
                 str(src),
-                "--layers",
-                str(tmp_path / "layers.yaml"),
                 "--layer",
                 "x",
             ],
@@ -468,15 +448,13 @@ class TestErrorMessages:
         assert result.exit_code != 0
 
     def test_list_valid_config(self, runner, tmp_path):
-        src, lyr = _make_config_files(tmp_path)
+        cfg = _make_config_file(tmp_path)
         result = runner.invoke(
             main,
             [
                 "list",
-                "--sources",
-                str(src),
-                "--layers",
-                str(lyr),
+                "-c",
+                str(cfg),
             ],
         )
         assert result.exit_code == 0
@@ -492,7 +470,7 @@ class TestErrorMessages:
 class TestBuildExtentOverride:
     @patch("cartoload.cli.asyncio.run")
     def test_bbox_override(self, mock_asyncio_run, runner, tmp_path):
-        src, lyr = _make_config_files(tmp_path)
+        cfg = _make_config_file(tmp_path)
         output_path = tmp_path / "output" / "test_layer.img"
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"\x00" * 1024)
@@ -502,10 +480,8 @@ class TestBuildExtentOverride:
             main,
             [
                 "build",
-                "--sources",
-                str(src),
-                "--layers",
-                str(lyr),
+                "-c",
+                str(cfg),
                 "--layer",
                 "test_layer",
                 "--bbox",
@@ -521,7 +497,7 @@ class TestBuildExtentOverride:
 
     @patch("cartoload.cli.asyncio.run")
     def test_center_override(self, mock_asyncio_run, runner, tmp_path):
-        src, lyr = _make_config_files(tmp_path)
+        cfg = _make_config_file(tmp_path)
         output_path = tmp_path / "output" / "test_layer.img"
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"\x00" * 1024)
@@ -531,10 +507,8 @@ class TestBuildExtentOverride:
             main,
             [
                 "build",
-                "--sources",
-                str(src),
-                "--layers",
-                str(lyr),
+                "-c",
+                str(cfg),
                 "--layer",
                 "test_layer",
                 "--lng",
@@ -552,15 +526,13 @@ class TestBuildExtentOverride:
         assert result.exit_code == 0
 
     def test_bbox_exceeds_layer_bounds(self, runner, tmp_path):
-        src, lyr = _make_config_files(tmp_path)
+        cfg = _make_config_file(tmp_path)
         result = runner.invoke(
             main,
             [
                 "build",
-                "--sources",
-                str(src),
-                "--layers",
-                str(lyr),
+                "-c",
+                str(cfg),
                 "--layer",
                 "test_layer",
                 "--bbox",
@@ -574,15 +546,13 @@ class TestBuildExtentOverride:
         assert "exceeds layer bounds" in result.output
 
     def test_bbox_and_center_mutual_exclusion(self, runner, tmp_path):
-        src, lyr = _make_config_files(tmp_path)
+        cfg = _make_config_file(tmp_path)
         result = runner.invoke(
             main,
             [
                 "build",
-                "--sources",
-                str(src),
-                "--layers",
-                str(lyr),
+                "-c",
+                str(cfg),
                 "--layer",
                 "test_layer",
                 "--bbox",
@@ -604,15 +574,13 @@ class TestBuildExtentOverride:
         assert "Cannot use" in result.output
 
     def test_center_missing_height(self, runner, tmp_path):
-        src, lyr = _make_config_files(tmp_path)
+        cfg = _make_config_file(tmp_path)
         result = runner.invoke(
             main,
             [
                 "build",
-                "--sources",
-                str(src),
-                "--layers",
-                str(lyr),
+                "-c",
+                str(cfg),
                 "--layer",
                 "test_layer",
                 "--lng",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -80,12 +81,24 @@ class LayerConfig:
 
 
 @dataclass
+class SettingsConfig:
+    """Runtime settings with precedence: CLI flag > env var > config file > default."""
+
+    cache_dir: str | None = None
+    output_dir: str | None = None
+    executor: str | None = None
+    quality: int | None = None
+    rate_limit_ms: int | None = None
+
+
+@dataclass
 class Config:
-    """Top-level configuration container holding all sources and layers."""
+    """Top-level configuration container holding all sources, layers, and settings."""
 
     sources: dict[str, SourceConfig]
     layers: dict[str, LayerConfig]
     bounds: dict[str, float] | None = None
+    settings: SettingsConfig = field(default_factory=SettingsConfig)
 
 
 # Allowed source types
@@ -98,43 +111,33 @@ SOURCE_TYPE_REQUIRED_FIELDS = {
     "geotiff": ["url_template"],
 }
 
+# Supported settings keys and their env var names
+SETTINGS_ENV_PREFIX = "CARTOLOAD_"
+SETTINGS_KEYS = {"cache_dir", "output_dir", "executor", "quality", "rate_limit_ms"}
+
 logger = logging.getLogger(__name__)
 
 
-def load_sources_file(path: str) -> dict[str, SourceConfig]:
-    """
-    Load and parse a YAML sources configuration file.
+# ---------------------------------------------------------------------------
+# Internal parsers for unified config sections
+# ---------------------------------------------------------------------------
 
-    Args:
-        path: Path to the YAML file containing sources
 
-    Returns:
-        Dictionary of SourceConfig instances keyed by source ID
-
-    Raises:
-        FileNotFoundError: If the file does not exist
-        ValueError: If validation fails (missing required fields, invalid types, etc.)
-    """
-    file_path = Path(path)
-    if not file_path.exists():
-        raise FileNotFoundError(f"Source file not found: {path}")
-
-    with open(file_path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
-
-    if not isinstance(data, dict):
-        raise ValueError(f"{path}: Expected YAML dict, got {type(data).__name__}")
-
+def _parse_sources_section(data: dict, path: str) -> dict[str, SourceConfig]:
+    """Extract and validate the `sources:` section from a unified YAML dict."""
     if "sources" not in data:
-        raise ValueError(f"{path}: Missing required top-level 'sources' key")
+        return {}
 
     sources_data = data["sources"]
+    if sources_data is None:
+        return {}
     if not isinstance(sources_data, dict):
         raise ValueError(
             f"{path}: 'sources' must be a dict, got {type(sources_data).__name__}"
         )
 
-    sources = {}
+    file_path = Path(path)
+    sources: dict[str, SourceConfig] = {}
     for source_id, source_dict in sources_data.items():
         if not isinstance(source_dict, dict):
             raise ValueError(
@@ -248,70 +251,56 @@ def load_sources_file(path: str) -> dict[str, SourceConfig]:
     return sources
 
 
-def load_layers_file(
-    path: str,
+def _parse_bounds(bounds_data: dict, path: str, context: str = "") -> dict[str, float]:
+    """Validate and return a bounds dict."""
+    if not isinstance(bounds_data, dict):
+        raise ValueError(f"{path}: {context}'bounds' must be a dict")
+
+    required_bounds_fields = ["west", "east", "south", "north"]
+    for bfield in required_bounds_fields:
+        if bfield not in bounds_data:
+            raise ValueError(
+                f"{path}: {context}'bounds' missing required field '{bfield}'"
+            )
+        if not isinstance(bounds_data[bfield], (int, float)):
+            raise ValueError(f"{path}: {context}'bounds.{bfield}' must be numeric")
+
+    if bounds_data["west"] >= bounds_data["east"]:
+        raise ValueError(
+            f"{path}: {context}'bounds' invalid: west ({bounds_data['west']}) >= east ({bounds_data['east']})"
+        )
+    if bounds_data["south"] >= bounds_data["north"]:
+        raise ValueError(
+            f"{path}: {context}'bounds' invalid: south ({bounds_data['south']}) >= north ({bounds_data['north']})"
+        )
+
+    return bounds_data
+
+
+def _parse_layers_section(
+    data: dict, path: str
 ) -> tuple[dict[str, LayerConfig], dict[str, float] | None]:
-    """
-    Load and parse a YAML layers configuration file.
-
-    Args:
-        path: Path to the YAML file containing layers
-
-    Returns:
-        Tuple of (layers dict, bounds dict or None)
-
-    Raises:
-        FileNotFoundError: If the file does not exist
-        ValueError: If validation fails
-    """
-    file_path = Path(path)
-    if not file_path.exists():
-        raise FileNotFoundError(f"Layer file not found: {path}")
-
-    with open(file_path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
-
-    if not isinstance(data, dict):
-        raise ValueError(f"{path}: Expected YAML dict, got {type(data).__name__}")
+    """Extract and validate `layers:` and `bounds:` from a unified YAML dict."""
+    # Parse file-level bounds even when no layers section exists
+    bounds = None
+    if "bounds" in data and data["bounds"] is not None:
+        bounds = _parse_bounds(data["bounds"], path)
 
     if "layers" not in data:
-        raise ValueError(f"{path}: Missing required top-level 'layers' key")
+        return ({}, bounds)
 
     layers_data = data["layers"]
+    if layers_data is None:
+        return ({}, bounds)
     if not isinstance(layers_data, dict):
         raise ValueError(
             f"{path}: 'layers' must be a dict, got {type(layers_data).__name__}"
         )
 
-    # Extract file-level bounds if present
-    bounds = None
-    if "bounds" in data:
-        bounds_data = data["bounds"]
-        if not isinstance(bounds_data, dict):
-            raise ValueError(f"{path}: 'bounds' must be a dict")
-
-        # Validate bounds fields
-        required_bounds_fields = ["west", "east", "south", "north"]
-        for field in required_bounds_fields:
-            if field not in bounds_data:
-                raise ValueError(f"{path}: 'bounds' missing required field '{field}'")
-            if not isinstance(bounds_data[field], (int, float)):
-                raise ValueError(f"{path}: 'bounds.{field}' must be numeric")
-
-        # Validate bounds make sense
-        if bounds_data["west"] >= bounds_data["east"]:
-            raise ValueError(
-                f"{path}: 'bounds' invalid: west ({bounds_data['west']}) >= east ({bounds_data['east']})"
-            )
-        if bounds_data["south"] >= bounds_data["north"]:
-            raise ValueError(
-                f"{path}: 'bounds' invalid: south ({bounds_data['south']}) >= north ({bounds_data['north']})"
-            )
-
-        bounds = bounds_data
+    # File-level bounds already parsed above
 
     # Parse layers
-    layers = {}
+    layers: dict[str, LayerConfig] = {}
     required_layer_fields = ["name", "zoom_levels", "exporter", "output"]
 
     for layer_id, layer_dict in layers_data.items():
@@ -329,25 +318,25 @@ def load_layers_file(
 
         # Validate required fields (source is optional for composite layers)
         if has_sub_layers:
-            for field in required_layer_fields:
+            for req_field in required_layer_fields:
                 if (
-                    field not in layer_dict
-                    or layer_dict[field] is None
-                    or layer_dict[field] == ""
+                    req_field not in layer_dict
+                    or layer_dict[req_field] is None
+                    or layer_dict[req_field] == ""
                 ):
                     raise ValueError(
-                        f"{path}: Layer '{layer_id}' missing required field '{field}'"
+                        f"{path}: Layer '{layer_id}' missing required field '{req_field}'"
                     )
         else:
             all_required = required_layer_fields + ["source"]
-            for field in all_required:
+            for req_field in all_required:
                 if (
-                    field not in layer_dict
-                    or layer_dict[field] is None
-                    or layer_dict[field] == ""
+                    req_field not in layer_dict
+                    or layer_dict[req_field] is None
+                    or layer_dict[req_field] == ""
                 ):
                     raise ValueError(
-                        f"{path}: Layer '{layer_id}' missing required field '{field}'"
+                        f"{path}: Layer '{layer_id}' missing required field '{req_field}'"
                     )
 
         # Validate zoom_levels
@@ -378,35 +367,9 @@ def load_layers_file(
         # Validate layer-level bounds if present
         layer_bounds = None
         if "bounds" in layer_dict and layer_dict["bounds"] is not None:
-            bounds_data = layer_dict["bounds"]
-            if not isinstance(bounds_data, dict):
-                raise ValueError(
-                    f"{path}: Layer '{layer_id}' field 'bounds' must be a dict"
-                )
-
-            required_bounds_fields = ["west", "east", "south", "north"]
-            for field in required_bounds_fields:
-                if field not in bounds_data:
-                    raise ValueError(
-                        f"{path}: Layer '{layer_id}' bounds missing required field '{field}'"
-                    )
-                if not isinstance(bounds_data[field], (int, float)):
-                    raise ValueError(
-                        f"{path}: Layer '{layer_id}' bounds.{field} must be numeric"
-                    )
-
-            if bounds_data["west"] >= bounds_data["east"]:
-                raise ValueError(
-                    f"{path}: Layer '{layer_id}' bounds invalid: "
-                    f"west ({bounds_data['west']}) >= east ({bounds_data['east']})"
-                )
-            if bounds_data["south"] >= bounds_data["north"]:
-                raise ValueError(
-                    f"{path}: Layer '{layer_id}' bounds invalid: "
-                    f"south ({bounds_data['south']}) >= north ({bounds_data['north']})"
-                )
-
-            layer_bounds = bounds_data
+            layer_bounds = _parse_bounds(
+                layer_dict["bounds"], path, context=f"Layer '{layer_id}' "
+            )
         elif bounds is not None:
             # Inherit file-level bounds if layer has none
             layer_bounds = bounds
@@ -448,6 +411,37 @@ def load_layers_file(
         )
 
     return (layers, bounds)
+
+
+def _parse_settings_section(data: dict, path: str) -> SettingsConfig:
+    """Extract and validate the `settings:` section from a unified YAML dict."""
+    if "settings" not in data:
+        return SettingsConfig()
+
+    settings_data = data["settings"]
+    if settings_data is None:
+        return SettingsConfig()
+    if not isinstance(settings_data, dict):
+        raise ValueError(
+            f"{path}: 'settings' must be a dict, got {type(settings_data).__name__}"
+        )
+
+    known = {}
+    for key, value in settings_data.items():
+        if key not in SETTINGS_KEYS:
+            raise ValueError(
+                f"{path}: Unknown settings key '{key}'. "
+                f"Valid keys: {', '.join(sorted(SETTINGS_KEYS))}"
+            )
+        if value is not None:
+            known[key] = value
+
+    return SettingsConfig(**known)
+
+
+# ---------------------------------------------------------------------------
+# Source / sub-layer field helpers (unchanged)
+# ---------------------------------------------------------------------------
 
 
 def _parse_source_field(
@@ -526,19 +520,7 @@ def _build_sub_source_args(
 def _parse_sub_layers(
     path: str, layer_id: str, sub_layers_data: list
 ) -> list[CompositeSubLayer]:
-    """Parse and validate sub-layers from a composite layer config.
-
-    Args:
-        path: Config file path (for error messages)
-        layer_id: Parent layer ID (for error messages)
-        sub_layers_data: List of sub-layer dicts from YAML
-
-    Returns:
-        List of CompositeSubLayer instances
-
-    Raises:
-        ValueError: If validation fails
-    """
+    """Parse and validate sub-layers from a composite layer config."""
     if not isinstance(sub_layers_data, list):
         raise ValueError(f"{path}: Layer '{layer_id}' field 'layers' must be a list")
 
@@ -650,16 +632,13 @@ def _validate_opacity(
     )
 
 
+# ---------------------------------------------------------------------------
+# Merge helpers
+# ---------------------------------------------------------------------------
+
+
 def merge_sources(*source_dicts: dict[str, SourceConfig]) -> dict[str, SourceConfig]:
-    """
-    Merge multiple source dictionaries with last-file-wins semantics.
-
-    Args:
-        *source_dicts: Variable number of source dictionaries to merge
-
-    Returns:
-        Merged dictionary of SourceConfig instances
-    """
+    """Merge multiple source dictionaries with last-file-wins semantics."""
     merged = {}
     for source_dict in source_dicts:
         for source_id, source_config in source_dict.items():
@@ -674,15 +653,7 @@ def merge_sources(*source_dicts: dict[str, SourceConfig]) -> dict[str, SourceCon
 def merge_layers(
     *layer_results: tuple[dict[str, LayerConfig], dict[str, float] | None],
 ) -> tuple[dict[str, LayerConfig], dict[str, float] | None]:
-    """
-    Merge multiple layer results with last-file-wins semantics for both layers and bounds.
-
-    Args:
-        *layer_results: Variable number of (layers dict, bounds dict or None) tuples
-
-    Returns:
-        Tuple of (merged layers dict, merged bounds dict or None)
-    """
+    """Merge multiple layer results with last-file-wins semantics."""
     merged_layers = {}
     merged_bounds = None
 
@@ -704,23 +675,26 @@ def merge_layers(
     return (merged_layers, merged_bounds)
 
 
+def merge_settings(*settings_list: SettingsConfig) -> SettingsConfig:
+    """Merge multiple SettingsConfig instances with later-wins semantics."""
+    merged = SettingsConfig()
+    for settings in settings_list:
+        for key in SETTINGS_KEYS:
+            val = getattr(settings, key, None)
+            if val is not None:
+                setattr(merged, key, val)
+    return merged
+
+
+# ---------------------------------------------------------------------------
+# Reference resolution
+# ---------------------------------------------------------------------------
+
+
 def resolve_references(
     layers: dict[str, LayerConfig], sources: dict[str, SourceConfig]
 ) -> None:
-    """
-    Validate that all layer source references point to loaded sources.
-
-    For composite layers, validates that each inline sub-layer's source
-    references a loaded source. Ref sub-layers are validated separately
-    by resolve_sub_layer_refs().
-
-    Args:
-        layers: Dictionary of LayerConfig instances
-        sources: Dictionary of SourceConfig instances
-
-    Raises:
-        ValueError: If any layer references an undefined source
-    """
+    """Validate that all layer source references point to loaded sources."""
     unresolved = []
     for layer_id, layer_config in layers.items():
         # Composite layers: validate inline sub-layer sources
@@ -747,18 +721,7 @@ def resolve_references(
 def resolve_sub_layer_refs(
     layers: dict[str, LayerConfig],
 ) -> None:
-    """Resolve ref sub-layers by merging referenced layer fields.
-
-    For each composite layer, resolves sub-layers that use `ref` by looking
-    up the referenced top-level layer and merging its fields with the
-    sub-layer's overrides. Modifies the layers dict in-place.
-
-    Args:
-        layers: Dictionary of LayerConfig instances
-
-    Raises:
-        ValueError: If a ref points to a non-existent or composite layer
-    """
+    """Resolve ref sub-layers by merging referenced layer fields."""
     for layer_id, layer_config in layers.items():
         if not layer_config.is_composite():
             continue
@@ -801,45 +764,178 @@ def resolve_sub_layer_refs(
         layer_config.layers = resolved_subs
 
 
-def load_config(source_paths: list[str], layer_paths: list[str]) -> Config:
+# ---------------------------------------------------------------------------
+# Settings resolution with env var support
+# ---------------------------------------------------------------------------
+
+
+def resolve_settings(settings: SettingsConfig) -> dict[str, object]:
+    """Resolve settings with precedence: env var > config file.
+
+    Returns a dict of resolved key-value pairs (None values excluded).
+    CLI flags are applied on top of this in the CLI layer.
+
+    Resolution order:
+    1. CLI flag (applied in cli.py)
+    2. Environment variable (CARTOLOAD_<UPPER_SNAKE_KEY>)
+    3. Config file settings
+    4. Built-in default (handled in cli.py)
     """
-    Load and merge all configuration files into a single Config object.
+    resolved: dict[str, object] = {}
+
+    for key in SETTINGS_KEYS:
+        # Config file value
+        config_val = getattr(settings, key, None)
+        if config_val is not None:
+            resolved[key] = config_val
+
+        # Env var overrides config
+        env_key = SETTINGS_ENV_PREFIX + key.upper()
+        env_val = os.environ.get(env_key)
+        if env_val is not None:
+            # Type coerce env vars
+            if key == "quality":
+                resolved[key] = int(env_val)
+            elif key == "rate_limit_ms":
+                resolved[key] = int(env_val)
+            else:
+                resolved[key] = env_val
+
+    return resolved
+
+
+# ---------------------------------------------------------------------------
+# Unified config loading
+# ---------------------------------------------------------------------------
+
+
+def _load_unified_file(
+    path: str,
+    seen: set[Path],
+) -> tuple[
+    dict[str, SourceConfig],
+    dict[str, LayerConfig],
+    dict[str, float] | None,
+    SettingsConfig,
+]:
+    """Load a single unified config file, resolving includes recursively.
 
     Args:
-        source_paths: List of paths to source YAML files
-        layer_paths: List of paths to layer YAML files
+        path: Path to the YAML config file
+        seen: Set of resolved file paths already loaded (for cycle detection)
 
     Returns:
-        Config object containing merged sources and layers
+        Tuple of (sources, layers, bounds, settings)
+
+    Raises:
+        FileNotFoundError: If the file does not exist
+        ValueError: If validation fails or circular include detected
+    """
+    file_path = Path(path).resolve()
+    if not file_path.exists():
+        raise FileNotFoundError(f"Config file not found: {path}")
+
+    # Circular include detection
+    if file_path in seen:
+        raise ValueError(
+            f"Circular include detected: '{file_path}' is already being loaded"
+        )
+    seen.add(file_path)
+
+    with open(file_path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: Expected YAML dict, got {type(data).__name__}")
+
+    # Process includes first (depth-first)
+    merged_sources: dict[str, SourceConfig] = {}
+    merged_layers: dict[str, LayerConfig] = {}
+    merged_bounds: dict[str, float] | None = None
+    merged_settings = SettingsConfig()
+
+    includes = data.get("includes")
+    if includes:
+        if not isinstance(includes, list):
+            raise ValueError(
+                f"{path}: 'includes' must be a list, got {type(includes).__name__}"
+            )
+        for include_path in includes:
+            if not isinstance(include_path, str):
+                raise ValueError(
+                    f"{path}: Each include path must be a string, got {type(include_path).__name__}"
+                )
+            # Resolve relative to the current file's directory
+            resolved = (file_path.parent / include_path).resolve()
+            inc_sources, inc_layers, inc_bounds, inc_settings = _load_unified_file(
+                str(resolved), seen | {file_path}
+            )
+
+            # Merge included results
+            merged_sources = merge_sources(merged_sources, inc_sources)
+            merged_layers_dict, merged_bounds = merge_layers(
+                (merged_layers, merged_bounds), (inc_layers, inc_bounds)
+            )
+            merged_layers = merged_layers_dict
+            merged_settings = merge_settings(merged_settings, inc_settings)
+
+    # Parse current file's sections
+    cur_sources = _parse_sources_section(data, path)
+    cur_layers, cur_bounds = _parse_layers_section(data, path)
+    cur_settings = _parse_settings_section(data, path)
+
+    # Merge current file on top of includes
+    final_sources = merge_sources(merged_sources, cur_sources)
+    final_layers, final_bounds = merge_layers(
+        (merged_layers, merged_bounds), (cur_layers, cur_bounds)
+    )
+    final_settings = merge_settings(merged_settings, cur_settings)
+
+    return (final_sources, final_layers, final_bounds, final_settings)
+
+
+def load_config(config_paths: list[str]) -> Config:
+    """Load and merge config files into a single Config object.
+
+    Each config file uses the unified format with optional sections:
+    includes, sources, layers, bounds, settings.
+
+    Args:
+        config_paths: List of paths to YAML config files
+
+    Returns:
+        Config object containing merged sources, layers, bounds, and settings
 
     Raises:
         FileNotFoundError: If any config file does not exist
-        ValueError: If any validation fails
+        ValueError: If validation fails
     """
-    # Load all source files
-    source_dicts = []
-    for path in source_paths:
-        source_dicts.append(load_sources_file(path))
+    all_sources: dict[str, SourceConfig] = {}
+    all_layers: dict[str, LayerConfig] = {}
+    all_bounds: dict[str, float] | None = None
+    all_settings = SettingsConfig()
 
-    # Merge sources
-    merged_sources = merge_sources(*source_dicts) if source_dicts else {}
-
-    # Load all layer files
-    layer_results = []
-    for path in layer_paths:
-        layer_results.append(load_layers_file(path))
-
-    # Merge layers and bounds
-    merged_layers, merged_bounds = (
-        merge_layers(*layer_results) if layer_results else ({}, None)
-    )
+    for path in config_paths:
+        sources, layers, bounds, settings = _load_unified_file(path, seen=set())
+        all_sources = merge_sources(all_sources, sources)
+        all_layers, all_bounds = merge_layers(
+            (all_layers, all_bounds), (layers, bounds)
+        )
+        all_settings = merge_settings(all_settings, settings)
 
     # Resolve sub-layer refs (must happen before source validation)
-    if merged_layers:
-        resolve_sub_layer_refs(merged_layers)
+    if all_layers:
+        resolve_sub_layer_refs(all_layers)
 
     # Resolve source references
-    if merged_layers:
-        resolve_references(merged_layers, merged_sources)
+    if all_layers:
+        resolve_references(all_layers, all_sources)
 
-    return Config(sources=merged_sources, layers=merged_layers, bounds=merged_bounds)
+    return Config(
+        sources=all_sources,
+        layers=all_layers,
+        bounds=all_bounds,
+        settings=all_settings,
+    )

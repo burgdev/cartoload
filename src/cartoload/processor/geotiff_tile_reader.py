@@ -348,7 +348,7 @@ def read_tile_from_warped_geotiff(
             src_crs=src.crs,
             dst_transform=dst_transform,
             dst_crs=src.crs,  # Same CRS, but reproject handles the spatial mapping
-            resampling=Resampling.nearest,
+            resampling=Resampling.bilinear,
             init_dest_nodata=True,
         )
 

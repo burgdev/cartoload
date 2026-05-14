@@ -19,7 +19,7 @@ from rich.progress import (
 )
 
 from .cli_analyze import analyze
-from .config import load_config
+from .config import load_config, resolve_settings
 from .pipeline import (
     DownloadError,
     ExportError,
@@ -182,18 +182,12 @@ main.add_command(analyze)
 
 @main.command()
 @click.option(
-    "-S",
-    "--sources",
+    "-c",
+    "--config",
+    "config_files",
     multiple=True,
     type=click.Path(exists=True),
-    help="Source config file(s) (repeatable)",
-)
-@click.option(
-    "-L",
-    "--layers",
-    multiple=True,
-    type=click.Path(exists=True),
-    help="Layer config file(s) (repeatable)",
+    help="Config file(s) (repeatable)",
 )
 @click.option("-l", "--layer", help="Layer ID to build (required)")
 @click.option("-e", "--exporter", help="Override exporter: garmin-img")
@@ -225,8 +219,8 @@ main.add_command(analyze)
     help="Extent height in km (use with --lng/--lat/--width)",
 )
 @click.option("-z", "--zoom", help="Override zoom levels: 10,12,14")
-@click.option("-o", "--output-dir", default="./output", help="Default: ./output")
-@click.option("-c", "--cache-dir", default="./cache", help="Default: ./cache")
+@click.option("-o", "--output-dir", default=None, help="Default: ./output")
+@click.option("-C", "--cache-dir", default=None, help="Default: ./cache")
 @click.option("--no-download", is_flag=True, help="Use existing cache only")
 @click.option("-f", "--force", is_flag=True, help="Overwrite existing output files")
 @click.option("--dry-run", is_flag=True, help="Show build plan without executing")
@@ -268,8 +262,7 @@ main.add_command(analyze)
     help="Show detailed tracebacks on errors",
 )
 def build(
-    sources: tuple[str, ...],
-    layers: tuple[str, ...],
+    config_files: tuple[str, ...],
     layer: str | None,
     exporter: str | None,
     bbox: tuple[float, ...] | None,
@@ -278,8 +271,8 @@ def build(
     width: float | None,
     height: float | None,
     zoom: str | None,
-    output_dir: str,
-    cache_dir: str,
+    output_dir: str | None,
+    cache_dir: str | None,
     no_download: bool,
     force: bool,
     dry_run: bool,
@@ -301,7 +294,16 @@ def build(
 
     try:
         # Load config
-        config = load_config(list(sources), list(layers))
+        config = load_config(list(config_files))
+
+        # Resolve settings: env vars override config, CLI flags override env vars
+        resolved = resolve_settings(config.settings)
+        effective_output_dir = output_dir or resolved.get("output_dir", "./output")
+        effective_cache_dir = cache_dir or resolved.get("cache_dir", "./cache")
+        effective_quality = quality or resolved.get("quality")
+        effective_executor = executor_mode or resolved.get("executor")
+        if effective_executor is not None:
+            os.environ["CARTOLOAD_EXECUTOR"] = effective_executor
 
         # Resolve layer
         if layer not in config.layers:
@@ -329,14 +331,14 @@ def build(
             layer_config = dataclasses.replace(layer_config, exporter=exporter)
 
         # Create paths (don't mkdir yet — dry-run shouldn't create dirs)
-        out_dir = Path(output_dir)
-        cache = Path(cache_dir)
+        out_dir = Path(effective_output_dir)
+        cache = Path(effective_cache_dir)
 
         # Compute and display build summary
         source = resolve_source(layer_config, config.sources)
         try:
             dl = get_downloader(source, cache, source_args=layer_config.source_args)
-            summary = compute_build_summary(layer_config, dl, quality=quality)
+            summary = compute_build_summary(layer_config, dl, quality=effective_quality)
             if summary.total_tiles > 0:
                 click.echo(
                     format_build_summary(
@@ -433,7 +435,7 @@ def build(
                     force=force,
                     bounds_override=extent,
                     zoom_override=zoom_list,
-                    quality=quality,
+                    quality=effective_quality,
                     progress_callback=on_progress,
                     export_progress_callback=on_export_progress,
                     warmup_only=cache_warmup,
@@ -463,7 +465,7 @@ def build(
                         dl,
                         out_dir,
                         max_tiles_per_zoom=preview_tiles,
-                        quality=quality or 85,
+                        quality=effective_quality or 85,
                     )
                     for pp in preview_paths:
                         click.echo(f"Preview: {pp}")
@@ -486,18 +488,12 @@ def build(
 
 @main.command()
 @click.option(
-    "-S",
-    "--sources",
+    "-c",
+    "--config",
+    "config_files",
     multiple=True,
     type=click.Path(exists=True),
-    help="Source config file(s) (repeatable)",
-)
-@click.option(
-    "-L",
-    "--layers",
-    multiple=True,
-    type=click.Path(exists=True),
-    help="Layer config file(s) (repeatable)",
+    help="Config file(s) (repeatable)",
 )
 @click.option("-l", "--layer", help="Layer ID to download (required)")
 @click.option(
@@ -528,10 +524,9 @@ def build(
     help="Extent height in km (use with --lng/--lat/--width)",
 )
 @click.option("-z", "--zoom", help="Override zoom levels: 10,12,14")
-@click.option("-c", "--cache-dir", default="./cache", help="Default: ./cache")
+@click.option("-C", "--cache-dir", default=None, help="Default: ./cache")
 def download(
-    sources: tuple[str, ...],
-    layers: tuple[str, ...],
+    config_files: tuple[str, ...],
     layer: str | None,
     bbox: tuple[float, ...] | None,
     lng: float | None,
@@ -539,14 +534,18 @@ def download(
     width: float | None,
     height: float | None,
     zoom: str | None,
-    cache_dir: str,
+    cache_dir: str | None,
 ) -> None:
     """Download source data only (no build)."""
     if not layer:
         raise click.ClickException("--layer is required")
 
     try:
-        config = load_config(list(sources), list(layers))
+        config = load_config(list(config_files))
+
+        # Resolve settings
+        resolved = resolve_settings(config.settings)
+        effective_cache_dir = cache_dir or resolved.get("cache_dir", "./cache")
 
         if layer not in config.layers:
             available = ", ".join(sorted(config.layers.keys())) or "(none)"
@@ -571,7 +570,7 @@ def download(
         if zoom_list:
             layer_config = dataclasses.replace(layer_config, zoom_levels=zoom_list)
 
-        cache = Path(cache_dir)
+        cache = Path(effective_cache_dir)
         cache.mkdir(parents=True, exist_ok=True)
 
         click.echo("Downloading tiles...")
@@ -673,37 +672,30 @@ def split(img_file: str, output_dir: str | None) -> None:
 
 @main.command("list")
 @click.option(
-    "-S",
-    "--sources",
+    "-c",
+    "--config",
+    "config_files",
     multiple=True,
     type=click.Path(exists=True),
-    help="Source config file(s) (repeatable)",
-)
-@click.option(
-    "-L",
-    "--layers",
-    multiple=True,
-    type=click.Path(exists=True),
-    help="Layer config file(s) (repeatable)",
+    help="Config file(s) (repeatable)",
 )
 def list_layers(
-    sources: tuple[str, ...],
-    layers: tuple[str, ...],
+    config_files: tuple[str, ...],
 ) -> None:
     """List all layers from the provided config files."""
-    if not sources and not layers:
+    if not config_files:
         click.echo(
             "No config files provided.",
             err=True,
         )
         click.echo(
-            "Usage: cartoload list --sources path/to/sources.yaml --layers path/to/layers.yaml",
+            "Usage: cartoload list -c path/to/config.yaml",
             err=True,
         )
         sys.exit(1)
 
     try:
-        config = load_config(list(sources), list(layers))
+        config = load_config(list(config_files))
     except FileNotFoundError as e:
         raise click.ClickException(str(e))
     except ValueError as e:
@@ -737,7 +729,7 @@ def list_layers(
 
 
 @main.group()
-@click.option("-c", "--cache-dir", default="./cache", help="Default: ./cache")
+@click.option("-C", "--cache-dir", default="./cache", help="Default: ./cache")
 @click.pass_context
 def cache(ctx: click.Context, cache_dir: str) -> None:
     """Inspect and manage the tile cache."""

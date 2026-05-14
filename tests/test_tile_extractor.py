@@ -201,7 +201,7 @@ class TestExtractTiles:
         bounds = {"west": 6.0, "east": 7.0, "south": 46.0, "north": 47.0}
         result = extractor.extract_tiles([10], bounds)
 
-        for tile in result[10]:
+        for tile, tile_bounds in result[10]:
             assert tile.shape == (256, 256, 3)
             assert tile.dtype == np.uint8
 
@@ -225,5 +225,5 @@ class TestExtractTiles:
         result = extractor.extract_tiles([10], bounds)
 
         # At least some tiles should have non-zero pixel values
-        total_sum = sum(t.sum() for t in result[10])
+        total_sum = sum(t.sum() for t, _ in result[10])
         assert total_sum > 0, "All extracted tiles are completely black"

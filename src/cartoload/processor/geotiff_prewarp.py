@@ -13,6 +13,7 @@ that tiles spanning multiple source GeoTIFFs can read all data at once.
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable
 from pathlib import Path
 
@@ -20,7 +21,6 @@ import numpy as np
 import rasterio
 from rasterio.crs import CRS
 from rasterio.enums import ColorInterp
-from rasterio.merge import merge
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 
 logger = logging.getLogger(__name__)
@@ -122,24 +122,29 @@ def prewarp_geotiff(
 
         with rasterio.open(cache_path, "w", **profile) as dst:
             if is_paletted and lut is not None:
-                # Read palette indices, expand to RGB, then warp
+                # Warp palette indices first (preserving exact pixel identity),
+                # then expand to RGB. This avoids color fringing that occurs
+                # when warping RGB bands independently — nearest-neighbor on
+                # each band can pick from different source pixels due to
+                # sub-pixel rounding in the CRS transform.
                 indices = src.read(1)  # (H, W) uint8
-                rgb = lut[indices]  # (H, W, 3)
-                src_rgb = rgb.transpose(2, 0, 1)  # (3, H, W)
+                warped_indices = np.zeros((height, width), dtype="uint8")
+                reproject(
+                    source=indices,
+                    destination=warped_indices,
+                    src_transform=src.transform,
+                    src_crs=src_crs,
+                    dst_transform=transform,
+                    dst_crs=dst_crs,
+                    resampling=Resampling.nearest,
+                    dst_nodata=0,
+                )
 
+                # Now expand the warped indices to RGB
+                rgb = lut[warped_indices]  # (H, W, 3)
+                src_rgb = rgb.transpose(2, 0, 1)  # (3, H, W)
                 for band_idx in range(3):
-                    band_out = np.zeros((height, width), dtype="uint8")
-                    reproject(
-                        source=src_rgb[band_idx],
-                        destination=band_out,
-                        src_transform=src.transform,
-                        src_crs=src_crs,
-                        dst_transform=transform,
-                        dst_crs=dst_crs,
-                        resampling=Resampling.bilinear,
-                        dst_nodata=0,
-                    )
-                    dst.write(band_out, band_idx + 1)
+                    dst.write(src_rgb[band_idx], band_idx + 1)
             else:
                 # Non-paletted: warp existing bands to RGB
                 src_bands = min(src.count, 3)
@@ -274,22 +279,72 @@ def merge_prewarped_geotiffs(
     datasets = [rasterio.open(p) for p in prewarped_paths]
 
     try:
-        # Merge with first-file-wins (later files overwrite earlier pixels)
-        # Use nodata=0 so empty areas are transparent
-        mosaic_arr, mosaic_transform = merge(datasets, nodata=0, method="first")
-
-        # Get CRS and count from the first dataset
+        # Compute a shared pixel grid that encompasses all datasets.
+        # Pre-warped files share the same CRS but may have slightly different
+        # pixel resolutions after the CRS warp (e.g., 1.494e-5 vs 1.499e-5).
+        # We use reproject with nearest-neighbor instead of direct pixel copy
+        # to correctly handle sub-pixel misalignment and avoid seam gaps.
         dst_crs = datasets[0].crs
-        count, height, width = mosaic_arr.shape
+
+        # Use the median resolution as the target pixel size
+        resolutions = [abs(ds.res[0]) for ds in datasets]
+        res = sorted(resolutions)[len(resolutions) // 2]
+
+        # Find bounding box across all datasets
+        all_left = min(ds.bounds.left for ds in datasets)
+        all_bottom = min(ds.bounds.bottom for ds in datasets)
+        all_right = max(ds.bounds.right for ds in datasets)
+        all_top = max(ds.bounds.top for ds in datasets)
+
+        # Compute output dimensions
+        dst_width = int(math.ceil((all_right - all_left) / res))
+        dst_height = int(math.ceil((all_top - all_bottom) / res))
+
+        dst_transform = rasterio.transform.from_bounds(
+            all_left,
+            all_bottom,
+            all_right,
+            all_top,
+            dst_width,
+            dst_height,
+        )
+
+        # Allocate output (3 bands, initialized to nodata=0)
+        mosaic_arr = np.zeros((3, dst_height, dst_width), dtype="uint8")
+
+        for ds in datasets:
+            # Use reproject with nearest-neighbor to handle sub-pixel offsets.
+            # This correctly fills every destination pixel from the closest
+            # source pixel, avoiding 1-pixel seam gaps that occur with direct
+            # integer-offset pixel copying when source files have slightly
+            # different resolutions.
+            band_out = np.zeros((3, dst_height, dst_width), dtype="uint8")
+            for band_idx in range(3):
+                reproject(
+                    source=rasterio.band(ds, band_idx + 1),
+                    destination=band_out[band_idx],
+                    src_transform=ds.transform,
+                    src_crs=ds.crs,
+                    dst_transform=dst_transform,
+                    dst_crs=dst_crs,
+                    resampling=Resampling.nearest,
+                    src_nodata=0,
+                    dst_nodata=0,
+                )
+
+            # Only overwrite where the source has data (any band nonzero)
+            valid = np.any(band_out != 0, axis=0)
+            for b in range(3):
+                mosaic_arr[b][valid] = band_out[b][valid]
 
         profile = {
             "driver": "GTiff",
-            "width": width,
-            "height": height,
-            "count": count,
+            "width": dst_width,
+            "height": dst_height,
+            "count": 3,
             "dtype": "uint8",
             "crs": dst_crs,
-            "transform": mosaic_transform,
+            "transform": dst_transform,
             "compress": "lzw",
             "tiled": True,
             "blockxsize": 256,
@@ -307,5 +362,5 @@ def merge_prewarped_geotiffs(
             except Exception:
                 pass
 
-    logger.info("Mosaic complete: %s (%dx%d)", mosaic_path.name, width, height)
+    logger.info("Mosaic complete: %s (%dx%d)", mosaic_path.name, dst_width, dst_height)
     return mosaic_path

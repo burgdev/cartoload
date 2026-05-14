@@ -320,6 +320,7 @@ async def build_layer(
             output_dir,
             no_download=no_download,
             force=force,
+            quality=quality,
             progress_callback=progress_callback,
             export_progress_callback=export_progress_callback,
             preview=preview,
@@ -1288,6 +1289,7 @@ async def build_composite_layer(
     *,
     no_download: bool = False,
     force: bool = False,
+    quality: int | None = None,
     progress_callback: ProgressCallback | None = None,
     export_progress_callback: ExportProgressCallback | None = None,
     preview: bool = False,
@@ -1305,6 +1307,7 @@ async def build_composite_layer(
         output_dir: Directory for output files
         no_download: If True, skip the download stage
         force: If True, overwrite existing output files
+        quality: JPEG quality for tile encoding, or None for default (85)
         progress_callback: Called with (stage_id, description) at each stage
         export_progress_callback: Called with (stage, current, total) for export progress
 
@@ -1531,6 +1534,7 @@ async def build_composite_layer(
             sources,
             cache_dir,
             source_crs or "EPSG:3857",
+            quality=quality,
             stac_mosaics=stac_mosaics,
         )
 
@@ -1642,7 +1646,11 @@ def _estimate_composite_tile_size(
                 pass
     # The composited tile will typically be smaller than the sum,
     # but we use the sum as a conservative estimate for layout planning.
-    return total if total > 0 else 0
+    # For STAC sub-layers (no cached WMTS tiles), use a reasonable default.
+    if total > 0:
+        return total
+    # Default estimate: ~15 KB per composited tile at quality 50
+    return 15_000
 
 
 def _make_composite_processor(
@@ -1650,6 +1658,7 @@ def _make_composite_processor(
     sources: dict[str, SourceConfig],
     cache_dir: Path,
     source_crs: str,
+    quality: int | None = None,
     stac_mosaics: dict[int, Path] | None = None,
 ):
     """Create a tile processor callable that composites sub-layers.
@@ -1662,13 +1671,15 @@ def _make_composite_processor(
 
     _stac_mosaics = stac_mosaics or {}
 
+    _effective_quality = quality  # captured from pipeline
+
     def composite_processor(
         source_path: Path,
         x: int,
         y: int,
         zoom: int,
         crs: str,
-        quality: int,
+        jpeg_quality: int,
     ) -> ProcessedTile | None:
         """Load all sub-layer tiles for (x, y, zoom), composite, return JPEG."""
         images: list[tuple] = []
@@ -1684,7 +1695,7 @@ def _make_composite_processor(
             if idx in _stac_mosaics:
                 mosaic_path = _stac_mosaics[idx]
                 result = read_tile_from_warped_geotiff(
-                    mosaic_path, x, y, zoom, quality=quality
+                    mosaic_path, x, y, zoom, quality=jpeg_quality or 85
                 )
                 if result is not None:
                     jpeg_bytes, _bounds = result
@@ -1735,7 +1746,9 @@ def _make_composite_processor(
         composited = composite_tiles(images)
 
         # Encode to JPEG
-        jpeg_bytes = encode_composite_to_jpeg(composited, quality=quality or 85)
+        jpeg_bytes = encode_composite_to_jpeg(
+            composited, quality=_effective_quality or 85
+        )
 
         bounds = compute_bounds_4326(x, y, zoom)
         return (jpeg_bytes, bounds)

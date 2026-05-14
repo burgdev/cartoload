@@ -57,4 +57,4 @@
 
 - [x] 8.1 Run `just check` and `just check types` — formatting, linting, type correctness pass
 - [x] 8.2 Run `just test` — all existing and new tests pass
-- [ ] 8.3 End-to-end test: build a small-area layer from swisstopo STAC source and verify IMG output
+- [x] 8.3 End-to-end test: build a small-area layer from swisstopo STAC source and verify IMG output

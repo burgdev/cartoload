@@ -1,5 +1,9 @@
 # Switzerland layer definitions
 
+
+includes:
+  - ../sources/swisstopo.yaml
+
 # Default bounding box for all layers in this file
 bounds:
   west: 5.96
@@ -19,23 +23,25 @@ layers:
       layer: ch.swisstopo.pixelkarte-farbe
     layers: # first entry is bottom
       - ref: ch_swisstopo_basemap_pk1000
-        zoom_levels: [8, 9]
+        zoom_levels: [9]
       - ref: ch_swisstopo_basemap
-        zoom_levels: [11, 12, 13, 14, 15, 16]
-      - ref: ch_swisstopo_basemap_pk10
-        zoom_levels: [17]
-        extension: png
+        zoom_levels: [8, 11, 12, 13, 14, 15, 16]
+      #- ref: ch_swisstopo_basemap_pk10
+      #  zoom_levels: [17]
+      #  extension: png
       - ref: ch_swisstopo_hiking
-        opacity: { 11: 0.4, 12: 0.4, 13: 0.5, 14: 0.6, 15: 0.7, 16: 0.7 }
-        zoom_levels: [11, 12, 13, 14, 15, 16] #, 18]
+        opacity:
+          { 11: 0.4, 12: 0.4, 13: 0.4, 14: 0.6, 15: 0.7, 16: 0.7, 17: 0.5 }
+        zoom_levels: [13, 14, 15, 16] #, 17] #, 18]
       - ref: ch_swisstopo_skitouring
-        opacity: { 11: 0.4, 12: 0.4, 13: 0.5, 14: 0.6, 15: 0.7, 16: 0.7 }
-        zoom_levels: [11, 12, 13, 14, 15, 16] #, 18]
+        opacity:
+          { 11: 0.4, 12: 0.4, 13: 0.5, 14: 0.6, 15: 0.7, 16: 0.7, 17: 0.5 }
+        zoom_levels: [13, 14, 15, 16] #, 17] #, 18]
       - ref: ch_swisstopo_steepness
-        opacity: { 14: 0.1, 15: 0.3, 16: 0.3, 17: 0.2 }
-        zoom_levels: [14, 15, 16] #, 18]
+        opacity: { 15: 0.2, 16: 0.3, 17: 0.2 }
+        zoom_levels: [15, 16] #, 17] #, 18]
         extension: png
-    zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16, 17] #, 18]
+    zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16] #, 17] #, 18]
     exporter: garmin_img
     output: ch_swisstopo_ski_hiking.img
 

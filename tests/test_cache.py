@@ -31,7 +31,7 @@ class TestCacheStatusCommand:
     def test_empty_cache(self, runner: click.testing.CliRunner, tmp_path: Path) -> None:
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir()
-        result = runner.invoke(main, ["cache", "-c", str(cache_dir), "status"])
+        result = runner.invoke(main, ["cache", "-C", str(cache_dir), "status"])
         assert result.exit_code == 0
         assert "empty" in result.output.lower()
 
@@ -39,7 +39,7 @@ class TestCacheStatusCommand:
         self, runner: click.testing.CliRunner, tmp_path: Path
     ) -> None:
         result = runner.invoke(
-            main, ["cache", "-c", str(tmp_path / "nonexistent"), "status"]
+            main, ["cache", "-C", str(tmp_path / "nonexistent"), "status"]
         )
         assert result.exit_code == 0
         assert "does not exist" in result.output
@@ -53,7 +53,7 @@ class TestCacheStatusCommand:
         (source_dir / "362.jpeg").write_bytes(b"tile-data")
         (source_dir / "363.jpeg").write_bytes(b"tile-data")
 
-        result = runner.invoke(main, ["cache", "-c", str(cache_dir), "status"])
+        result = runner.invoke(main, ["cache", "-C", str(cache_dir), "status"])
         assert result.exit_code == 0
         assert "my_source" in result.output
         assert "Tiles: 2" in result.output
@@ -66,7 +66,7 @@ class TestCacheStatusCommand:
         source_dir.mkdir(parents=True)
         (source_dir / "0.jpeg").write_bytes(b"x" * 1024)
 
-        result = runner.invoke(main, ["cache", "-c", str(cache_dir), "status"])
+        result = runner.invoke(main, ["cache", "-C", str(cache_dir), "status"])
         assert result.exit_code == 0
         assert "Total:" in result.output
 
@@ -80,7 +80,7 @@ class TestCacheCleanCommand:
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir()
         result = runner.invoke(
-            main, ["cache", "-c", str(cache_dir), "clean", "--force"]
+            main, ["cache", "-C", str(cache_dir), "clean", "--force"]
         )
         assert result.exit_code == 0
         assert "Nothing to clean" in result.output
@@ -89,7 +89,7 @@ class TestCacheCleanCommand:
         self, runner: click.testing.CliRunner, tmp_path: Path
     ) -> None:
         result = runner.invoke(
-            main, ["cache", "-c", str(tmp_path / "nonexistent"), "clean", "--force"]
+            main, ["cache", "-C", str(tmp_path / "nonexistent"), "clean", "--force"]
         )
         assert result.exit_code == 0
         assert "does not exist" in result.output
@@ -103,7 +103,7 @@ class TestCacheCleanCommand:
         (source_dir / "tile.jpeg").write_bytes(b"data")
 
         result = runner.invoke(
-            main, ["cache", "-c", str(cache_dir), "clean", "--force"]
+            main, ["cache", "-C", str(cache_dir), "clean", "--force"]
         )
         assert result.exit_code == 0
         assert "Removed" in result.output
@@ -124,7 +124,7 @@ class TestCacheCleanCommand:
             main,
             [
                 "cache",
-                "-c",
+                "-C",
                 str(cache_dir),
                 "clean",
                 "--source",
@@ -147,7 +147,7 @@ class TestCacheCleanCommand:
         # Respond 'n' to the confirmation prompt
         result = runner.invoke(
             main,
-            ["cache", "-c", str(cache_dir), "clean"],
+            ["cache", "-C", str(cache_dir), "clean"],
             input="n\n",
         )
         assert result.exit_code == 0
@@ -164,7 +164,7 @@ class TestCacheCleanCommand:
 
         result = runner.invoke(
             main,
-            ["cache", "-c", str(cache_dir), "clean"],
+            ["cache", "-C", str(cache_dir), "clean"],
             input="y\n",
         )
         assert result.exit_code == 0

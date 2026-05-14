@@ -1,5 +1,9 @@
 # Switzerland layer definitions
 
+
+includes:
+  - ../sources/swisstopo.yaml
+
 # Default bounding box for all layers in this file
 bounds:
   west: 5.96
@@ -59,23 +63,33 @@ layers:
     source_args:
       layer: ch.swisstopo.pixelkarte-farbe-pk25.noscale
     layers: # first entry is bottom
-      #- name: "Switzerland 1:10000"
-      #  zoom_levels: [15, 16]
-      #  source:
-      #    ref: swisstopo_stac
-      #    layer: ch.swisstopo.landeskarte-farbe-10
-      #    asset_filter:
-      #      geoadmin:variant: krel
+      - name: "Switzerland 1:10000"
+        zoom_levels: [16]
+        source:
+          ref: swisstopo_stac
+          layer: ch.swisstopo.landeskarte-farbe-10
+          asset_filter:
+            geoadmin:variant: krel
       - name: "Switzerland 1:25000"
-        zoom_levels: [13, 14, 15, 16]
+        zoom_levels: [15]
         source:
           ref: swisstopo_stac
           layer: ch.swisstopo.pixelkarte-farbe-pk25.noscale
       - name: "Switzerland 1:50000"
-        zoom_levels: [8, 9, 11, 12]
+        zoom_levels: [13, 14]
         source:
           ref: swisstopo_stac
           layer: ch.swisstopo.pixelkarte-farbe-pk50.noscale
+      - name: "Switzerland 1:200000"
+        zoom_levels: [12]
+        source:
+          ref: swisstopo_stac
+          layer: ch.swisstopo.pixelkarte-farbe-pk200.noscale
+      - name: "Switzerland 1:1 Million"
+        zoom_levels: [8, 9, 11]
+        source:
+          ref: swisstopo_stac
+          layer: ch.swisstopo.pixelkarte-farbe-pk1000.noscale
     zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16] #, 16]
     exporter: garmin_img
     output: ch_stac_test.img

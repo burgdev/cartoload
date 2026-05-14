@@ -10,10 +10,10 @@ from click.testing import CliRunner
 from cartoload.cli import main
 
 
-def _write_configs(tmp_path: Path) -> tuple[str, str]:
-    """Write minimal source and layer config files, return their paths."""
-    sources_file = tmp_path / "sources.yaml"
-    sources_file.write_text(
+def _write_config(tmp_path: Path) -> str:
+    """Write a unified config file, return its path."""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
         yaml.dump(
             {
                 "sources": {
@@ -21,15 +21,7 @@ def _write_configs(tmp_path: Path) -> tuple[str, str]:
                         "type": "wmts",
                         "url_template": "https://example.com/{z}/{x}/{y}.jpeg",
                     }
-                }
-            }
-        )
-    )
-
-    layers_file = tmp_path / "layers.yaml"
-    layers_file.write_text(
-        yaml.dump(
-            {
+                },
                 "bounds": {
                     "west": 7.0,
                     "east": 8.0,
@@ -49,13 +41,13 @@ def _write_configs(tmp_path: Path) -> tuple[str, str]:
         )
     )
 
-    return str(sources_file), str(layers_file)
+    return str(config_file)
 
 
 class TestDryRun:
     def test_dry_run_shows_summary(self, tmp_path: Path) -> None:
         """Dry run should display build plan summary."""
-        sources, layers = _write_configs(tmp_path)
+        config = _write_config(tmp_path)
         output_dir = tmp_path / "output"
         cache_dir = tmp_path / "cache"
 
@@ -64,15 +56,13 @@ class TestDryRun:
             main,
             [
                 "build",
-                "-S",
-                sources,
-                "-L",
-                layers,
+                "-c",
+                config,
                 "-l",
                 "test_layer",
                 "-o",
                 str(output_dir),
-                "-c",
+                "-C",
                 str(cache_dir),
                 "--dry-run",
             ],
@@ -84,7 +74,7 @@ class TestDryRun:
 
     def test_dry_run_creates_no_output_dir(self, tmp_path: Path) -> None:
         """Dry run should not create the output directory."""
-        sources, layers = _write_configs(tmp_path)
+        config = _write_config(tmp_path)
         output_dir = tmp_path / "output"
         cache_dir = tmp_path / "cache"
 
@@ -93,15 +83,13 @@ class TestDryRun:
             main,
             [
                 "build",
-                "-S",
-                sources,
-                "-L",
-                layers,
+                "-c",
+                config,
                 "-l",
                 "test_layer",
                 "-o",
                 str(output_dir),
-                "-c",
+                "-C",
                 str(cache_dir),
                 "--dry-run",
             ],
@@ -112,7 +100,7 @@ class TestDryRun:
 
     def test_dry_run_creates_no_cache_files(self, tmp_path: Path) -> None:
         """Dry run should not write any cache files."""
-        sources, layers = _write_configs(tmp_path)
+        config = _write_config(tmp_path)
         output_dir = tmp_path / "output"
         cache_dir = tmp_path / "cache"
 
@@ -121,15 +109,13 @@ class TestDryRun:
             main,
             [
                 "build",
-                "-S",
-                sources,
-                "-L",
-                layers,
+                "-c",
+                config,
                 "-l",
                 "test_layer",
                 "-o",
                 str(output_dir),
-                "-c",
+                "-C",
                 str(cache_dir),
                 "--dry-run",
             ],
@@ -140,7 +126,7 @@ class TestDryRun:
 
     def test_dry_run_creates_no_img_files(self, tmp_path: Path) -> None:
         """Dry run should not create any IMG files."""
-        sources, layers = _write_configs(tmp_path)
+        config = _write_config(tmp_path)
         output_dir = tmp_path / "output"
         cache_dir = tmp_path / "cache"
 
@@ -149,15 +135,13 @@ class TestDryRun:
             main,
             [
                 "build",
-                "-S",
-                sources,
-                "-L",
-                layers,
+                "-c",
+                config,
                 "-l",
                 "test_layer",
                 "-o",
                 str(output_dir),
-                "-c",
+                "-C",
                 str(cache_dir),
                 "--dry-run",
             ],

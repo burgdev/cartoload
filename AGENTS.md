@@ -47,7 +47,7 @@ Guidelines for AI coding agents working on cartoload.
   - `--no-color` — disable colored output (auto-disabled when piped)
   - Use `cartoload analyze img compare <file1> <file2>` for side-by-side comparison of two IMG files.
 - Test command: Run this command for testing (important to use `-x`, `-y`, `-H` and `-W`):
-   `cartoload build -S examples/configs/sources/swisstopo.yaml -L examples/configs/layers/switzerland.yaml  -l ch_basemap_test -y 46.93459 -x 7.51105 -W 5 -H 5 -f --preview --executor thread`
+   `cartoload build -c examples/configs/layers/test.yaml -l ch_basemap_25k -y 46.93459 -x 7.51105 -W 5 -H 5 -f --preview --executor thread`
 
 ## Reference Source Code
 
