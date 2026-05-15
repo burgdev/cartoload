@@ -35,6 +35,15 @@ sources:
       - "https://data.geo.admin.ch/api/stac/v1/collections/${layer}"
     attribution: "© swisstopo"
 
+  # GPKG source: vector GeoPackage data from STAC collections
+  swisstopo_skitouring:
+    type: gpkg
+    defaults:
+      layer: ch.swisstopo-karto.skitouren
+    urls:
+      - "https://data.geo.admin.ch/api/stac/v0.9/collections/${layer}"
+    attribution: "© swisstopo"
+
   # GeoTIFF source: point at a directory of already-downloaded GeoTIFF files
   # (e.g. cache from a previous stac download)
   swisstopo_geotiff:

@@ -13,6 +13,7 @@ from PIL import Image
 from .config import CompositeSubLayer, LayerConfig, SourceConfig
 from .downloader.base import BaseDownloader
 from .downloader.cache_key import url_to_cache_key
+from .downloader.gpkg import GPKGDownloader
 from .downloader.stac import STACDownloader
 from .downloader.wmts import WMTSDownloader
 from .exporters.garmin_img import GarminImgExporter
@@ -335,6 +336,25 @@ async def build_layer(
     # STAC and GeoTIFF sources use a separate pipeline
     if source.type in ("stac", "geotiff"):
         return await build_geotiff_layer(
+            effective_layer,
+            source,
+            cache_dir,
+            output_dir,
+            no_download=no_download,
+            offline=offline,
+            force=force,
+            quality=quality,
+            progress_callback=progress_callback,
+            export_progress_callback=export_progress_callback,
+            checkpoint=checkpoint,
+            warmup_only=warmup_only,
+            preview=preview,
+            preview_tiles=preview_tiles,
+        )
+
+    # GPKG sources use the vector rasterizer pipeline
+    if source.type == "gpkg":
+        return await build_gpkg_layer(
             effective_layer,
             source,
             cache_dir,
@@ -914,6 +934,290 @@ async def build_geotiff_layer(
     return output_paths
 
 
+# ---------------------------------------------------------------------------
+# GPKG layer pipeline
+# ---------------------------------------------------------------------------
+
+
+async def build_gpkg_layer(
+    layer: LayerConfig,
+    source: SourceConfig,
+    cache_dir: Path,
+    output_dir: Path,
+    *,
+    no_download: bool = False,
+    offline: bool = False,
+    force: bool = False,
+    quality: int | None = None,
+    progress_callback: ProgressCallback | None = None,
+    export_progress_callback: ExportProgressCallback | None = None,
+    checkpoint: bool = True,
+    warmup_only: bool = False,
+    preview: bool = False,
+    preview_tiles: int = 9,
+) -> list[Path]:
+    """Build a layer from GeoPackage vector data.
+
+    Downloads GPKG files from STAC, rasterizes features onto transparent
+    PNG tiles using the style engine, then exports to Garmin IMG via
+    the standard streaming pipeline.
+
+    Args:
+        layer: Layer configuration
+        source: Source configuration (type must be 'gpkg')
+        cache_dir: Directory for caching downloaded files
+        output_dir: Directory for output files
+        no_download: If True, skip the download stage
+        force: If True, overwrite existing output files
+        quality: JPEG quality for tile encoding
+        progress_callback: Called with (stage_id, description)
+        export_progress_callback: Called with (stage, current, total) for export
+        checkpoint: If True, write checkpoint after each zoom level
+        warmup_only: If True, download but skip export
+
+    Returns:
+        List of paths to output files
+    """
+    from .exporters.garmin_img_model import TileMetadata as ExportTileMetadata
+    from .exporters.garmin_img_writer import _get_worker_count
+    from .processor.rasterio_warp import compute_bounds_4326
+    from .processor.vector_rasterizer import VectorRasterizer
+    from .style import StyleEngine
+
+    # --- Resolve URL and collection ID ---
+    variables: dict[str, str] = dict(source.defaults)
+    if layer.source_args:
+        variables.update(layer.source_args)
+
+    collection_id = variables.get("layer", "")
+    resolved_urls = resolve_templates(source.urls, variables) if source.urls else []
+    resolved_url = resolved_urls[0] if resolved_urls else ""
+
+    if not resolved_url:
+        raise PipelineError(f"GPKG source '{source.id}' has no resolved URL")
+
+    if not collection_id:
+        raise PipelineError(
+            f"GPKG source '{source.id}' requires a 'layer' variable "
+            f"(collection ID) — set in source.defaults or layer source_args"
+        )
+
+    # --- Download GPKG files ---
+    gpkg_paths: list[Path] = []
+
+    if not no_download:
+        if progress_callback:
+            progress_callback(
+                "download", f"Downloading GeoPackages from STAC '{collection_id}'..."
+            )
+        try:
+            downloader = GPKGDownloader(cache_dir, offline=offline)
+            effective_filter = layer.asset_filter or source.asset_filter
+            item_filter = variables.get("item_filter")
+            gpkg_paths = downloader.run(
+                source,
+                layer,
+                resolved_url,
+                collection_id,
+                asset_filter=effective_filter,
+                item_filter=item_filter,
+            )
+        except Exception as e:
+            raise DownloadError(source.id, str(e), cause=e) from e
+    else:
+        logger.info("Skipping GPKG download (--no-download)")
+        # Reconstruct cache paths
+        gpkg_dl = GPKGDownloader(cache_dir, offline=offline)
+        effective_filter = layer.asset_filter or source.asset_filter
+        cache_subdir = gpkg_dl._get_cache_dir(
+            source.id, resolved_url, "", effective_filter
+        )
+        # Walk cache to find .gpkg files
+        if cache_subdir.exists():
+            gpkg_paths = sorted(p for p in cache_subdir.rglob("*.gpkg") if p.is_file())
+        if not gpkg_paths:
+            raise DownloadError(
+                source.id,
+                f"No cached GPKG files found for collection '{collection_id}'",
+            )
+        logger.info("Using %d cached GPKG file(s)", len(gpkg_paths))
+
+    if not gpkg_paths:
+        raise ProcessingError(layer.id, "No GPKG files available for processing")
+
+    # --- Build style engine ---
+    style_engine = StyleEngine.from_config(layer, config_dir=layer.config_dir)
+
+    if not style_engine.rules:
+        logger.warning(
+            "Layer '%s' has no style rules defined. "
+            "Add 'rules' or 'style' (QML path) to the layer config.",
+            layer.id,
+        )
+
+    # --- Rasterize features onto tiles ---
+    if progress_callback:
+        progress_callback("rasterize", "Rasterizing vector features onto tiles...")
+
+    raster_cache_dir = cache_dir / f"{source.id}_rasterized"
+    rasterizer = VectorRasterizer(
+        gpkg_paths=gpkg_paths,
+        style_engine=style_engine,
+        max_workers=4,
+    )
+
+    effective_bounds = layer.bounds
+    if not effective_bounds:
+        raise ProcessingError(layer.id, "GPKG layer requires bounds to be defined")
+
+    rasterizer.render_tiles(
+        zoom_levels=layer.zoom_levels,
+        bounds=effective_bounds,
+        cache_dir=raster_cache_dir,
+        source_id=source.id,
+        progress_callback=progress_callback,
+    )
+
+    if warmup_only:
+        logger.info("Warmup complete for GPKG layer '%s'", layer.id)
+        return []
+
+    # --- Build tile metadata for export ---
+    if progress_callback:
+        progress_callback("process", "Building tile metadata for rasterized tiles...")
+
+    tile_metadata: dict[int, list[ExportTileMetadata]] = {}
+    for zoom in layer.zoom_levels:
+        tile_coords = _compute_tile_coords_from_bounds(effective_bounds, zoom)
+        metadata = []
+        for x, y in tile_coords:
+            tile_path = raster_cache_dir / source.id / str(zoom) / str(x) / f"{y}.png"
+            if not tile_path.exists():
+                continue  # skip tiles with no features
+
+            lat_min, lon_min, lat_max, lon_max = compute_bounds_4326(x, y, zoom)
+            jpeg_size = max(5_000, tile_path.stat().st_size)
+
+            metadata.append(
+                ExportTileMetadata(
+                    x=x,
+                    y=y,
+                    zoom=zoom,
+                    lat_min=lat_min,
+                    lon_min=lon_min,
+                    lat_max=lat_max,
+                    lon_max=lon_max,
+                    jpeg_size=jpeg_size,
+                    source_path=tile_path,
+                )
+            )
+        tile_metadata[zoom] = metadata
+
+    total_tiles = sum(len(t) for t in tile_metadata.values())
+    if total_tiles == 0:
+        raise ProcessingError(layer.id, "No rasterized tiles available for processing")
+
+    logger.info(
+        "Computed metadata for %d rasterized tiles across %d zoom levels",
+        total_tiles,
+        len(tile_metadata),
+    )
+
+    # --- Export to IMG ---
+    if progress_callback:
+        workers = _get_worker_count()
+        if workers > 1:
+            progress_callback(
+                "export",
+                f"Exporting rasterized GPKG layer to Garmin IMG ({workers}x parallel)...",
+            )
+        else:
+            progress_callback(
+                "export", "Exporting rasterized GPKG layer to Garmin IMG..."
+            )
+
+    output_paths: list[Path]
+    try:
+        exporter = get_exporter(layer, output_dir)
+        output_file = output_dir / layer.output
+
+        if output_file.exists():
+            if force:
+                output_file.unlink()
+            else:
+                raise ExportError(
+                    layer.id,
+                    f"Output file already exists: {output_file}. "
+                    f"Use --force to overwrite.",
+                )
+
+        # Build a PNG-aware tile processor
+        png_processor = _make_gpkg_processor(quality)
+
+        output_paths = exporter.export_from_metadata(
+            tile_metadata,
+            layer,
+            output_file,
+            source_crs="EPSG:4326",
+            quality=quality,
+            progress_callback=export_progress_callback,
+            tile_processor_override=png_processor,
+        )
+    except ExportError:
+        raise
+    except Exception as e:
+        raise ExportError(layer.id, str(e), cause=e) from e
+
+    logger.info(
+        f"GPKG build complete for layer '{layer.id}': "
+        f"{len(output_paths)} file(s) produced"
+    )
+
+    return output_paths
+
+
+def _make_gpkg_processor(quality: int | None = None):
+    """Create a tile processor that reads rasterized PNG tiles.
+
+    Returns a callable with the signature expected by the streaming writer:
+    (source_path, x, y, zoom, source_crs, quality) -> (jpeg_bytes, bounds) | None
+    """
+    from .exporters.garmin_img_writer import ProcessedTile
+    from .processor.rasterio_warp import compute_bounds_4326
+
+    _quality = quality or 85
+
+    def gpkg_processor(
+        source_path: Path | None,
+        x: int,
+        y: int,
+        zoom: int,
+        crs: str,
+        jpeg_quality: int | None,
+    ) -> ProcessedTile | None:
+        if source_path is None or not source_path.exists():
+            return None
+
+        try:
+            img = Image.open(source_path)
+            # Convert RGBA PNG to RGB JPEG
+            # Composite onto white background for JPEG compatibility
+            background = Image.new("RGB", img.size, (255, 255, 255))
+            background.paste(img, mask=img.split()[3] if img.mode == "RGBA" else None)
+            buf = io.BytesIO()
+            background.save(
+                buf, format="JPEG", quality=jpeg_quality or _quality, optimize=True
+            )
+            jpeg_bytes = buf.getvalue()
+            bounds = compute_bounds_4326(x, y, zoom)
+            return (jpeg_bytes, bounds)
+        except Exception as e:
+            logger.warning("Failed to process rasterized tile %s: %s", source_path, e)
+            return None
+
+    return gpkg_processor
+
+
 def _compute_tile_coords_from_bounds(
     bounds: dict[str, float], zoom: int
 ) -> list[tuple[int, int]]:
@@ -1421,7 +1725,7 @@ async def build_composite_layer(
                 else:
                     raise PipelineError(
                         f"Composite sub-layer source type '{sub_source.type}' "
-                        f"is not supported. Supported types: wmts, stac"
+                        f"is not supported. Supported types: wmts, stac, gpkg"
                     )
             except PipelineError:
                 raise

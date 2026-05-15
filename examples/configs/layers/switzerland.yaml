@@ -1,6 +1,5 @@
 # Switzerland layer definitions
 
-
 includes:
   - ../sources/swisstopo.yaml
 
@@ -122,6 +121,17 @@ layers:
     zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16]
     exporter: garmin_img
     output: ch_swisstopo_skitouring.img
+
+  ch_swisstopo_skitouring_vector:
+    name: "Switzerland Skiroutes (Vector)"
+    description: "Swisstopo skiroutes rasterized from vector GeoPackage"
+    source:
+      ref: swisstopo_skitouring
+      item_filter: "ski_network"
+    style: ../styles/ski_network_2056.qml
+    zoom_levels: [11, 12, 13, 14, 15, 16]
+    exporter: garmin_img
+    output: ch_swisstopo_skitouring_vector.img
 
   ch_swisstopo_steepness:
     name: "Switzerland steepness"

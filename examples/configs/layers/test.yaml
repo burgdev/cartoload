@@ -93,10 +93,18 @@ layers:
         opacity:
           { 11: 0.4, 12: 0.4, 13: 0.4, 14: 0.6, 15: 0.7, 16: 0.7, 17: 0.5 }
         zoom_levels: [13, 14, 15, 16, 17] #, 17] #, 18]
-      - ref: ch_swisstopo_skitouring
+      #- name: "Switzerland Skiroutes"
+      #  source:
+      #    ref: swisstopo_stac
+      #    layer: ch.swisstopo-karto.skitouren
+      #  opacity:
+      #    { 11: 0.4, 12: 0.4, 13: 0.5, 14: 0.6, 15: 0.7, 16: 0.7, 17: 0.5 }
+      #  zoom_levels: [13, 14, 15, 16, 17]
+      - ref: ch_swisstopo_skitouring_vector
         opacity:
           { 11: 0.4, 12: 0.4, 13: 0.5, 14: 0.6, 15: 0.7, 16: 0.7, 17: 0.5 }
-        zoom_levels: [13, 14, 15, 16, 17] #, 17] #, 18]
+        zoom_levels: [13, 14, 15, 16, 17]
+        item_filter: "ski_network.*" # regex matched against .gpkg filenames
       - ref: ch_swisstopo_steepness
         opacity: { 15: 0.2, 16: 0.3, 17: 0.2 }
         zoom_levels: [15, 16, 17] #, 17] #, 18]

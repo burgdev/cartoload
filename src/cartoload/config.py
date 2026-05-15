@@ -74,6 +74,13 @@ class LayerConfig:
     output: str = ""
     bounds: dict[str, float] | None = None
     layers: list[CompositeSubLayer] | None = None
+    # Style configuration for vector/rasterized layers
+    rules: list[dict] | None = None  # Inline style rules (Tier 1/2)
+    style: str | None = None  # Path to QML file (Tier 3)
+    garmin_types: dict[str, dict] | None = None  # Garmin type mapping for QML rules
+    config_dir: str | None = (
+        None  # Directory of the config file (for relative path resolution)
+    )
 
     def is_composite(self) -> bool:
         """Return True if this layer is a composite of multiple sub-layers."""
@@ -102,13 +109,14 @@ class Config:
 
 
 # Allowed source types
-ALLOWED_SOURCE_TYPES = {"wmts", "stac", "geotiff"}
+ALLOWED_SOURCE_TYPES = {"wmts", "stac", "geotiff", "gpkg"}
 
 # Required fields for each source type
 SOURCE_TYPE_REQUIRED_FIELDS = {
     "wmts": ["url_template"],
     "stac": ["url_template"],
     "geotiff": ["url_template"],
+    "gpkg": ["url_template"],
 }
 
 # Supported settings keys and their env var names
@@ -393,6 +401,11 @@ def _parse_layers_section(
         if extension is not None and "extension" not in source_args:
             source_args["extension"] = extension
 
+        # Parse style configuration
+        rules = layer_dict.get("rules")
+        style = layer_dict.get("style")
+        garmin_types = layer_dict.get("garmin_types")
+
         # Create LayerConfig instance
         layers[layer_id] = LayerConfig(
             id=layer_id,
@@ -408,6 +421,10 @@ def _parse_layers_section(
             output=layer_dict["output"],
             bounds=layer_bounds,
             layers=sub_layers,
+            rules=rules,
+            style=style,
+            garmin_types=garmin_types,
+            config_dir=str(Path(path).parent.resolve()),
         )
 
     return (layers, bounds)
