@@ -245,7 +245,7 @@ class TestOfflineMode:
         # Set up a cached file with metadata using correct cache key path
         source_config = MagicMock()
         source_config.id = "test_source"
-        source_config.type = "stac"
+        source_config.type = "geotiff"
         source_config.urls = ["https://example.com/api/v1/collections/${layer}"]
         source_config.asset_filter = None
         source_config.defaults = {"layer": "test"}
@@ -286,7 +286,7 @@ class TestOfflineMode:
 
         source_config = MagicMock()
         source_config.id = "test_source"
-        source_config.type = "stac"
+        source_config.type = "geotiff"
         source_config.urls = ["https://example.com/api/v1/collections/${layer}"]
         source_config.asset_filter = None
         source_config.defaults = {"layer": "test"}

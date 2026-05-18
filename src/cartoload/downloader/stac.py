@@ -17,6 +17,7 @@ from rich.progress import (
 )
 
 from cartoload.downloader.cache_key import migrate_cache_key, url_to_cache_key
+from cartoload.downloader.stac_query import query_stac_collection
 
 if TYPE_CHECKING:
     from cartoload.config import LayerConfig, SourceConfig
@@ -77,9 +78,9 @@ class STACDownloader:
         Returns:
             List of paths to downloaded (or cached) GeoTIFF files
         """
-        if source_config.type != "stac":
+        if source_config.type != "geotiff":
             raise ValueError(
-                f"STACDownloader requires source type 'stac', "
+                f"STACDownloader requires source type 'geotiff', "
                 f"got '{source_config.type}'"
             )
 
@@ -195,7 +196,6 @@ class STACDownloader:
         Works directly with the collection URL (e.g.
         ``https://example.com/api/v1/collections/{id}``) by fetching
         items via the ``/items`` sub-endpoint with a bbox filter.
-        No ``pystac_client`` dependency — uses plain HTTP requests.
 
         Args:
             collection_url: STAC collection endpoint URL
@@ -206,66 +206,14 @@ class STACDownloader:
         Returns:
             List of tuples: (item_id, asset_url, expected_size_bytes)
         """
-        items_url = collection_url.rstrip("/") + "/items"
-        params: dict[str, str] = {
-            "bbox": ",".join(str(v) for v in bbox),
-            "limit": "500",
-        }
-
-        try:
-            response = requests.get(items_url, params=params, timeout=30)
-            response.raise_for_status()
-        except requests.RequestException as e:
-            raise Exception(f"Failed to query STAC items at {items_url}: {e}") from e
-
-        data = response.json()
-        features = data.get("features", [])
-
-        if not features:
-            return []
-
-        results: list[tuple[str, str, int | None]] = []
-        for feature in features:
-            item_id = feature.get("id", "unknown")
-            assets = feature.get("assets", {})
-
-            # Client-side bbox filter: skip items whose footprint doesn't
-            # overlap the requested bbox.  STAC items include a "bbox"
-            # field [west, south, east, north] that describes the item's
-            # spatial extent.
-            item_bbox = feature.get("bbox")
-            if item_bbox and len(item_bbox) == 4:
-                if (
-                    item_bbox[2] < bbox[0]  # item east < query west
-                    or item_bbox[0] > bbox[2]  # item west > query east
-                    or item_bbox[3] < bbox[1]  # item north < query south
-                    or item_bbox[1] > bbox[3]  # item south > query north
-                ):
-                    logger.debug(
-                        "STAC item '%s' (bbox %s) does not overlap query bbox, skipping",
-                        item_id,
-                        item_bbox,
-                    )
-                    continue
-
-            geotiff_url = _find_geotiff_asset(assets, asset_filter)
-            if geotiff_url is None:
-                if asset_filter:
-                    logger.warning(
-                        "No GeoTIFF asset matching filter %s in STAC item '%s', skipping",
-                        asset_filter,
-                        item_id,
-                    )
-                else:
-                    logger.warning(
-                        "No GeoTIFF asset found in STAC item '%s', skipping",
-                        item_id,
-                    )
-                continue
-
-            results.append((item_id, geotiff_url, None))
-
-        return results
+        return query_stac_collection(
+            collection_url,
+            bbox,
+            _find_geotiff_asset,
+            asset_filter=asset_filter,
+            collection_id=collection_id,
+            asset_label="GeoTIFF",
+        )
 
     def download(
         self,

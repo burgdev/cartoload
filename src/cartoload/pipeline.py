@@ -107,9 +107,6 @@ def _resolve_wmts_urls(
     if source_args:
         variables.update(source_args)
 
-    if source.url_template:
-        return expand(source.url_template, variables)
-
     if source.urls:
         resolved = resolve_templates(source.urls, variables)
         return resolved[0] if resolved else ""
@@ -141,10 +138,8 @@ def get_downloader(
         PipelineError: If the source type is not supported
     """
     if source.type == "wmts":
-        if not source.url_template and not source.urls:
-            raise PipelineError(
-                f"WMTS source '{source.id}' missing required 'url_template' or 'urls'"
-            )
+        if not source.urls:
+            raise PipelineError(f"WMTS source '{source.id}' missing required 'urls'")
 
         # Merge variables: source defaults → layer source_args
         variables: dict[str, str] = dict(source.defaults)
@@ -155,10 +150,6 @@ def get_downloader(
         resolved_urls: list[str] = []
         if source.urls:
             resolved_urls = resolve_templates(source.urls, variables)
-        if source.url_template:
-            resolved = expand(source.url_template, variables)
-            if resolved not in resolved_urls:
-                resolved_urls.insert(0, resolved)
 
         # Per-tile variables resolved at download time — not an error
         _PER_TILE_VARS = {"x", "y", "z", "zoom"}
@@ -333,8 +324,8 @@ async def build_layer(
     # Resolve source
     source = resolve_source(layer, sources)
 
-    # STAC and GeoTIFF sources use a separate pipeline
-    if source.type in ("stac", "geotiff"):
+    # GeoTIFF sources use the raster tile pipeline
+    if source.type == "geotiff":
         return await build_geotiff_layer(
             effective_layer,
             source,
@@ -602,10 +593,10 @@ async def build_geotiff_layer(
 ) -> list[Path]:
     """Build a layer from GeoTIFF files (STAC download or local path source).
 
-    For ``stac`` sources: resolves the URL template, runs the STAC downloader
-    to fetch GeoTIFF assets, then builds a spatial index.
+    For ``source_method == "stac"``: resolves the URL template, runs the
+    STAC downloader to fetch GeoTIFF assets, then builds a spatial index.
 
-    For ``geotiff`` sources: resolves local/remote paths via
+    For ``source_method == "path"``: resolves local/remote paths via
     ``collect_geotiff_files``, then builds a spatial index.
 
     In both cases, the spatial index is used to look up which GeoTIFF covers
@@ -614,7 +605,7 @@ async def build_geotiff_layer(
 
     Args:
         layer: Layer configuration
-        source: Source configuration (type must be 'stac' or 'geotiff')
+        source: Source configuration (type must be 'geotiff')
         cache_dir: Directory for caching downloaded files
         output_dir: Directory for output files
         no_download: If True, skip the download stage
@@ -636,7 +627,7 @@ async def build_geotiff_layer(
     geotiff_paths: list[Path]
     collection_id: str = ""
 
-    if source.type == "stac":
+    if source.source_method == "stac":
         # Resolve URL template with source defaults + layer source_args
         variables: dict[str, str] = dict(source.defaults)
         if layer.source_args:
@@ -647,12 +638,14 @@ async def build_geotiff_layer(
         resolved_url = resolved_urls[0] if resolved_urls else ""
 
         if not resolved_url:
-            raise PipelineError(f"STAC source '{source.id}' has no resolved URL")
+            raise PipelineError(
+                f"GeoTIFF source '{source.id}' (source=stac) has no resolved URL"
+            )
 
         if not collection_id:
             raise PipelineError(
-                f"STAC source '{source.id}' requires a 'layer' variable "
-                f"(collection ID) — set in source.defaults or layer source_args"
+                f"GeoTIFF source '{source.id}' (source=stac) requires a 'layer' "
+                f"variable (collection ID) — set in source.defaults or layer source_args"
             )
 
         if not no_download:
@@ -696,7 +689,7 @@ async def build_geotiff_layer(
                 )
             logger.info("Using %d cached GeoTIFF(s)", len(geotiff_paths))
 
-    elif source.type == "geotiff":
+    elif source.source_method == "path":
         if not source.urls:
             raise PipelineError(f"GeoTIFF source '{source.id}' requires 'urls'")
 
@@ -722,7 +715,8 @@ async def build_geotiff_layer(
                 raise DownloadError(source.id, str(e), cause=e) from e
     else:
         raise PipelineError(
-            f"build_geotiff_layer called with unsupported source type '{source.type}'"
+            f"build_geotiff_layer called with unsupported source method "
+            f"'{source.source_method}' for source '{source.id}'"
         )
 
     if not geotiff_paths:
@@ -990,57 +984,95 @@ async def build_gpkg_layer(
         variables.update(layer.source_args)
 
     collection_id = variables.get("layer", "")
-    resolved_urls = resolve_templates(source.urls, variables) if source.urls else []
-    resolved_url = resolved_urls[0] if resolved_urls else ""
-
-    if not resolved_url:
-        raise PipelineError(f"GPKG source '{source.id}' has no resolved URL")
-
-    if not collection_id:
-        raise PipelineError(
-            f"GPKG source '{source.id}' requires a 'layer' variable "
-            f"(collection ID) — set in source.defaults or layer source_args"
-        )
 
     # --- Download GPKG files ---
     gpkg_paths: list[Path] = []
 
-    if not no_download:
-        if progress_callback:
-            progress_callback(
-                "download", f"Downloading GeoPackages from STAC '{collection_id}'..."
+    if source.source_method == "stac":
+        resolved_urls = resolve_templates(source.urls, variables) if source.urls else []
+        resolved_url = resolved_urls[0] if resolved_urls else ""
+
+        if not resolved_url:
+            raise PipelineError(
+                f"GPKG source '{source.id}' (source=stac) has no resolved URL"
             )
-        try:
-            downloader = GPKGDownloader(cache_dir, offline=offline)
+
+        if not collection_id:
+            raise PipelineError(
+                f"GPKG source '{source.id}' (source=stac) requires a 'layer' "
+                f"variable (collection ID) — set in source.defaults or layer source_args"
+            )
+
+        if not no_download:
+            if progress_callback:
+                progress_callback(
+                    "download",
+                    f"Downloading GeoPackages from STAC '{collection_id}'...",
+                )
+            try:
+                downloader = GPKGDownloader(cache_dir, offline=offline)
+                effective_filter = layer.asset_filter or source.asset_filter
+                item_filter = variables.get("item_filter")
+                gpkg_paths = downloader.run(
+                    source,
+                    layer,
+                    resolved_url,
+                    collection_id,
+                    asset_filter=effective_filter,
+                    item_filter=item_filter,
+                )
+            except Exception as e:
+                raise DownloadError(source.id, str(e), cause=e) from e
+        else:
+            logger.info("Skipping GPKG download (--no-download)")
+            # Reconstruct cache paths
+            gpkg_dl = GPKGDownloader(cache_dir, offline=offline)
             effective_filter = layer.asset_filter or source.asset_filter
-            item_filter = variables.get("item_filter")
-            gpkg_paths = downloader.run(
-                source,
-                layer,
-                resolved_url,
-                collection_id,
-                asset_filter=effective_filter,
-                item_filter=item_filter,
+            cache_subdir = gpkg_dl._get_cache_dir(
+                source.id, resolved_url, "", effective_filter
             )
-        except Exception as e:
-            raise DownloadError(source.id, str(e), cause=e) from e
-    else:
-        logger.info("Skipping GPKG download (--no-download)")
-        # Reconstruct cache paths
-        gpkg_dl = GPKGDownloader(cache_dir, offline=offline)
-        effective_filter = layer.asset_filter or source.asset_filter
-        cache_subdir = gpkg_dl._get_cache_dir(
-            source.id, resolved_url, "", effective_filter
-        )
-        # Walk cache to find .gpkg files
-        if cache_subdir.exists():
-            gpkg_paths = sorted(p for p in cache_subdir.rglob("*.gpkg") if p.is_file())
+            # Walk cache to find .gpkg files
+            if cache_subdir.exists():
+                gpkg_paths = sorted(
+                    p for p in cache_subdir.rglob("*.gpkg") if p.is_file()
+                )
+            if not gpkg_paths:
+                raise DownloadError(
+                    source.id,
+                    f"No cached GPKG files found for collection '{collection_id}'",
+                )
+            logger.info("Using %d cached GPKG file(s)", len(gpkg_paths))
+
+    elif source.source_method == "path":
+        # Local GPKG files — resolve paths directly
+        if not source.urls:
+            raise PipelineError(f"GPKG source '{source.id}' requires 'urls'")
+
+        config_dir = Path(source.config_dir) if source.config_dir else None
+        for url in source.urls:
+            if config_dir and not Path(url).is_absolute():
+                p = config_dir / url
+            else:
+                p = Path(url)
+            if p.exists() and p.suffix == ".gpkg":
+                gpkg_paths.append(p)
+            elif p.exists() and p.suffix == ".zip":
+                # Extract GPKG from zip (lazy — extract on first use)
+                from cartoload.downloader.gpkg import _extract_gpkg_from_zip
+
+                extracted = _extract_gpkg_from_zip(p, p.parent)
+                gpkg_paths.append(extracted)
+
         if not gpkg_paths:
             raise DownloadError(
                 source.id,
-                f"No cached GPKG files found for collection '{collection_id}'",
+                f"No GPKG files found at paths: {source.urls}",
             )
-        logger.info("Using %d cached GPKG file(s)", len(gpkg_paths))
+    else:
+        raise PipelineError(
+            f"build_gpkg_layer called with unsupported source method "
+            f"'{source.source_method}' for source '{source.id}'"
+        )
 
     if not gpkg_paths:
         raise ProcessingError(layer.id, "No GPKG files available for processing")
@@ -1674,7 +1706,7 @@ async def build_composite_layer(
         for idx, sub in enumerate(sub_layers):
             sub_source = _resolve_sub_layer_source(sub, sources, layer.id)
             try:
-                if sub_source.type == "stac":
+                if sub_source.type == "geotiff" and sub_source.source_method == "stac":
                     _download_stac_sub_layer(
                         sub,
                         sub_source,
@@ -1725,7 +1757,7 @@ async def build_composite_layer(
                 else:
                     raise PipelineError(
                         f"Composite sub-layer source type '{sub_source.type}' "
-                        f"is not supported. Supported types: wmts, stac, gpkg"
+                        f"is not supported. Supported types: wmts, geotiff, gpkg"
                     )
             except PipelineError:
                 raise
@@ -1738,12 +1770,12 @@ async def build_composite_layer(
     else:
         logger.info("Skipping download stage (--no-download)")
 
-    # --- Build GeoTIFF mosaics for STAC sub-layers ---
-    # Maps sub-layer index -> pre-warped mosaic Path (only for STAC sub-layers)
+    # --- Build GeoTIFF mosaics for STAC-based sub-layers ---
+    # Maps sub-layer index -> pre-warped mosaic Path (only for geotiff+stac sub-layers)
     stac_mosaics: dict[int, Path] = {}
     for idx, sub in enumerate(sub_layers):
         sub_source = _resolve_sub_layer_source(sub, sources, layer.id)
-        if sub_source.type != "stac":
+        if not (sub_source.type == "geotiff" and sub_source.source_method == "stac"):
             continue
 
         try:
@@ -1777,7 +1809,7 @@ async def build_composite_layer(
 
     # Determine per-sub-layer source type and CRS.
     # Each sub-layer resolves its own source independently so that
-    # different source types (stac, wmts, geotiff) with different
+    # different source types (geotiff, wmts, gpkg) with different
     # CRSes can be mixed in one composite layer.
     _sub_sources: list[tuple[str, str]] = []  # [(source_type, source_crs), ...]
     for sub in sub_layers:

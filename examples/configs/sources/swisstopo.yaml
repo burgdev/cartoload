@@ -26,7 +26,7 @@ sources:
     max_threads: 4
 
   swisstopo_stac:
-    type: stac
+    type: geotiff
     defaults:
       layer: ch.swisstopo.pixelkarte-farbe-pk25.noscale
       asset_filter:

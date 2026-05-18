@@ -10,12 +10,17 @@ import yaml
 
 @dataclass
 class SourceConfig:
-    """Configuration for a geodata source (WMTS, GeoTIFF/STAC, etc.)."""
+    """Configuration for a geodata source.
+
+    ``type`` is the data format: ``geotiff``, ``gpkg``, or ``wmts``.
+    ``source_method`` is how data is fetched: ``stac``, ``path``, or
+    ``None`` (auto-detected from URLs).
+    """
 
     id: str
-    type: str  # wmts, stac, geotiff
-    url_template: str | None = None
+    type: str  # geotiff, gpkg, wmts
     urls: list[str] = field(default_factory=list)
+    source_method: str | None = None  # stac, path, or None (auto-detect)
     attribution: str = ""
     rate_limit_ms: int = 150
     max_threads: int = 4
@@ -108,15 +113,19 @@ class Config:
     settings: SettingsConfig = field(default_factory=SettingsConfig)
 
 
-# Allowed source types
-ALLOWED_SOURCE_TYPES = {"wmts", "stac", "geotiff", "gpkg"}
+# Allowed source types (data formats)
+ALLOWED_SOURCE_TYPES = {"geotiff", "gpkg", "wmts"}
+
+# Old types that are no longer valid, with migration hints
+_DEPRECATED_TYPES = {
+    "stac": "Use type 'geotiff' — the STAC source method is auto-detected from the URL",
+}
 
 # Required fields for each source type
-SOURCE_TYPE_REQUIRED_FIELDS = {
-    "wmts": ["url_template"],
-    "stac": ["url_template"],
-    "geotiff": ["url_template"],
-    "gpkg": ["url_template"],
+SOURCE_TYPE_REQUIRED_FIELDS: dict[str, list[str]] = {
+    "wmts": ["urls"],
+    "geotiff": ["urls"],
+    "gpkg": ["urls"],
 }
 
 # Supported settings keys and their env var names
@@ -124,6 +133,50 @@ SETTINGS_ENV_PREFIX = "CARTOLOAD_"
 SETTINGS_KEYS = {"cache_dir", "output_dir", "executor", "quality", "rate_limit_ms"}
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Source method resolution
+# ---------------------------------------------------------------------------
+
+
+def _resolve_source_method(urls: list[str], explicit: str | None = None) -> str:
+    """Determine how a source should be fetched.
+
+    Args:
+        urls: List of source location strings (URLs or paths).
+        explicit: Explicitly configured source method (``stac`` or ``path``).
+
+    Returns:
+        The resolved source method: ``stac`` or ``path``.
+
+    Raises:
+        ValueError: If the method cannot be determined.
+    """
+    if explicit:
+        if explicit not in ("stac", "path"):
+            raise ValueError(
+                f"Invalid source method '{explicit}'. Valid values: stac, path"
+            )
+        return explicit
+
+    if not urls:
+        raise ValueError("Cannot auto-detect source method: no URLs provided")
+
+    sample = urls[0]
+
+    # STAC collection URLs
+    if "/collections/" in sample or "/stac/" in sample:
+        return "stac"
+
+    # Local paths: relative or absolute, no URL scheme
+    if sample.startswith(("./", "../", "/")) or "://" not in sample:
+        return "path"
+
+    raise ValueError(
+        f"Cannot auto-detect source method from URL '{sample}'. "
+        f"Add an explicit 'source' field (e.g. 'source: stac' or 'source: path')."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +213,13 @@ def _parse_sources_section(data: dict, path: str) -> dict[str, SourceConfig]:
 
         source_type = source_dict["type"]
 
+        # Check for deprecated types with helpful migration hints
+        if source_type in _DEPRECATED_TYPES:
+            raise ValueError(
+                f"{path}: Source '{source_id}' uses deprecated type '{source_type}'. "
+                f"{_DEPRECATED_TYPES[source_type]}"
+            )
+
         # Validate type is in allowed list
         if source_type not in ALLOWED_SOURCE_TYPES:
             raise ValueError(
@@ -167,28 +227,28 @@ def _parse_sources_section(data: dict, path: str) -> dict[str, SourceConfig]:
                 f"Valid types: {', '.join(sorted(ALLOWED_SOURCE_TYPES))}"
             )
 
-        # Validate type-specific required fields
-        if source_type in SOURCE_TYPE_REQUIRED_FIELDS:
-            for required_field in SOURCE_TYPE_REQUIRED_FIELDS[source_type]:
-                # url_template can be replaced by urls list for all types
-                if required_field == "url_template":
-                    has_url = (
-                        "url_template" in source_dict
-                        and source_dict["url_template"] is not None
-                    ) or ("urls" in source_dict and source_dict["urls"])
-                    if not has_url:
-                        raise ValueError(
-                            f"{path}: Source '{source_id}' (type={source_type}) "
-                            f"missing required field 'url_template' or 'urls'"
-                        )
-                elif (
-                    required_field not in source_dict
-                    or source_dict[required_field] is None
-                ):
-                    raise ValueError(
-                        f"{path}: Source '{source_id}' (type={source_type}) "
-                        f"missing required field '{required_field}'"
-                    )
+        # Reject deprecated url_template field
+        if "url_template" in source_dict:
+            raise ValueError(
+                f"{path}: Source '{source_id}' uses deprecated field 'url_template'. "
+                f"Use 'urls' instead (a string or list of strings)."
+            )
+
+        # Parse URLs: accept string or list
+        urls = source_dict.get("urls", [])
+        if isinstance(urls, str):
+            urls = [urls]
+        if not isinstance(urls, list):
+            raise ValueError(
+                f"{path}: Source '{source_id}' field 'urls' must be a list or string"
+            )
+
+        # Validate required URLs
+        if not urls:
+            raise ValueError(
+                f"{path}: Source '{source_id}' (type={source_type}) "
+                f"missing required field 'urls'"
+            )
 
         # Validate optional fields have correct types
         if "rate_limit_ms" in source_dict and not isinstance(
@@ -208,16 +268,6 @@ def _parse_sources_section(data: dict, path: str) -> dict[str, SourceConfig]:
         if "crs" in source_dict and not isinstance(source_dict.get("crs"), str):
             raise ValueError(
                 f"{path}: Source '{source_id}' field 'crs' must be a string"
-            )
-
-        # Parse URLs: accept url_template (string) or urls (list) or both
-        url_template = source_dict.get("url_template")
-        urls = source_dict.get("urls", [])
-        if isinstance(urls, str):
-            urls = [urls]
-        if not isinstance(urls, list):
-            raise ValueError(
-                f"{path}: Source '{source_id}' field 'urls' must be a list or string"
             )
 
         # Parse defaults
@@ -241,12 +291,19 @@ def _parse_sources_section(data: dict, path: str) -> dict[str, SourceConfig]:
 
         defaults = {str(k): str(v) for k, v in defaults_raw.items()}
 
+        # Resolve source method (explicit or auto-detected)
+        # WMTS doesn't use source_method — skip resolution
+        source_method: str | None = None
+        if source_type != "wmts":
+            explicit_source = source_dict.get("source")
+            source_method = _resolve_source_method(urls, explicit=explicit_source)
+
         # Create SourceConfig instance
         sources[source_id] = SourceConfig(
             id=source_id,
             type=source_type,
-            url_template=url_template,
             urls=urls,
+            source_method=source_method,
             attribution=source_dict.get("attribution", ""),
             rate_limit_ms=source_dict.get("rate_limit_ms", 150),
             max_threads=source_dict.get("max_threads", 4),

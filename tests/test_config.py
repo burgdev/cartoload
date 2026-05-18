@@ -12,6 +12,7 @@ from cartoload.config import (
     _parse_layers_section,
     _parse_settings_section,
     _parse_sources_section,
+    _resolve_source_method,
     load_config,
     merge_layers,
     merge_settings,
@@ -31,14 +32,14 @@ def test_source_config_wmts():
     source = SourceConfig(
         id="swisstopo_wmts",
         type="wmts",
-        url_template="https://wmts.example.com/{layer}/{z}/{x}/{y}.jpeg",
+        urls=["https://wmts.example.com/{layer}/{z}/{x}/{y}.jpeg"],
         attribution="© swisstopo",
         rate_limit_ms=150,
         max_threads=4,
     )
     assert source.id == "swisstopo_wmts"
     assert source.type == "wmts"
-    assert source.url_template is not None
+    assert source.urls is not None
     assert source.rate_limit_ms == 150
     assert source.max_threads == 4
 
@@ -46,19 +47,20 @@ def test_source_config_wmts():
 def test_source_config_geotiff():
     source = SourceConfig(
         id="swisstopo_stac",
-        type="stac",
+        type="geotiff",
         urls=["https://data.geo.admin.ch/api/stac/v1/collections/test"],
+        source_method="stac",
         attribution="© swisstopo",
     )
     assert source.id == "swisstopo_stac"
-    assert source.type == "stac"
-    assert source.url_template is None
+    assert source.type == "geotiff"
+    assert source.source_method == "stac"
     assert source.urls is not None
 
 
 def test_source_config_defaults():
     source = SourceConfig(id="minimal", type="wmts")
-    assert source.url_template is None
+    assert source.urls == []
     assert source.attribution == ""
     assert source.rate_limit_ms == 150
     assert source.max_threads == 4
@@ -110,12 +112,12 @@ def test_parse_sources_section_valid():
         "sources": {
             "test_wmts": {
                 "type": "wmts",
-                "url_template": "https://example.com/{z}/{x}/{y}.png",
+                "urls": ["https://example.com/{z}/{x}/{y}.png"],
                 "attribution": "Test",
             },
             "test_geotiff": {
-                "type": "stac",
-                "urls": ["https://stac.example.com"],
+                "type": "geotiff",
+                "urls": ["https://stac.example.com/collections/test"],
             },
         }
     }
@@ -124,7 +126,7 @@ def test_parse_sources_section_valid():
     assert "test_wmts" in sources
     assert "test_geotiff" in sources
     assert sources["test_wmts"].type == "wmts"
-    assert sources["test_geotiff"].urls == ["https://stac.example.com"]
+    assert sources["test_geotiff"].urls == ["https://stac.example.com/collections/test"]
 
 
 def test_parse_sources_section_missing():
@@ -136,7 +138,7 @@ def test_parse_sources_section_missing():
 def test_parse_sources_section_missing_type():
     with pytest.raises(ValueError, match="missing required field 'type'"):
         _parse_sources_section(
-            {"sources": {"bad": {"url_template": "https://example.com"}}},
+            {"sources": {"bad": {"urls": ["https://example.com"]}}},
             "test.yaml",
         )
 
@@ -150,7 +152,7 @@ def test_parse_sources_section_invalid_type():
 
 
 def test_parse_sources_section_missing_required_field():
-    with pytest.raises(ValueError, match="missing required field 'url_template'"):
+    with pytest.raises(ValueError, match="missing required field 'urls'"):
         _parse_sources_section(
             {"sources": {"wmts_source": {"type": "wmts"}}},
             "test.yaml",
@@ -162,7 +164,7 @@ def test_parse_sources_section_crs_field():
         "sources": {
             "test_wmts": {
                 "type": "wmts",
-                "url_template": "https://example.com/{z}/{x}/{y}.png",
+                "urls": ["https://example.com/{z}/{x}/{y}.png"],
                 "crs": "EPSG:3857",
             }
         }
@@ -176,7 +178,7 @@ def test_parse_sources_section_crs_default_none():
         "sources": {
             "test_wmts": {
                 "type": "wmts",
-                "url_template": "https://example.com/{z}/{x}/{y}.png",
+                "urls": ["https://example.com/{z}/{x}/{y}.png"],
             }
         }
     }
@@ -191,7 +193,7 @@ def test_parse_sources_section_crs_invalid_type():
                 "sources": {
                     "test_wmts": {
                         "type": "wmts",
-                        "url_template": "https://x",
+                        "urls": ["https://x"],
                         "crs": 3857,
                     }
                 }
@@ -214,7 +216,6 @@ def test_parse_sources_section_urls_list():
     }
     sources = _parse_sources_section(data, "test.yaml")
     assert len(sources["test_wmts"].urls) == 2
-    assert sources["test_wmts"].url_template is None
 
 
 def test_parse_sources_section_urls_string():
@@ -234,8 +235,8 @@ def test_parse_sources_section_asset_filter():
     data = {
         "sources": {
             "test_stac": {
-                "type": "stac",
-                "urls": ["https://stac.example.com"],
+                "type": "geotiff",
+                "urls": ["https://stac.example.com/collections/test"],
                 "defaults": {
                     "layer": "my_collection",
                     "asset_filter": {"geoadmin:variant": "komb"},
@@ -253,8 +254,8 @@ def test_parse_sources_section_no_asset_filter():
     data = {
         "sources": {
             "test_stac": {
-                "type": "stac",
-                "urls": ["https://stac.example.com"],
+                "type": "geotiff",
+                "urls": ["https://stac.example.com/collections/test"],
                 "defaults": {"layer": "my_collection"},
             }
         }
@@ -269,8 +270,8 @@ def test_parse_sources_section_asset_filter_invalid_type():
             {
                 "sources": {
                     "test_stac": {
-                        "type": "stac",
-                        "urls": ["https://stac.example.com"],
+                        "type": "geotiff",
+                        "urls": ["https://stac.example.com/collections/test"],
                         "defaults": {
                             "layer": "my_collection",
                             "asset_filter": "not_a_dict",
@@ -452,7 +453,7 @@ def test_parse_layers_section_no_asset_filter():
 def test_merge_sources():
     sources1 = {
         "source1": SourceConfig(id="source1", type="wmts"),
-        "source2": SourceConfig(id="source2", type="stac"),
+        "source2": SourceConfig(id="source2", type="geotiff"),
     }
     sources2 = {
         "source2": SourceConfig(id="source2", type="wmts"),  # overwrite
@@ -548,7 +549,7 @@ def test_load_config_single_file(tmp_path):
             "sources": {
                 "test_source": {
                     "type": "wmts",
-                    "url_template": "https://example.com/{z}/{x}/{y}.png",
+                    "urls": ["https://example.com/{z}/{x}/{y}.png"],
                 }
             },
             "bounds": {
@@ -585,7 +586,7 @@ def test_load_config_sources_only(tmp_path):
             "sources": {
                 "test_source": {
                     "type": "wmts",
-                    "url_template": "https://example.com/{z}/{x}/{y}.png",
+                    "urls": ["https://example.com/{z}/{x}/{y}.png"],
                 }
             }
         },
@@ -657,7 +658,7 @@ def test_load_config_single_include(tmp_path):
             "sources": {
                 "test_source": {
                     "type": "wmts",
-                    "url_template": "https://example.com/{z}/{x}/{y}.png",
+                    "urls": ["https://example.com/{z}/{x}/{y}.png"],
                 }
             }
         },
@@ -699,7 +700,7 @@ def test_load_config_multiple_includes(tmp_path):
             "sources": {
                 "s1": {
                     "type": "wmts",
-                    "url_template": "https://s1.example.com",
+                    "urls": ["https://s1.example.com"],
                 }
             }
         },
@@ -710,8 +711,8 @@ def test_load_config_multiple_includes(tmp_path):
         {
             "sources": {
                 "s2": {
-                    "type": "stac",
-                    "urls": ["https://s2.example.com"],
+                    "type": "geotiff",
+                    "urls": ["https://s2.example.com/collections/test"],
                 }
             }
         },
@@ -747,7 +748,7 @@ def test_load_config_nested_includes(tmp_path):
             "sources": {
                 "base_src": {
                     "type": "wmts",
-                    "url_template": "https://base.example.com",
+                    "urls": ["https://base.example.com"],
                 }
             }
         },
@@ -801,7 +802,7 @@ def test_load_config_include_relative_path(tmp_path):
             "sources": {
                 "nested": {
                     "type": "wmts",
-                    "url_template": "https://nested.example.com",
+                    "urls": ["https://nested.example.com"],
                 }
             }
         },
@@ -870,7 +871,7 @@ def test_load_config_duplicate_source_across_includes(tmp_path):
             "sources": {
                 "shared": {
                     "type": "wmts",
-                    "url_template": "https://base.example.com",
+                    "urls": ["https://base.example.com"],
                 }
             }
         },
@@ -882,15 +883,15 @@ def test_load_config_duplicate_source_across_includes(tmp_path):
             "includes": ["base.yaml"],
             "sources": {
                 "shared": {
-                    "type": "stac",
-                    "urls": ["https://override.example.com"],
+                    "type": "geotiff",
+                    "urls": ["https://override.example.com/collections/test"],
                 }
             },
         },
     )
 
     config = load_config([str(main_cfg)])
-    assert config.sources["shared"].type == "stac"
+    assert config.sources["shared"].type == "geotiff"
 
 
 def test_load_config_duplicate_layer_across_cli_flags(tmp_path):
@@ -902,7 +903,7 @@ def test_load_config_duplicate_layer_across_cli_flags(tmp_path):
             "sources": {
                 "s": {
                     "type": "wmts",
-                    "url_template": "https://example.com",
+                    "urls": ["https://example.com"],
                 }
             },
             "layers": {
@@ -943,7 +944,7 @@ def test_load_config_duplicate_bounds(tmp_path):
         "base.yaml",
         {
             "bounds": {"west": 1.0, "east": 2.0, "south": 3.0, "north": 4.0},
-            "sources": {"s": {"type": "wmts", "url_template": "https://example.com"}},
+            "sources": {"s": {"type": "wmts", "urls": ["https://example.com"]}},
             "layers": {
                 "l": {
                     "name": "L",
@@ -1124,3 +1125,228 @@ def test_read_cache_crs_corrupt(tmp_path):
     (source_dir / "metadata.json").write_text("not valid json{{{")
 
     assert BaseDownloader.read_cache_crs(tmp_path, "broken_source") is None
+
+
+# ---------------------------------------------------------------------------
+# Source method resolution tests (Task 1.7)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveSourceMethod:
+    """Tests for _resolve_source_method() auto-detection logic."""
+
+    def test_auto_detect_stac_collections_url(self):
+        assert (
+            _resolve_source_method(
+                ["https://example.com/api/stac/v1/collections/my_layer"]
+            )
+            == "stac"
+        )
+
+    def test_auto_detect_stac_in_path(self):
+        assert _resolve_source_method(["https://example.com/stac/items"]) == "stac"
+
+    def test_auto_detect_local_path_relative(self):
+        assert _resolve_source_method(["./cache/geotiffs/"]) == "path"
+
+    def test_auto_detect_local_path_relative_parent(self):
+        assert _resolve_source_method(["../data/tiles/"]) == "path"
+
+    def test_auto_detect_local_path_absolute(self):
+        assert _resolve_source_method(["/data/tiles/"]) == "path"
+
+    def test_auto_detect_local_path_no_scheme(self):
+        assert _resolve_source_method(["cache/geotiffs/"]) == "path"
+
+    def test_explicit_stac_override(self):
+        assert _resolve_source_method(["./local/path"], explicit="stac") == "stac"
+
+    def test_explicit_path_override(self):
+        assert (
+            _resolve_source_method(
+                ["https://stac.example.com/collections/test"], explicit="path"
+            )
+            == "path"
+        )
+
+    def test_explicit_invalid_raises(self):
+        with pytest.raises(ValueError, match="Invalid source method 'invalid'"):
+            _resolve_source_method(["https://x"], explicit="invalid")
+
+    def test_auto_detect_empty_urls_raises(self):
+        with pytest.raises(ValueError, match="no URLs provided"):
+            _resolve_source_method([], explicit=None)
+
+    def test_auto_detect_unrecognized_url_raises(self):
+        with pytest.raises(ValueError, match="Cannot auto-detect source method"):
+            _resolve_source_method(["https://example.com/data"])
+
+
+class TestSourceMethodInParsedConfig:
+    """Tests that source_method is correctly set during config parsing."""
+
+    def test_geotiff_with_stac_url_auto_detected(self):
+        data = {
+            "sources": {
+                "my_geotiff": {
+                    "type": "geotiff",
+                    "urls": ["https://data.geo.admin.ch/api/stac/v1/collections/test"],
+                }
+            }
+        }
+        sources = _parse_sources_section(data, "test.yaml")
+        assert sources["my_geotiff"].source_method == "stac"
+
+    def test_geotiff_with_local_path_auto_detected(self):
+        data = {
+            "sources": {
+                "my_geotiff": {
+                    "type": "geotiff",
+                    "urls": ["./cache/geotiffs/"],
+                }
+            }
+        }
+        sources = _parse_sources_section(data, "test.yaml")
+        assert sources["my_geotiff"].source_method == "path"
+
+    def test_gpkg_with_stac_url_auto_detected(self):
+        data = {
+            "sources": {
+                "my_gpkg": {
+                    "type": "gpkg",
+                    "urls": [
+                        "https://data.geo.admin.ch/api/stac/v0.9/collections/test"
+                    ],
+                }
+            }
+        }
+        sources = _parse_sources_section(data, "test.yaml")
+        assert sources["my_gpkg"].source_method == "stac"
+
+    def test_explicit_source_field_stac(self):
+        data = {
+            "sources": {
+                "my_geotiff": {
+                    "type": "geotiff",
+                    "source": "stac",
+                    "urls": ["https://example.com/data"],
+                }
+            }
+        }
+        sources = _parse_sources_section(data, "test.yaml")
+        assert sources["my_geotiff"].source_method == "stac"
+
+    def test_explicit_source_field_path(self):
+        data = {
+            "sources": {
+                "my_geotiff": {
+                    "type": "geotiff",
+                    "source": "path",
+                    "urls": ["https://example.com/data"],
+                }
+            }
+        }
+        sources = _parse_sources_section(data, "test.yaml")
+        assert sources["my_geotiff"].source_method == "path"
+
+    def test_wmts_url_no_source_method_needed(self):
+        """WMTS sources don't need source_method — it's skipped for WMTS."""
+        data = {
+            "sources": {
+                "my_wmts": {
+                    "type": "wmts",
+                    "urls": ["https://wmts.example.com/{z}/{x}/{y}.png"],
+                }
+            }
+        }
+        sources = _parse_sources_section(data, "test.yaml")
+        assert sources["my_wmts"].type == "wmts"
+        assert sources["my_wmts"].source_method is None
+
+
+class TestDeprecatedFieldRejection:
+    """Tests that deprecated config fields are rejected with helpful messages."""
+
+    def test_type_stac_rejected(self):
+        data = {
+            "sources": {
+                "bad": {
+                    "type": "stac",
+                    "urls": ["https://stac.example.com/collections/test"],
+                }
+            }
+        }
+        with pytest.raises(
+            ValueError, match="deprecated type 'stac'.*Use type 'geotiff'"
+        ):
+            _parse_sources_section(data, "test.yaml")
+
+    def test_url_template_rejected(self):
+        data = {
+            "sources": {
+                "bad": {
+                    "type": "wmts",
+                    "url_template": "https://example.com/{z}/{x}/{y}.png",
+                }
+            }
+        }
+        with pytest.raises(
+            ValueError, match="deprecated field 'url_template'.*Use 'urls'"
+        ):
+            _parse_sources_section(data, "test.yaml")
+
+
+class TestUrlsFieldParsing:
+    """Tests for the urls field accepting both string and list."""
+
+    def test_urls_as_string_auto_wrapped(self):
+        data = {
+            "sources": {
+                "test": {
+                    "type": "geotiff",
+                    "urls": "https://stac.example.com/collections/test",
+                }
+            }
+        }
+        sources = _parse_sources_section(data, "test.yaml")
+        assert sources["test"].urls == ["https://stac.example.com/collections/test"]
+        assert sources["test"].source_method == "stac"
+
+    def test_urls_as_list(self):
+        data = {
+            "sources": {
+                "test": {
+                    "type": "geotiff",
+                    "urls": [
+                        "https://stac.example.com/collections/test1",
+                        "https://stac.example.com/collections/test2",
+                    ],
+                }
+            }
+        }
+        sources = _parse_sources_section(data, "test.yaml")
+        assert len(sources["test"].urls) == 2
+        assert sources["test"].source_method == "stac"
+
+    def test_urls_empty_list_rejected(self):
+        data = {
+            "sources": {
+                "test": {
+                    "type": "geotiff",
+                    "urls": [],
+                }
+            }
+        }
+        with pytest.raises(ValueError, match="missing required field 'urls'"):
+            _parse_sources_section(data, "test.yaml")
+
+    def test_urls_missing_rejected(self):
+        data = {
+            "sources": {
+                "test": {
+                    "type": "geotiff",
+                }
+            }
+        }
+        with pytest.raises(ValueError, match="missing required field 'urls'"):
+            _parse_sources_section(data, "test.yaml")

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -59,7 +59,8 @@ def _write_tile_with_world_file(
 def stac_source() -> SourceConfig:
     return SourceConfig(
         id="swiss_topo",
-        type="stac",
+        type="geotiff",
+        source_method="stac",
         urls=["https://stac.example.com/collections/${layer}"],
         defaults={"layer": "test_collection"},
     )
@@ -70,7 +71,7 @@ def wmts_source() -> SourceConfig:
     return SourceConfig(
         id="wmts_src",
         type="wmts",
-        url_template="https://tiles.example.com/{z}/{x}/{y}.png",
+        urls=["https://tiles.example.com/{z}/{x}/{y}.png"],
     )
 
 
@@ -170,7 +171,9 @@ class TestResolveSource:
             resolve_source(layer, {})
 
     def test_missing_with_available(self, layer):
-        extra = SourceConfig(id="other", type="stac", urls=["https://x"])
+        extra = SourceConfig(
+            id="other", type="geotiff", source_method="stac", urls=["https://x"]
+        )
         with pytest.raises(PipelineError, match="other"):
             resolve_source(layer, {"other": extra})
 
@@ -615,7 +618,7 @@ class TestIntegrationCacheToImg:
         source = SourceConfig(
             id="wmts_src",
             type="wmts",
-            url_template="https://example.com/{z}/{x}/{y}.jpeg",
+            urls=["https://example.com/{z}/{x}/{y}.jpeg"],
             crs="EPSG:4326",
         )
         layer = LayerConfig(
@@ -645,6 +648,141 @@ class TestIntegrationCacheToImg:
 
 
 # ---------------------------------------------------------------------------
+# Pipeline dispatch tests (Task 4.4)
+# ---------------------------------------------------------------------------
+
+
+class TestPipelineDispatch:
+    """Tests that build_layer dispatches correctly based on source type and method."""
+
+    @patch("cartoload.pipeline.build_geotiff_layer", new_callable=AsyncMock)
+    @patch("cartoload.pipeline.resolve_source")
+    def test_geotiff_type_dispatches_to_build_geotiff_layer(
+        self, mock_resolve, mock_build_geotiff
+    ):
+        geotiff_source = SourceConfig(
+            id="test_geotiff",
+            type="geotiff",
+            urls=["https://stac.example.com/collections/test"],
+            source_method="stac",
+        )
+        mock_resolve.return_value = geotiff_source
+        mock_build_geotiff.return_value = [Path("output.img")]
+
+        layer = LayerConfig(
+            id="test_layer",
+            name="Test",
+            source="test_geotiff",
+            zoom_levels=[10],
+            exporter="garmin_img",
+            output="test.img",
+            bounds={"west": 5.0, "south": 45.0, "east": 10.0, "north": 48.0},
+        )
+        sources = {"test_geotiff": geotiff_source}
+
+        result = asyncio.run(
+            build_layer(layer, sources, Path("/cache"), Path("/output"))
+        )
+
+        mock_build_geotiff.assert_called_once()
+        assert result == [Path("output.img")]
+
+    @patch("cartoload.pipeline.build_gpkg_layer", new_callable=AsyncMock)
+    @patch("cartoload.pipeline.resolve_source")
+    def test_gpkg_type_dispatches_to_build_gpkg_layer(
+        self, mock_resolve, mock_build_gpkg
+    ):
+        gpkg_source = SourceConfig(
+            id="test_gpkg",
+            type="gpkg",
+            urls=["https://stac.example.com/collections/test"],
+            source_method="stac",
+        )
+        mock_resolve.return_value = gpkg_source
+        mock_build_gpkg.return_value = [Path("output.img")]
+
+        layer = LayerConfig(
+            id="test_layer",
+            name="Test",
+            source="test_gpkg",
+            zoom_levels=[10],
+            exporter="garmin_img",
+            output="test.img",
+            bounds={"west": 5.0, "south": 45.0, "east": 10.0, "north": 48.0},
+        )
+        sources = {"test_gpkg": gpkg_source}
+
+        result = asyncio.run(
+            build_layer(layer, sources, Path("/cache"), Path("/output"))
+        )
+
+        mock_build_gpkg.assert_called_once()
+        assert result == [Path("output.img")]
+
+    @patch("cartoload.pipeline.resolve_source")
+    def test_unknown_type_raises(self, mock_resolve, tmp_path):
+        unknown_source = SourceConfig(
+            id="bad",
+            type="xyz",
+            urls=["https://example.com"],
+        )
+        mock_resolve.return_value = unknown_source
+
+        layer = LayerConfig(
+            id="test_layer",
+            name="Test",
+            source="bad",
+            zoom_levels=[10],
+            exporter="garmin_img",
+            output="test.img",
+            bounds={"west": 5.0, "south": 45.0, "east": 10.0, "north": 48.0},
+        )
+
+        with pytest.raises(PipelineError, match="Unknown source type"):
+            asyncio.run(
+                build_layer(
+                    layer,
+                    {"bad": unknown_source},
+                    tmp_path / "cache",
+                    tmp_path / "output",
+                )
+            )
+
+    def test_geotiff_source_method_stac(self):
+        """Verify geotiff source with stac method has correct attributes."""
+        source = SourceConfig(
+            id="test",
+            type="geotiff",
+            urls=["https://stac.example.com/collections/test"],
+            source_method="stac",
+        )
+        assert source.type == "geotiff"
+        assert source.source_method == "stac"
+
+    def test_geotiff_source_method_path(self):
+        """Verify geotiff source with path method has correct attributes."""
+        source = SourceConfig(
+            id="test",
+            type="geotiff",
+            urls=["./cache/geotiffs/"],
+            source_method="path",
+        )
+        assert source.type == "geotiff"
+        assert source.source_method == "path"
+
+    def test_gpkg_source_method_stac(self):
+        """Verify gpkg source with stac method has correct attributes."""
+        source = SourceConfig(
+            id="test",
+            type="gpkg",
+            urls=["https://stac.example.com/collections/test"],
+            source_method="stac",
+        )
+        assert source.type == "gpkg"
+        assert source.source_method == "stac"
+
+
+# ---------------------------------------------------------------------------
 # Integration: download + reprojection + IMG (task 7.5)
 # ---------------------------------------------------------------------------
 
@@ -669,7 +807,7 @@ class TestIntegrationDownloadReprojectImg:
         source_4326 = SourceConfig(
             id="wmts_src",
             type="wmts",
-            url_template="https://example.com/{z}/{x}/{y}.jpeg",
+            urls=["https://example.com/{z}/{x}/{y}.jpeg"],
             crs="EPSG:4326",
         )
         layer = LayerConfig(

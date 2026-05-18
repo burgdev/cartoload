@@ -19,7 +19,7 @@ def _write_config(tmp_path: Path) -> str:
                 "sources": {
                     "test_src": {
                         "type": "wmts",
-                        "url_template": "https://example.com/{z}/{x}/{y}.jpeg",
+                        "urls": ["https://example.com/{z}/{x}/{y}.jpeg"],
                     }
                 },
                 "bounds": {

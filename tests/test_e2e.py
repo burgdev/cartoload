@@ -95,8 +95,9 @@ def small_geotiff(tmp_path: Path) -> Path:
 def e2e_source() -> SourceConfig:
     return SourceConfig(
         id="test_source",
-        type="stac",
+        type="geotiff",
         urls=["https://stac.example.com/collections/${layer}"],
+        source_method="stac",
         defaults={"layer": "test_collection"},
     )
 

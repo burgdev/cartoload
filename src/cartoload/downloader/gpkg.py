@@ -24,6 +24,7 @@ from rich.progress import (
 )
 
 from cartoload.downloader.cache_key import migrate_cache_key, url_to_cache_key
+from cartoload.downloader.stac_query import query_stac_collection
 
 if TYPE_CHECKING:
     from cartoload.config import LayerConfig, SourceConfig
@@ -307,55 +308,14 @@ class GPKGDownloader:
         Returns:
             List of tuples: (item_id, asset_url, expected_size_bytes)
         """
-        items_url = collection_url.rstrip("/") + "/items"
-        params: dict[str, str] = {
-            "bbox": ",".join(str(v) for v in bbox),
-            "limit": "500",
-        }
-
-        try:
-            response = requests.get(items_url, params=params, timeout=30)
-            response.raise_for_status()
-        except requests.RequestException as e:
-            raise Exception(f"Failed to query STAC items at {items_url}: {e}") from e
-
-        data = response.json()
-        features = data.get("features", [])
-
-        if not features:
-            return []
-
-        results: list[tuple[str, str, int | None]] = []
-        for feature in features:
-            item_id = feature.get("id", "unknown")
-            assets = feature.get("assets", {})
-
-            # Client-side bbox overlap check
-            item_bbox = feature.get("bbox")
-            if item_bbox and len(item_bbox) == 4:
-                if (
-                    item_bbox[2] < bbox[0]
-                    or item_bbox[0] > bbox[2]
-                    or item_bbox[3] < bbox[1]
-                    or item_bbox[1] > bbox[3]
-                ):
-                    logger.debug(
-                        "STAC item '%s' (bbox %s) does not overlap query bbox, skipping",
-                        item_id,
-                        item_bbox,
-                    )
-                    continue
-
-            gpkg_url = _find_gpkg_asset(assets, asset_filter)
-            if gpkg_url is None:
-                logger.warning(
-                    "No GPKG asset found in STAC item '%s', skipping", item_id
-                )
-                continue
-
-            results.append((item_id, gpkg_url, None))
-
-        return results
+        return query_stac_collection(
+            collection_url,
+            bbox,
+            _find_gpkg_asset,
+            asset_filter=asset_filter,
+            collection_id=collection_id,
+            asset_label="GPKG",
+        )
 
     def _download(self, asset_url: str, dest_path: Path) -> None:
         """Download a file from a URL to a local path."""

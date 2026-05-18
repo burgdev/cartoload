@@ -11,7 +11,7 @@ def sample_source() -> SourceConfig:
     return SourceConfig(
         id="test_wmts",
         type="wmts",
-        url_template="https://example.com/{layer}/{z}/{x}/{y}.png",
+        urls=["https://example.com/{layer}/{z}/{x}/{y}.png"],
         attribution="© Test",
         rate_limit_ms=100,
         max_threads=2,

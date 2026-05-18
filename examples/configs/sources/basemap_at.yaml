@@ -5,7 +5,8 @@ sources:
   basemap_at_wmts:
     type: wmts
     # ${x}, ${y}, ${z} are per-tile variables resolved at download time.
-    url_template: "https://basemap.at/wmts/1.0.0/geolandbasemap/normal/google3857/${z}/${y}/${x}.png"
+    urls:
+      - "https://basemap.at/wmts/1.0.0/geolandbasemap/normal/google3857/${z}/${y}/${x}.png"
     attribution: "© basemap.at, CC-BY 4.0"
     rate_limit_ms: 150
     max_threads: 4

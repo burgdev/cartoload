@@ -6,7 +6,8 @@ sources:
     type: wmts
     # ${layer} is resolved from layer source_args at pipeline time.
     # ${x}, ${y}, ${z} are per-tile variables resolved at download time.
-    url_template: "https://wxs.ign.fr/geoportail/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=${layer}&STYLE=normal&FORMAT=image/png&TILEMATRIXSET=PM&TILEMATRIX=${z}&TILEROW=${y}&TILECOL=${x}"
+    urls:
+      - "https://wxs.ign.fr/geoportail/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=${layer}&STYLE=normal&FORMAT=image/png&TILEMATRIXSET=PM&TILEMATRIX=${z}&TILEROW=${y}&TILECOL=${x}"
     attribution: "© IGN France"
     rate_limit_ms: 200
     max_threads: 2
