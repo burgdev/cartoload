@@ -287,7 +287,7 @@ def _make_single_provider_processor(
 
 
 def _make_composite_processor(
-    providers: list[tuple[TargetLayerEntry, LayerProvider]],
+    providers: list[tuple[TargetLayerEntry, LayerProvider, LayerConfig]],
     quality: int | None = None,
 ):
     """Create a tile processor callable for the composite (multi-provider) path.
@@ -318,9 +318,11 @@ def _make_composite_processor(
     ) -> ProcessedTile | None:
         images: list[tuple[Image.Image, float]] = []
 
-        for entry, provider in providers:
+        for entry, provider, lc in providers:
             # Skip providers that don't cover this zoom level
-            # (providers use their layer config's zoom_levels)
+            if zoom not in lc.zoom_levels:
+                continue
+
             rgba = provider.to_raster(x, y, zoom)
             if rgba is None:
                 continue
@@ -354,7 +356,7 @@ def _make_composite_processor(
 
 
 def _find_fallback_tile(
-    providers: list[tuple[TargetLayerEntry, LayerProvider]],
+    providers: list[tuple[TargetLayerEntry, LayerProvider, LayerConfig]],
     x: int,
     y: int,
     zoom: int,
@@ -370,7 +372,9 @@ def _find_fallback_tile(
         fx = x // scale
         fy = y // scale
 
-        for _entry, provider in providers:
+        for _entry, provider, lc in providers:
+            if fallback_zoom not in lc.zoom_levels:
+                continue
             img = provider.to_raster(fx, fy, fallback_zoom)
             if img is not None:
                 # Crop to the relevant quadrant
@@ -476,7 +480,7 @@ async def build_target(
             }
 
     # --- Create providers ---
-    providers: list[tuple[TargetLayerEntry, LayerProvider]] = []
+    providers: list[tuple[TargetLayerEntry, LayerProvider, LayerConfig]] = []
     for entry, lc in resolved:
         # Resolve source
         source_config = _resolve_layer_source(lc, sources)
@@ -487,11 +491,11 @@ async def build_target(
         provider = make_provider(
             lc.format, source_instance, source_config, lc, cache_dir
         )
-        providers.append((entry, provider))
+        providers.append((entry, provider, lc))
 
     # --- Stage 1: Download ---
     if not no_download:
-        for idx, (entry, provider) in enumerate(providers):
+        for idx, (entry, provider, _lc) in enumerate(providers):
             lc = resolved[idx][1]
             display_name = entry.name or lc.source
             if progress_callback:
@@ -510,7 +514,7 @@ async def build_target(
         logger.info("Skipping download stage (--no-download)")
 
     # --- Stage 2: Prepare ---
-    for idx, (entry, provider) in enumerate(providers):
+    for idx, (entry, provider, _lc) in enumerate(providers):
         lc = resolved[idx][1]
         display_name = entry.name or lc.source
         if progress_callback:
@@ -640,7 +644,7 @@ async def build_target(
     # Select fast path or composite path
     if len(providers) == 1:
         # Fast path: single provider, no compositing
-        _entry, provider = providers[0]
+        _entry, provider, _lc = providers[0]
         tile_processor = _make_single_provider_processor(provider, quality=quality)
     else:
         # Composite path: multiple providers
