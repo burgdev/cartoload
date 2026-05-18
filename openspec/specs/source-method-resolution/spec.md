@@ -1,39 +1,28 @@
-## ADDED Requirements
-
-### Requirement: Auto-detect source method from URL
-The system SHALL auto-detect the source method (how to fetch data) from the configured URL when no explicit `source` field is provided.
-
-#### Scenario: STAC collection URL detected
-- **WHEN** a source URL contains `/collections/` or `/stac/` in the path
-- **THEN** the system SHALL set the source method to `stac`
-
-#### Scenario: Local path detected
-- **WHEN** a source URL starts with `./`, `../`, `/`, or has no URL scheme (not `http://` or `https://`)
-- **THEN** the system SHALL set the source method to `path`
-
-#### Scenario: Explicit source field overrides auto-detection
-- **WHEN** a source config has an explicit `source` field (e.g., `source: stac`)
-- **THEN** the system SHALL use that value regardless of what the URL looks like
-
-#### Scenario: Cannot auto-detect source method
-- **WHEN** a source URL is an HTTP URL that does not match STAC patterns and no explicit `source` is provided
-- **THEN** the system SHALL raise a validation error asking the user to specify the `source` field
+## MODIFIED Requirements
 
 ### Requirement: Pipeline dispatch by type, download by source method
-The pipeline SHALL dispatch processing based on data type (`geotiff`, `gpkg`, `wmts`). Within each type, the source method determines how files are obtained.
+The pipeline SHALL dispatch processing based on data format (`geotiff`, `gpkg`, `wmts`) specified in the layer's `format` field. Source method (how to fetch) is determined by the source's `type` field or auto-detected from URLs. A single unified pipeline handles all format+source combinations — there SHALL NOT be separate dispatch paths for different formats.
 
-#### Scenario: geotiff + stac source
-- **WHEN** a layer uses a `type: geotiff` source with `source: stac`
-- **THEN** the pipeline SHALL use `STACDownloader` to fetch GeoTIFF assets, then process via the GeoTIFF pipeline
+#### Scenario: geotiff format with stac source
+- **WHEN** a layer has `format: geotiff` with a source whose type is `stac`
+- **THEN** the pipeline SHALL use `StacSource` to fetch GeoTIFF assets, then use `GeotiffProvider` to pre-warp and render tiles
 
-#### Scenario: geotiff + path source
-- **WHEN** a layer uses a `type: geotiff` source with `source: path`
-- **THEN** the pipeline SHALL use `collect_geotiff_files` to resolve local paths, then process via the GeoTIFF pipeline
+#### Scenario: geotiff format with path source
+- **WHEN** a layer has `format: geotiff` with a source whose type is `path`
+- **THEN** the pipeline SHALL use `PathSource` to resolve local files, then use `GeotiffProvider` to process them
 
-#### Scenario: gpkg + stac source
-- **WHEN** a layer uses a `type: gpkg` source with `source: stac`
-- **THEN** the pipeline SHALL use `GPKGDownloader` to fetch GPKG assets, then process via the GPKG rasterization pipeline
+#### Scenario: gpkg format with stac source
+- **WHEN** a layer has `format: gpkg` with a source whose type is `stac`
+- **THEN** the pipeline SHALL use `StacSource` to fetch GPKG assets, then use `GpkgProvider` to rasterize and render tiles
 
-#### Scenario: gpkg + path source
-- **WHEN** a layer uses a `type: gpkg` source with `source: path`
-- **THEN** the pipeline SHALL load the GPKG file directly from the local path, then process via the GPKG rasterization pipeline
+#### Scenario: gpkg format with path source
+- **WHEN** a layer has `format: gpkg` with a source whose type is `path`
+- **THEN** the pipeline SHALL use `PathSource` to resolve local files, then use `GpkgProvider` to process them
+
+#### Scenario: wmts format with wmts source
+- **WHEN** a layer has `format: wmts` with a source whose type is `wmts`
+- **THEN** the pipeline SHALL use `WmtsSource` to download tile grids, then use `WmtsProvider` to load tiles
+
+#### Scenario: format and source are independent
+- **WHEN** a new combination is registered (e.g., `format: geojson` with `source: stac`)
+- **THEN** the pipeline SHALL resolve the provider and source independently and combine them without code changes
