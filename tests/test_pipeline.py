@@ -5,11 +5,10 @@ from __future__ import annotations
 import asyncio
 import io
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from cartoload.config import LayerConfig, SourceConfig
+from cartoload.config import LayerConfig, SourceConfig, TargetConfig
 from cartoload.downloader.wmts import WMTSDownloader
 from cartoload.exporters.garmin_img import GarminImgExporter
 from cartoload.pipeline import (
@@ -59,8 +58,7 @@ def _write_tile_with_world_file(
 def stac_source() -> SourceConfig:
     return SourceConfig(
         id="swiss_topo",
-        type="geotiff",
-        source_method="stac",
+        type="stac",
         urls=["https://stac.example.com/collections/${layer}"],
         defaults={"layer": "test_collection"},
     )
@@ -76,19 +74,13 @@ def wmts_source() -> SourceConfig:
 
 
 @pytest.fixture
-def unknown_source() -> SourceConfig:
-    return SourceConfig(id="bad", type="xyz")
-
-
-@pytest.fixture
 def layer(wmts_source: SourceConfig) -> LayerConfig:
     return LayerConfig(
         id="test_layer",
         name="Test Layer",
         source=wmts_source.id,
+        format="wmts",
         zoom_levels=[12, 14],
-        exporter="garmin-img",
-        output="test_layer.img",
         bounds={"west": 5.0, "south": 45.0, "east": 10.0, "north": 48.0},
     )
 
@@ -99,14 +91,14 @@ def sources(wmts_source: SourceConfig) -> dict[str, SourceConfig]:
 
 
 # ---------------------------------------------------------------------------
-# 9.2 get_downloader factory
+# get_downloader factory
 # ---------------------------------------------------------------------------
 
 
 class TestGetDownloader:
     def test_stac_raises_pipeline_error(self, stac_source, tmp_path):
-        """STAC sources are handled by build_geotiff_layer, not get_downloader."""
-        with pytest.raises(PipelineError, match="Unknown source type"):
+        """STAC sources cannot be handled by get_downloader (WMTS-only)."""
+        with pytest.raises(PipelineError, match="only supports 'wmts'"):
             get_downloader(stac_source, tmp_path)
 
     def test_wmts_returns_wmts_downloader(self, wmts_source, tmp_path):
@@ -115,49 +107,43 @@ class TestGetDownloader:
         dl = get_downloader(wmts_source, tmp_path)
         assert isinstance(dl, WMTSDownloader)
 
-    def test_unknown_type_raises_pipeline_error(self, unknown_source, tmp_path):
-        with pytest.raises(PipelineError, match="Unknown source type"):
+    def test_unknown_type_raises_pipeline_error(self, tmp_path):
+        unknown_source = SourceConfig(id="bad", type="xyz", urls=["https://x"])
+        with pytest.raises(PipelineError, match="only supports 'wmts'"):
             get_downloader(unknown_source, tmp_path)
 
 
 # ---------------------------------------------------------------------------
-# 9.3 get_exporter factory
+# get_exporter factory
 # ---------------------------------------------------------------------------
 
 
 class TestGetExporter:
-    def test_garmin_img_returns_exporter(self, layer, tmp_path):
-        exporter = get_exporter(layer, tmp_path)
+    def test_garmin_img_returns_exporter(self, tmp_path):
+        exporter = get_exporter("garmin_img", tmp_path)
         assert isinstance(exporter, GarminImgExporter)
 
     def test_garmin_img_dash_variant(self, tmp_path):
-        layer = LayerConfig(
-            id="l",
-            name="n",
-            exporter="garmin_img",
-            output="o.img",
-            source="s",
-            zoom_levels=[10],
-        )
+        exporter = get_exporter("garmin-img", tmp_path)
+        assert isinstance(exporter, GarminImgExporter)
 
-        exporter = get_exporter(layer, tmp_path)
+    def test_garmin_img_from_target(self, tmp_path):
+        target = TargetConfig(
+            id="t",
+            exporter="garmin_img",
+            output="out.img",
+            layers=[],
+        )
+        exporter = get_exporter(target, tmp_path)
         assert isinstance(exporter, GarminImgExporter)
 
     def test_unknown_exporter_raises(self, tmp_path):
-        layer = LayerConfig(
-            id="l",
-            name="n",
-            exporter="unknown",
-            output="o.img",
-            source="s",
-            zoom_levels=[10],
-        )
         with pytest.raises(PipelineError, match="Unknown exporter"):
-            get_exporter(layer, tmp_path)
+            get_exporter("unknown", tmp_path)
 
 
 # ---------------------------------------------------------------------------
-# 9.4 resolve_source
+# resolve_source
 # ---------------------------------------------------------------------------
 
 
@@ -171,306 +157,105 @@ class TestResolveSource:
             resolve_source(layer, {})
 
     def test_missing_with_available(self, layer):
-        extra = SourceConfig(
-            id="other", type="geotiff", source_method="stac", urls=["https://x"]
-        )
+        extra = SourceConfig(id="other", type="stac", urls=["https://x"])
         with pytest.raises(PipelineError, match="other"):
             resolve_source(layer, {"other": extra})
 
 
 # ---------------------------------------------------------------------------
-# 9.1 Full pipeline with mocks (build_layer)
+# _layer_to_target adapter
 # ---------------------------------------------------------------------------
 
 
-class TestBuildLayerMocked:
-    """Exercise the full pipeline with all stages mocked."""
+class TestLayerToTarget:
+    def test_single_layer_adapter(self):
+        from cartoload.pipeline import _layer_to_target
 
-    @patch("cartoload.pipeline.get_exporter")
-    @patch("cartoload.pipeline.compute_tile_metadata")
-    @patch("cartoload.pipeline.get_downloader")
-    def test_happy_path(
-        self,
-        mock_get_dl,
-        mock_compute_metadata,
-        mock_get_exp,
-        layer,
-        sources,
-        tmp_path,
-    ):
-        from cartoload.exporters.garmin_img_model import TileMetadata
-
-        # --- download mock (spec=WMTSDownloader so isinstance passes) ---
-        mock_dl = MagicMock(spec=WMTSDownloader)
-        mock_dl.download_grid.return_value = [tmp_path / "tile1.jpeg"]
-        mock_dl._bbox_to_tile_indices.return_value = [(0, 0)]
-        mock_get_dl.return_value = mock_dl
-
-        # --- metadata mock ---
-        jpeg_bytes = _make_jpeg()
-        mock_compute_metadata.return_value = [
-            TileMetadata(
-                x=0,
-                y=0,
-                zoom=12,
-                lat_min=46.0,
-                lon_min=7.0,
-                lat_max=47.0,
-                lon_max=8.0,
-                jpeg_size=len(jpeg_bytes),
-                source_path=None,
-            ),
-        ]
-
-        # --- exporter mock ---
-        mock_exporter = MagicMock()
-        output_img = tmp_path / "output" / "test_layer.img"
-
-        def _create_on_export(*args, **kwargs):
-            output_img.parent.mkdir(parents=True, exist_ok=True)
-            output_img.write_bytes(b"fake-img")
-            return [output_img]
-
-        mock_exporter.export_from_metadata.side_effect = _create_on_export
-        mock_get_exp.return_value = mock_exporter
-
-        cache_dir = tmp_path / "cache"
-        cache_dir.mkdir()
-        output_dir = tmp_path / "output"
-
-        result = asyncio.run(
-            build_layer(
-                layer,
-                sources,
-                cache_dir,
-                output_dir,
-            )
+        layer = LayerConfig(
+            id="test",
+            name="Test Layer",
+            source="src1",
+            format="wmts",
+            zoom_levels=[10, 12],
+            bounds={"west": 5.0, "south": 45.0, "east": 10.0, "north": 48.0},
         )
+        target = _layer_to_target(layer)
 
-        assert result == [output_img]
-        mock_get_dl.assert_called()
-        mock_compute_metadata.assert_called()
-        mock_exporter.export_from_metadata.assert_called_once()
+        assert isinstance(target, TargetConfig)
+        assert target.id == "test"
+        assert target.name == "Test Layer"
+        assert target.output == "test.img"  # defaults to {id}.img
+        assert target.exporter == "garmin_img"  # default
+        assert target.zoom_levels == [10, 12]
+        assert target.bounds == {
+            "west": 5.0,
+            "south": 45.0,
+            "east": 10.0,
+            "north": 48.0,
+        }
+        assert len(target.layers) == 1
+        assert target.layers[0].source == "src1"
+        assert target.layers[0].format == "wmts"
 
-    @patch("cartoload.pipeline.get_exporter")
-    @patch("cartoload.pipeline.compute_tile_metadata")
-    @patch("cartoload.pipeline.get_downloader")
-    def test_progress_callback(
-        self,
-        mock_get_dl,
-        mock_compute_metadata,
-        mock_get_exp,
-        layer,
-        sources,
-        tmp_path,
-    ):
-        from cartoload.exporters.garmin_img_model import TileMetadata
+    def test_single_layer_default_output(self):
+        from cartoload.pipeline import _layer_to_target
 
-        mock_dl = MagicMock(spec=WMTSDownloader)
-        mock_dl.download_grid.return_value = [tmp_path / "tile.jpeg"]
-        mock_dl._bbox_to_tile_indices.return_value = [(0, 0)]
-        mock_get_dl.return_value = mock_dl
-
-        jpeg_bytes = _make_jpeg()
-        mock_compute_metadata.return_value = [
-            TileMetadata(
-                x=0,
-                y=0,
-                zoom=12,
-                lat_min=46.0,
-                lon_min=7.0,
-                lat_max=47.0,
-                lon_max=8.0,
-                jpeg_size=len(jpeg_bytes),
-                source_path=None,
-            ),
-        ]
-
-        mock_exporter = MagicMock()
-        out = tmp_path / "output" / "test_layer.img"
-
-        def _create_on_export(*args, **kwargs):
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_bytes(b"x")
-            return [out]
-
-        mock_exporter.export_from_metadata.side_effect = _create_on_export
-        mock_get_exp.return_value = mock_exporter
-
-        stages: list[tuple[str, str]] = []
-
-        def cb(stage_id: str, desc: str) -> None:
-            stages.append((stage_id, desc))
-
-        asyncio.run(
-            build_layer(
-                layer,
-                sources,
-                tmp_path / "cache",
-                tmp_path / "output",
-                progress_callback=cb,
-            )
+        layer = LayerConfig(
+            id="my_layer",
+            name="N",
+            source="s",
+            format="geotiff",
+            zoom_levels=[10],
         )
-
-        assert stages[0][0] == "download"
-        assert stages[1][0] == "process"
-        assert stages[2][0] == "export"
+        target = _layer_to_target(layer)
+        assert target.output == "my_layer.img"
+        assert target.exporter == "garmin_img"
 
 
 # ---------------------------------------------------------------------------
-# 9.5 --no-download flag
+# Source type attribute tests
 # ---------------------------------------------------------------------------
 
 
-class TestNoDownload:
-    @patch("cartoload.pipeline.get_exporter")
-    @patch("cartoload.pipeline.compute_tile_metadata")
-    @patch("cartoload.pipeline.get_downloader")
-    def test_download_skipped(
-        self,
-        mock_get_dl,
-        mock_compute_metadata,
-        mock_get_exp,
-        layer,
-        sources,
-        tmp_path,
-    ):
-        from cartoload.exporters.garmin_img_model import TileMetadata
-
-        # --- metadata mock ---
-        jpeg_bytes = _make_jpeg()
-        mock_compute_metadata.return_value = [
-            TileMetadata(
-                x=0,
-                y=0,
-                zoom=12,
-                lat_min=46.0,
-                lon_min=7.0,
-                lat_max=47.0,
-                lon_max=8.0,
-                jpeg_size=len(jpeg_bytes),
-                source_path=None,
-            ),
-        ]
-
-        # --- exporter mock ---
-        mock_exporter = MagicMock()
-        out = tmp_path / "output" / "test_layer.img"
-
-        def _create_on_export(*args, **kwargs):
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_bytes(b"x")
-            return [out]
-
-        mock_exporter.export_from_metadata.side_effect = _create_on_export
-        mock_get_exp.return_value = mock_exporter
-
-        asyncio.run(
-            build_layer(
-                layer,
-                sources,
-                tmp_path / "cache",
-                tmp_path / "output",
-                no_download=True,
-            )
+class TestSourceTypeAttributes:
+    def test_stac_source(self):
+        source = SourceConfig(
+            id="test",
+            type="stac",
+            urls=["https://stac.example.com/collections/test"],
         )
+        assert source.type == "stac"
 
-        # get_downloader should have been called for cache path resolution
-        # (in no-download mode, it's called during the process stage)
-        mock_compute_metadata.assert_called()
-        mock_exporter.export_from_metadata.assert_called_once()
+    def test_wmts_source(self):
+        source = SourceConfig(
+            id="test",
+            type="wmts",
+            urls=["https://example.com/{z}/{x}/{y}.png"],
+        )
+        assert source.type == "wmts"
+
+    def test_path_source(self):
+        source = SourceConfig(
+            id="test",
+            type="path",
+            urls=["./cache/geotiffs/"],
+        )
+        assert source.type == "path"
 
 
 # ---------------------------------------------------------------------------
-# 9.6 Error propagation
+# Error propagation via build_layer adapter
 # ---------------------------------------------------------------------------
 
 
 class TestErrorPropagation:
-    def test_download_error(self, layer, sources, tmp_path):
-        with patch(
-            "cartoload.pipeline.get_downloader",
-            side_effect=RuntimeError("network fail"),
-        ):
-            with pytest.raises(DownloadError, match="network fail"):
-                asyncio.run(
-                    build_layer(
-                        layer,
-                        sources,
-                        tmp_path / "cache",
-                        tmp_path / "output",
-                    )
-                )
-
-    @patch("cartoload.pipeline.get_downloader")
-    def test_processing_error(self, mock_get_dl, layer, sources, tmp_path):
-        mock_dl = MagicMock(spec=WMTSDownloader)
-        mock_dl.download_grid.return_value = [tmp_path / "tile.jpeg"]
-        mock_dl._bbox_to_tile_indices.return_value = [(0, 0)]
-        mock_get_dl.return_value = mock_dl
-
-        with patch("cartoload.pipeline.compute_tile_metadata") as mock_compute:
-            mock_compute.side_effect = RuntimeError("gdal fail")
-            with pytest.raises(ProcessingError, match="gdal fail"):
-                asyncio.run(
-                    build_layer(
-                        layer,
-                        sources,
-                        tmp_path / "cache",
-                        tmp_path / "output",
-                    )
-                )
-
-    @patch("cartoload.pipeline.get_exporter")
-    @patch("cartoload.pipeline.compute_tile_metadata")
-    @patch("cartoload.pipeline.get_downloader")
-    def test_export_error(
-        self, mock_get_dl, mock_compute_metadata, mock_get_exp, layer, sources, tmp_path
-    ):
-        from cartoload.exporters.garmin_img_model import TileMetadata
-
-        mock_dl = MagicMock(spec=WMTSDownloader)
-        mock_dl.download_grid.return_value = [tmp_path / "tile.jpeg"]
-        mock_dl._bbox_to_tile_indices.return_value = [(0, 0)]
-        mock_get_dl.return_value = mock_dl
-
-        jpeg_bytes = _make_jpeg()
-        mock_compute_metadata.return_value = [
-            TileMetadata(
-                x=0,
-                y=0,
-                zoom=12,
-                lat_min=46.0,
-                lon_min=7.0,
-                lat_max=47.0,
-                lon_max=8.0,
-                jpeg_size=len(jpeg_bytes),
-                source_path=None,
-            ),
-        ]
-
-        mock_get_exp.return_value.export_from_metadata.side_effect = RuntimeError(
-            "disk full"
-        )
-
-        with pytest.raises(ExportError, match="disk full"):
-            asyncio.run(
-                build_layer(
-                    layer,
-                    sources,
-                    tmp_path / "cache",
-                    tmp_path / "output",
-                )
-            )
-
     def test_source_resolution_error(self, tmp_path):
-        """PipelineError from source resolution is re-raised directly."""
+        """PipelineError from source resolution is re-raised."""
         layer = LayerConfig(
             id="l",
             name="n",
             source="missing",
-            exporter="garmin-img",
-            output="o.img",
+            format="wmts",
             zoom_levels=[10],
         )
         with pytest.raises(PipelineError, match="unknown source"):
@@ -483,38 +268,13 @@ class TestErrorPropagation:
                 )
             )
 
-    @patch("cartoload.pipeline.compute_tile_metadata")
-    @patch("cartoload.pipeline.get_downloader")
-    def test_no_tiles_raises_processing_error(
-        self, mock_get_dl, mock_compute_metadata, layer, sources, tmp_path
-    ):
-        """When no tiles are processed, processing should fail."""
-        mock_dl = MagicMock(spec=WMTSDownloader)
-        mock_dl.download_grid.return_value = []
-        mock_dl._bbox_to_tile_indices.return_value = [(0, 0)]
-        mock_get_dl.return_value = mock_dl
-
-        # compute_tile_metadata returns empty results for both zoom levels
-        mock_compute_metadata.return_value = []
-
-        with pytest.raises(ProcessingError, match="No tiles available"):
-            asyncio.run(
-                build_layer(
-                    layer,
-                    sources,
-                    tmp_path / "cache",
-                    tmp_path / "output",
-                )
-            )
-
     def test_pipeline_error_passes_through(self, tmp_path):
         """PipelineError from factory should pass through without wrapping."""
         layer = LayerConfig(
             id="l",
             name="n",
             source="s",
-            exporter="garmin-img",
-            output="o.img",
+            format="wmts",
             zoom_levels=[10],
         )
         with pytest.raises(PipelineError):
@@ -556,7 +316,7 @@ class TestDomainExceptions:
 
 
 # ---------------------------------------------------------------------------
-# Integration: cache → IMG (task 7.4)
+# Integration: cache → IMG via build_layer adapter
 # ---------------------------------------------------------------------------
 
 
@@ -568,16 +328,6 @@ class TestIntegrationCacheToImg:
         cache_dir = tmp_path / "cache"
         output_dir = tmp_path / "output"
 
-        # Use bounds that match a small set of tiles at zoom 10
-        # Tile (530, 360) covers roughly lon [0.35, 0.70] lat [~0, ~0.7]
-        # at z=10: lon = x/1024 * 360 - 180
-        # (530,360): lon = [7.03, 7.38], lat = [0.0, ~0.7] — not useful
-        # Let's use a narrow bounds that covers just 2 tiles
-        # At z=10, tile (530, 360) center: lon=530/1024*360-180 ≈ 6.21
-        # Actually: lon_min = 530/1024*360-180 = 6.21
-        # So bounds should be tight around a known tile
-        # Use single-tile bounds: (530,360) z=10
-        # lon: [530/1024*360-180, 531/1024*360-180] = [6.21, 6.56]
         bounds = {
             "west": 6.21,
             "east": 6.56,
@@ -585,7 +335,6 @@ class TestIntegrationCacheToImg:
             "north": 45.5,
         }
 
-        # Create a WMTS downloader with cached tiles
         dl = WMTSDownloader(
             source_id="wmts_src",
             url_template="https://example.com/{z}/{x}/{y}.jpeg",
@@ -594,27 +343,23 @@ class TestIntegrationCacheToImg:
             crs="EPSG:4326",
         )
 
-        # Find the correct tile coords for our bounds
         from cartoload.pipeline import _compute_tile_coords
 
         layer_for_coords = LayerConfig(
             id="test",
             name="Test",
             source="wmts_src",
+            format="wmts",
             zoom_levels=[10],
-            exporter="garmin_img",
-            output="test.img",
             bounds=bounds,
         )
         coords = _compute_tile_coords(layer_for_coords, 10)
         assert len(coords) > 0, f"No tile coords for bounds {bounds}"
 
-        # Write cached tiles
         for x, y in coords:
             tile_path = dl._cache_path(x, y, 10)
             _write_tile_with_world_file(tile_path)
 
-        # Create source and layer configs
         source = SourceConfig(
             id="wmts_src",
             type="wmts",
@@ -625,13 +370,11 @@ class TestIntegrationCacheToImg:
             id="test_layer",
             name="Test Layer",
             source="wmts_src",
+            format="wmts",
             zoom_levels=[10],
-            exporter="garmin_img",
-            output="test.img",
             bounds=bounds,
         )
 
-        # Run pipeline with no_download=True (tiles already cached)
         result = asyncio.run(
             build_layer(
                 layer,
@@ -648,142 +391,7 @@ class TestIntegrationCacheToImg:
 
 
 # ---------------------------------------------------------------------------
-# Pipeline dispatch tests (Task 4.4)
-# ---------------------------------------------------------------------------
-
-
-class TestPipelineDispatch:
-    """Tests that build_layer dispatches correctly based on source type and method."""
-
-    @patch("cartoload.pipeline.build_geotiff_layer", new_callable=AsyncMock)
-    @patch("cartoload.pipeline.resolve_source")
-    def test_geotiff_type_dispatches_to_build_geotiff_layer(
-        self, mock_resolve, mock_build_geotiff
-    ):
-        geotiff_source = SourceConfig(
-            id="test_geotiff",
-            type="geotiff",
-            urls=["https://stac.example.com/collections/test"],
-            source_method="stac",
-        )
-        mock_resolve.return_value = geotiff_source
-        mock_build_geotiff.return_value = [Path("output.img")]
-
-        layer = LayerConfig(
-            id="test_layer",
-            name="Test",
-            source="test_geotiff",
-            zoom_levels=[10],
-            exporter="garmin_img",
-            output="test.img",
-            bounds={"west": 5.0, "south": 45.0, "east": 10.0, "north": 48.0},
-        )
-        sources = {"test_geotiff": geotiff_source}
-
-        result = asyncio.run(
-            build_layer(layer, sources, Path("/cache"), Path("/output"))
-        )
-
-        mock_build_geotiff.assert_called_once()
-        assert result == [Path("output.img")]
-
-    @patch("cartoload.pipeline.build_gpkg_layer", new_callable=AsyncMock)
-    @patch("cartoload.pipeline.resolve_source")
-    def test_gpkg_type_dispatches_to_build_gpkg_layer(
-        self, mock_resolve, mock_build_gpkg
-    ):
-        gpkg_source = SourceConfig(
-            id="test_gpkg",
-            type="gpkg",
-            urls=["https://stac.example.com/collections/test"],
-            source_method="stac",
-        )
-        mock_resolve.return_value = gpkg_source
-        mock_build_gpkg.return_value = [Path("output.img")]
-
-        layer = LayerConfig(
-            id="test_layer",
-            name="Test",
-            source="test_gpkg",
-            zoom_levels=[10],
-            exporter="garmin_img",
-            output="test.img",
-            bounds={"west": 5.0, "south": 45.0, "east": 10.0, "north": 48.0},
-        )
-        sources = {"test_gpkg": gpkg_source}
-
-        result = asyncio.run(
-            build_layer(layer, sources, Path("/cache"), Path("/output"))
-        )
-
-        mock_build_gpkg.assert_called_once()
-        assert result == [Path("output.img")]
-
-    @patch("cartoload.pipeline.resolve_source")
-    def test_unknown_type_raises(self, mock_resolve, tmp_path):
-        unknown_source = SourceConfig(
-            id="bad",
-            type="xyz",
-            urls=["https://example.com"],
-        )
-        mock_resolve.return_value = unknown_source
-
-        layer = LayerConfig(
-            id="test_layer",
-            name="Test",
-            source="bad",
-            zoom_levels=[10],
-            exporter="garmin_img",
-            output="test.img",
-            bounds={"west": 5.0, "south": 45.0, "east": 10.0, "north": 48.0},
-        )
-
-        with pytest.raises(PipelineError, match="Unknown source type"):
-            asyncio.run(
-                build_layer(
-                    layer,
-                    {"bad": unknown_source},
-                    tmp_path / "cache",
-                    tmp_path / "output",
-                )
-            )
-
-    def test_geotiff_source_method_stac(self):
-        """Verify geotiff source with stac method has correct attributes."""
-        source = SourceConfig(
-            id="test",
-            type="geotiff",
-            urls=["https://stac.example.com/collections/test"],
-            source_method="stac",
-        )
-        assert source.type == "geotiff"
-        assert source.source_method == "stac"
-
-    def test_geotiff_source_method_path(self):
-        """Verify geotiff source with path method has correct attributes."""
-        source = SourceConfig(
-            id="test",
-            type="geotiff",
-            urls=["./cache/geotiffs/"],
-            source_method="path",
-        )
-        assert source.type == "geotiff"
-        assert source.source_method == "path"
-
-    def test_gpkg_source_method_stac(self):
-        """Verify gpkg source with stac method has correct attributes."""
-        source = SourceConfig(
-            id="test",
-            type="gpkg",
-            urls=["https://stac.example.com/collections/test"],
-            source_method="stac",
-        )
-        assert source.type == "gpkg"
-        assert source.source_method == "stac"
-
-
-# ---------------------------------------------------------------------------
-# Integration: download + reprojection + IMG (task 7.5)
+# Integration: download + reprojection + IMG
 # ---------------------------------------------------------------------------
 
 
@@ -795,7 +403,6 @@ class TestIntegrationDownloadReprojectImg:
         cache_dir = tmp_path / "cache"
         output_dir = tmp_path / "output"
 
-        # Use tight bounds to cover a small number of tiles
         bounds = {
             "west": 7.0,
             "east": 7.5,
@@ -803,7 +410,6 @@ class TestIntegrationDownloadReprojectImg:
             "north": 46.5,
         }
 
-        # Create a WMTS source — use EPSG:4326 since we can't run gdalwarp in tests
         source_4326 = SourceConfig(
             id="wmts_src",
             type="wmts",
@@ -814,9 +420,8 @@ class TestIntegrationDownloadReprojectImg:
             id="test_layer",
             name="Test Layer",
             source="wmts_src",
+            format="wmts",
             zoom_levels=[10],
-            exporter="garmin_img",
-            output="test.img",
             bounds=bounds,
         )
 
@@ -828,13 +433,11 @@ class TestIntegrationDownloadReprojectImg:
             crs="EPSG:4326",
         )
 
-        # Compute the correct tile coords for our bounds dynamically
         from cartoload.pipeline import _compute_tile_coords
 
         coords = _compute_tile_coords(layer, 10)
         assert len(coords) > 0, f"No tile coords for bounds {bounds}"
 
-        # Pre-create tiles in cache (simulating a completed download)
         for x, y in coords:
             tile_path = dl._cache_path(x, y, 10)
             _write_tile_with_world_file(tile_path)

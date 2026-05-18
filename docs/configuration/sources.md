@@ -1,41 +1,43 @@
 # Sources
 
-Source configuration files define geodata providers. Place them in a directory of your choice and pass them via `--sources`.
+Source configuration files define geodata providers. Place them in a directory of your choice and reference them via `includes` in your layer config files, or pass them via `--sources`.
 
 ## Source types
 
+Source type (`type`) determines the **fetch method** — how data is downloaded or accessed. This is separate from the **data format** (set on layer definitions via `format`).
+
+| Type | Description | Data formats |
+|------|-------------|-------------|
+| `wmts` | Web Map Tile Service — downloads individual map tiles | `wmts` |
+| `stac` | STAC API — queries collection endpoints, downloads assets | `geotiff`, `gpkg` |
+| `path` | Local file path — reads files from disk | `geotiff`, `gpkg` |
+
+Source type is detected automatically from URLs but can be set explicitly with the `type` field.
+
 ### WMTS
+
+Downloads map tiles from a Web Map Tile Service. URL templates contain per-tile variables (`${x}`, `${y}`, `${z}`) that are resolved at download time.
 
 ```yaml
 sources:
   my_wmts:
     type: wmts
-    url_template: "https://example.com/${layer}/${z}/${x}/${y}.png"
     defaults:
       layer: default_layer_name
+      extension: jpeg
+    urls:
+      - "https://wmts.example.com/${layer}/default/current/3857/${z}/${x}/${y}.${extension:-jpeg}"
+      - "https://wmts1.example.com/${layer}/default/current/3857/${z}/${x}/${y}.${extension:-jpeg}"
     attribution: "© Example"
     rate_limit_ms: 150
     max_threads: 4
 ```
 
-### WMTS with multiple URLs
-
-```yaml
-sources:
-  swisstopo:
-    type: wmts
-    defaults:
-      layer: ch.swisstopo.pixelkarte-farbe
-      extension: jpeg
-    urls:
-      - "https://wmts0.example.com/${layer}/default/current/3857/${z}/${x}/${y}.${extension:-jpeg}"
-      - "https://wmts1.example.com/${layer}/default/current/3857/${z}/${x}/${y}.${extension:-jpeg}"
-    attribution: "© Example"
-```
+Multiple URLs are used as fallback/rotation endpoints (load balancing). All URLs must use the same template.
 
 ### STAC
 
-Queries a STAC API collection endpoint, downloads GeoTIFF assets, and processes them into map tiles.
+Queries a STAC API collection endpoint and downloads assets (GeoTIFF or GeoPackage). The `${layer}` variable resolves to the collection ID from `defaults` or `source_args`.
 
 ```yaml
 sources:
@@ -48,11 +50,13 @@ sources:
     attribution: "© Example"
 ```
 
-The `${layer}` variable resolves to the collection ID from `defaults` or `source_args`.
+The data format is determined by the layer's `format` field:
+- `format: geotiff` — downloads GeoTIFF assets
+- `format: gpkg` — downloads GeoPackage (.gpkg.zip) assets, extracts and caches the .gpkg file
 
 #### Asset filtering
 
-When a STAC collection has multiple GeoTIFF assets per item (e.g. different variants or resolutions), use `asset_filter` to select which one to download. Specify key-value pairs that must match the asset's properties:
+When a STAC collection has multiple assets per item (e.g. different variants or resolutions), use `asset_filter` to select which one to download:
 
 ```yaml
 sources:
@@ -69,24 +73,22 @@ sources:
 `asset_filter` can also be set per-layer via the dict source syntax:
 
 ```yaml
-layers:
-  my_layer:
-    source:
-      ref: swisstopo_stac
-      asset_filter:
-        geoadmin:variant: krel
+source:
+  ref: swisstopo_stac
+  asset_filter:
+    geoadmin:variant: krel
 ```
 
-Layer-level `asset_filter` overrides the source-level default. When no filter is set, the first GeoTIFF asset by media type is selected.
+Layer-level `asset_filter` overrides the source-level default. When no filter is set, the first asset matching the expected media type is selected.
 
-### GeoTIFF
+### Path
 
-References GeoTIFF files directly — local paths (relative to config file or absolute), directories (scanned recursively), or HTTP URLs.
+References local files — directories (scanned recursively for matching files), individual file paths, or HTTP URLs that get downloaded to cache.
 
 ```yaml
 sources:
-  my_geotiff:
-    type: geotiff
+  my_local_data:
+    type: path
     urls:
       - "/data/geotiffs/"                    # directory, scanned recursively
       - "../cache/my_stac/my_collection/"    # relative path to directory
@@ -98,15 +100,14 @@ sources:
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `type` | yes | Source type: `wmts`, `stac`, or `geotiff` |
-| `url_template` | conditional | URL template (use instead of `urls`) |
-| `urls` | conditional | List of URLs or paths (use instead of `url_template`) |
-| `attribution` | no | Attribution string |
+| `type` | no | Source type: `wmts`, `stac`, or `path` (auto-detected from URLs if omitted) |
+| `urls` | yes | List of URL templates or paths |
 | `defaults` | no | Default variable values for template substitution |
-| `asset_filter` | no | Key-value filter for STAC asset selection (nested dict under `defaults` or layer source) |
+| `asset_filter` | no | Key-value filter for STAC asset selection |
+| `attribution` | no | Attribution string |
 | `rate_limit_ms` | no | Delay between requests in ms (default: 150) |
 | `max_threads` | no | Max download threads (default: 4) |
-| `crs` | no | Override source CRS (default: EPSG:3857 for WMTS, auto-detected for stac/geotiff) |
+| `crs` | no | Override source CRS (default: EPSG:3857 for WMTS, auto-detected for STAC/path) |
 
 ## Template variables
 
@@ -147,3 +148,14 @@ These are the only predefined variables. All other variables (e.g., `${layer}`, 
 ### Legacy syntax
 
 For backward compatibility, `{x}`, `{y}`, `{z}`, `{zoom}` (without `$`) are also supported in URL templates.
+
+## Source type detection
+
+When `type` is not explicitly set, it is auto-detected from the first URL:
+
+| Pattern | Detected type |
+|---------|--------------|
+| URL contains `${x}`, `${y}`, `${z}` or `{x}`, `{y}`, `{z}` | `wmts` |
+| URL contains `/collections/` or `/stac/` | `stac` |
+| URL starts with `./`, `../`, `/`, or has no `://` scheme | `path` |
+| Other | Error — set `type` explicitly |

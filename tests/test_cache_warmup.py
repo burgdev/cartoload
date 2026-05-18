@@ -31,10 +31,15 @@ def _write_config(tmp_path: Path) -> str:
                 "layers": {
                     "test_layer": {
                         "name": "Test Layer",
+                        "format": "wmts",
                         "source": "test_src",
                         "zoom_levels": [10],
-                        "exporter": "garmin_img",
+                    }
+                },
+                "targets": {
+                    "test_layer": {
                         "output": "test.img",
+                        "layers": [{"ref": "test_layer"}],
                     }
                 },
             }
@@ -144,9 +149,8 @@ class TestCacheWarmup:
             id="test_layer",
             name="Test Layer",
             source="test_src",
+            format="wmts",
             zoom_levels=[10],
-            exporter="garmin_img",
-            output="test.img",
             bounds={"west": 7.0, "east": 7.5, "south": 46.0, "north": 46.5},
         )
         dl = WMTSDownloader(

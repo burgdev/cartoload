@@ -1,4 +1,7 @@
-# Austria layer definitions
+# Austria layer definitions and build targets
+
+includes:
+  - ../sources/basemap_at.yaml
 
 bounds:
   west: 9.53
@@ -11,8 +14,15 @@ layers:
     name: "Austria basemap"
     description: "basemap.at standard basemap"
     type: raster
+    format: wmts
     source: basemap_at_wmts
-    wmts_layer: geolandbasemap
+    source_args:
+      layer: geolandbasemap
     zoom_levels: [10, 12, 14]
-    exporter: garmin_img
+
+targets:
+  at_basemap:
+    name: "Austria basemap"
     output: at_basemap.img
+    layers:
+      - ref: at_basemap

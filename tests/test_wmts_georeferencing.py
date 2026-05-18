@@ -53,20 +53,20 @@ class TestComputeTileBounds:
         left, top, right, bottom = WMTSDownloader._compute_tile_bounds(0, 0, 0)
         half_world = 20037508.342789244
         assert abs(left - (-half_world)) < 0.01
-        assert abs(top - (-half_world)) < 0.01
+        assert abs(top - half_world) < 0.01  # top (north edge) is +half_world
         assert abs(right - half_world) < 0.01
-        assert abs(bottom - half_world) < 0.01
+        assert abs(bottom - (-half_world)) < 0.01  # bottom (south edge) is -half_world
 
     def test_zoom10_tile_541_362(self) -> None:
         """Known tile (541, 362, z=10) should have correct bounds."""
         left, top, right, bottom = WMTSDownloader._compute_tile_bounds(541, 362, 10)
         tile_size = 40075016.68557849 / 2**10
         expected_left = ORIGIN + 541 * tile_size
-        expected_top = ORIGIN + 362 * tile_size
+        expected_top = -ORIGIN - 362 * tile_size  # -ORIGIN = +half_world
         assert abs(left - expected_left) < 0.001
         assert abs(top - expected_top) < 0.001
         assert abs(right - (expected_left + tile_size)) < 0.001
-        assert abs(bottom - (expected_top + tile_size)) < 0.001
+        assert abs(bottom - (expected_top - tile_size)) < 0.001
 
     def test_adjacent_tiles_touch(self) -> None:
         """Adjacent tiles should share boundaries exactly."""
@@ -143,7 +143,7 @@ class TestWriteWorldFile:
         expected_left = ORIGIN + 541 * tile_size_m
         assert abs(float(lines[4]) - expected_left) < 1e-3
         # Line 6: top-left Y
-        expected_top = ORIGIN + 362 * tile_size_m
+        expected_top = -ORIGIN - 362 * tile_size_m  # -ORIGIN = +half_world
         assert abs(float(lines[5]) - expected_top) < 1e-3
 
     def test_world_file_256_pixel_default(self, tmp_path: Path) -> None:

@@ -29,17 +29,16 @@ from cartoload.pipeline import DownloadError
 def _make_config_file(
     tmp_path: Path,
     source_id: str = "test_src",
-    source_type: str = "geotiff",
+    source_type: str = "wmts",
     layer_id: str = "test_layer",
     **layer_overrides,
 ) -> Path:
-    """Create a unified config YAML file."""
+    """Create a unified config YAML file with layers + targets structure."""
     layer_def = {
         "name": "Test Layer",
+        "format": source_type if source_type in ("geotiff", "gpkg", "wmts") else "wmts",
         "source": source_id,
         "zoom_levels": [12, 14],
-        "exporter": "garmin-img",
-        "output": "test_layer.img",
     }
     layer_def.update(layer_overrides)
     config_data = {
@@ -51,6 +50,12 @@ def _make_config_file(
         },
         "bounds": {"west": 5.0, "south": 45.0, "east": 10.0, "north": 48.0},
         "layers": {layer_id: layer_def},
+        "targets": {
+            layer_id: {
+                "output": f"{layer_id}.img",
+                "layers": [{"ref": layer_id}],
+            }
+        },
     }
 
     cfg_file = tmp_path / "config.yaml"

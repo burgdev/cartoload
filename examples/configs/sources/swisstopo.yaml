@@ -26,7 +26,7 @@ sources:
     max_threads: 4
 
   swisstopo_stac:
-    type: geotiff
+    type: stac
     defaults:
       layer: ch.swisstopo.pixelkarte-farbe-pk25.noscale
       asset_filter:
@@ -35,19 +35,10 @@ sources:
       - "https://data.geo.admin.ch/api/stac/v1/collections/${layer}"
     attribution: "© swisstopo"
 
-  # GPKG source: vector GeoPackage data from STAC collections
-  swisstopo_skitouring:
-    type: gpkg
-    defaults:
-      layer: ch.swisstopo-karto.skitouren
-    urls:
-      - "https://data.geo.admin.ch/api/stac/v0.9/collections/${layer}"
-    attribution: "© swisstopo"
-
   # GeoTIFF source: point at a directory of already-downloaded GeoTIFF files
   # (e.g. cache from a previous stac download)
   swisstopo_geotiff:
-    type: geotiff
+    type: path
     urls:
       - ".cartoload_cache/swisstopo_stac/ch.swisstopo.pixelkarte-farbe-pk25.noscale/"
     attribution: "© swisstopo"

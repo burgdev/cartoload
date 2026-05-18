@@ -11,7 +11,7 @@ def sample_source() -> SourceConfig:
     return SourceConfig(
         id="test_wmts",
         type="wmts",
-        urls=["https://example.com/{layer}/{z}/{x}/{y}.png"],
+        urls=["https://example.com/{layer}/{z}/${x}/${y}.png"],
         attribution="© Test",
         rate_limit_ms=100,
         max_threads=2,
@@ -26,8 +26,7 @@ def sample_layer() -> LayerConfig:
         name="Test Layer",
         description="A test layer",
         type="raster",
+        format="wmts",
         source="test_wmts",
         zoom_levels=[10, 12, 14],
-        exporter="garmin_img",
-        output="test_layer.img",
     )

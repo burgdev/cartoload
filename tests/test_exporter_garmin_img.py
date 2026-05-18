@@ -1018,8 +1018,6 @@ class TestIntegrationWrite:
             description="Test layer",
             source="test_src",
             zoom_levels=[12],
-            exporter="garmin-img",
-            output="test_output.img",
             bounds={"north": 47.5, "south": 46.5, "west": 8.0, "east": 9.0},
         )
 
@@ -1430,8 +1428,6 @@ class TestE2EValidation:
             description="E2E test layer",
             source="test_src",
             zoom_levels=[12, 13],
-            exporter="garmin-img",
-            output="e2e_output.img",
             bounds={"north": 47.5, "south": 47.0, "west": 8.0, "east": 9.0},
         )
 
@@ -1452,8 +1448,6 @@ class TestE2EValidation:
             description="Size test",
             source="test_src",
             zoom_levels=[12],
-            exporter="garmin-img",
-            output="e2e_size.img",
             bounds={"north": 47.5, "south": 47.0, "west": 8.0, "east": 9.0},
         )
 
@@ -1479,8 +1473,6 @@ class TestE2EValidation:
             description="Signature test",
             source="test_src",
             zoom_levels=[12],
-            exporter="garmin-img",
-            output="e2e_sig.img",
             bounds={"north": 47.5, "south": 47.0, "west": 8.0, "east": 9.0},
         )
 
@@ -1507,8 +1499,6 @@ class TestE2EValidation:
             description="GMT validation test",
             source="test_src",
             zoom_levels=[12],
-            exporter="garmin-img",
-            output="e2e_gmt.img",
             bounds={"north": 47.5, "south": 47.0, "west": 8.0, "east": 9.0},
         )
 

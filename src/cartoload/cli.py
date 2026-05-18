@@ -19,13 +19,13 @@ from rich.progress import (
 )
 
 from .cli_analyze import analyze
-from .config import load_config, resolve_settings
+from .config import load_config, resolve_settings, TargetConfig, TargetLayerEntry
 from .pipeline import (
     DownloadError,
     ExportError,
     PipelineError,
     ProcessingError,
-    build_layer,
+    build_target,
     get_downloader,
     resolve_source,
 )
@@ -225,6 +225,15 @@ main.add_command(analyze)
 @click.option(
     "--offline", is_flag=True, help="Skip freshness checks, use cached files as-is"
 )
+@click.option(
+    "--update", "do_update", is_flag=True, help="Check cache freshness via HTTP HEAD"
+)
+@click.option(
+    "--ago",
+    type=int,
+    default=None,
+    help="Only update if cached file is older than N days",
+)
 @click.option("-f", "--force", is_flag=True, help="Overwrite existing output files")
 @click.option("--dry-run", is_flag=True, help="Show build plan without executing")
 @click.option(
@@ -278,6 +287,8 @@ def build(
     cache_dir: str | None,
     no_download: bool,
     offline: bool,
+    do_update: bool,
+    ago: int | None,
     force: bool,
     dry_run: bool,
     cache_warmup: bool,
@@ -290,7 +301,7 @@ def build(
 ) -> None:
     """Build one or more layers into output files."""
     if not layer:
-        raise click.ClickException("--layer is required")
+        raise click.ClickException("--layer is required (specify a target or layer ID)")
 
     # Apply executor mode to environment (read by garmin_img_writer._get_executor_mode)
     if executor_mode is not None:
@@ -309,50 +320,79 @@ def build(
         if effective_executor is not None:
             os.environ["CARTOLOAD_EXECUTOR"] = effective_executor
 
-        # Resolve layer
-        if layer not in config.layers:
-            available = ", ".join(sorted(config.layers.keys())) or "(none)"
-            raise click.ClickException(
-                f"Layer '{layer}' not found. Available layers: {available}"
+        # --ago implies --update
+        effective_update = do_update or (ago is not None)
+        effective_max_age = ago
+
+        # Resolve the -l argument: try targets first, then layers
+        target_config: TargetConfig | None = None
+        layer_config = None
+
+        if layer in config.targets:
+            target_config = config.targets[layer]
+        elif layer in config.layers:
+            # Auto-wrap a layer definition as a single-layer target
+            lc = config.layers[layer]
+            target_config = TargetConfig(
+                id=lc.id,
+                name=lc.name,
+                output=f"{lc.id}.img",
+                exporter="garmin_img",
+                layers=[
+                    TargetLayerEntry(
+                        name=lc.name,
+                        source=lc.source,
+                        format=lc.format,
+                        zoom_levels=lc.zoom_levels,
+                        source_args=lc.source_args,
+                        asset_filter=lc.asset_filter,
+                        rules=lc.rules,
+                        style=lc.style,
+                        garmin_types=lc.garmin_types,
+                    )
+                ],
+                zoom_levels=lc.zoom_levels,
+                bounds=lc.bounds,
+                config_dir=lc.config_dir,
             )
-        layer_config = config.layers[layer]
+            layer_config = lc
+        else:
+            available_targets = ", ".join(sorted(config.targets.keys())) or "(none)"
+            available_layers = ", ".join(sorted(config.layers.keys())) or "(none)"
+            raise click.ClickException(
+                f"'{layer}' not found in targets or layers.\n"
+                f"  Available targets: {available_targets}\n"
+                f"  Available layers: {available_layers}"
+            )
 
         # Resolve extent override
         extent = _resolve_extent(bbox, lng, lat, width, height)
         if extent is not None:
-            _validate_extent_within_layer(extent, layer_config.bounds)
+            _validate_extent_within_layer(extent, target_config.bounds)
 
         zoom_list = _parse_zoom(zoom)
-
-        # Apply overrides to layer_config early (before build summary)
-        import dataclasses
-
-        if extent is not None:
-            layer_config = dataclasses.replace(layer_config, bounds=extent)
-        if zoom_list is not None:
-            layer_config = dataclasses.replace(layer_config, zoom_levels=zoom_list)
-        if exporter:
-            layer_config = dataclasses.replace(layer_config, exporter=exporter)
 
         # Create paths (don't mkdir yet — dry-run shouldn't create dirs)
         out_dir = Path(effective_output_dir)
         cache = Path(effective_cache_dir)
 
-        # Compute and display build summary
-        source = resolve_source(layer_config, config.sources)
-        try:
-            dl = get_downloader(source, cache, source_args=layer_config.source_args)
-            summary = compute_build_summary(layer_config, dl, quality=effective_quality)
-            if summary.total_tiles > 0:
-                click.echo(
-                    format_build_summary(
-                        summary, fast_build=summary.all_cached and no_download
-                    )
+        # Compute and display build summary (best-effort)
+        if layer_config is not None:
+            try:
+                source = resolve_source(layer_config, config.sources)
+                dl = get_downloader(source, cache, source_args=layer_config.source_args)
+                summary = compute_build_summary(
+                    layer_config, dl, quality=effective_quality
                 )
-                click.echo()
-        except Exception:
-            # Summary is best-effort; don't block the build if it fails
-            pass
+                if summary.total_tiles > 0:
+                    click.echo(
+                        format_build_summary(
+                            summary, fast_build=summary.all_cached and no_download
+                        )
+                    )
+                    click.echo()
+            except Exception:
+                pass
 
         # Dry run: show plan and exit without creating any files
         if dry_run:
@@ -360,7 +400,6 @@ def build(
             return
 
         # Now create directories (only after dry-run check)
-        # Warmup only needs cache dir, not output dir
         cache.mkdir(parents=True, exist_ok=True)
         if not cache_warmup:
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -402,7 +441,6 @@ def build(
                         encode_task = progress.add_task("Encoding tiles", total=total)
                     progress.update(encode_task, completed=current)
                 elif stage.startswith("processing"):
-                    # Per-zoom processing progress: "processing" or "processing:18"
                     parts = stage.split(":", 1)
                     zoom_label = f" (zoom {parts[1]})" if len(parts) > 1 else ""
                     task_key = f"process_{parts[1] if len(parts) > 1 else 'default'}"
@@ -415,7 +453,6 @@ def build(
                         )
                     progress.update(tasks_dict[task_key], completed=current)
                 elif stage.startswith("writing"):
-                    # Per-zoom writing progress: "writing" or "writing:15"
                     parts = stage.split(":", 1)
                     zoom_label = f" (zoom {parts[1]})" if len(parts) > 1 else ""
                     task_key = f"write_{parts[1] if len(parts) > 1 else 'default'}"
@@ -428,15 +465,18 @@ def build(
                         )
                     progress.update(tasks_dict[task_key], completed=current)
 
-            # Run pipeline
+            # Run the unified pipeline
             output_paths = asyncio.run(
-                build_layer(
-                    layer_config,
+                build_target(
+                    target_config,
+                    config.layers,
                     config.sources,
                     cache,
                     out_dir,
                     no_download=no_download,
                     offline=offline,
+                    update=effective_update,
+                    max_age_days=effective_max_age,
                     force=force,
                     bounds_override=extent,
                     zoom_override=zoom_list,
@@ -457,12 +497,12 @@ def build(
                 size = path.stat().st_size
                 click.echo(f"Output: {path} ({_human_size(size)})")
 
-        # Generate previews if requested (WMTS cache-based previews;
-        # GeoTIFF/STAC/composite previews are already handled in the pipeline)
-        if preview:
+        # Generate previews if requested
+        if preview and layer_config is not None:
             try:
                 from .processor.preview import generate_previews
 
+                source = resolve_source(layer_config, config.sources)
                 dl = get_downloader(source, cache, source_args=layer_config.source_args)
                 if isinstance(dl, WMTSDownloader):
                     preview_paths = generate_previews(
@@ -552,6 +592,7 @@ def download(
         resolved = resolve_settings(config.settings)
         effective_cache_dir = cache_dir or resolved.get("cache_dir", "./cache")
 
+        # Resolve layer (for download, we use layer definitions directly)
         if layer not in config.layers:
             available = ", ".join(sorted(config.layers.keys())) or "(none)"
             raise click.ClickException(
@@ -706,26 +747,43 @@ def list_layers(
     except ValueError as e:
         raise click.ClickException(str(e))
 
-    if not config.layers:
-        click.echo("No layers defined in config files.")
+    if not config.layers and not config.targets:
+        click.echo("No layers or targets defined in config files.")
         return
 
-    click.echo(f"Found {len(config.layers)} layer(s):\n")
+    # List targets
+    if config.targets:
+        click.echo(f"Targets ({len(config.targets)}):\n")
+        for tid, target in config.targets.items():
+            zoom_str = ",".join(str(z) for z in target.zoom_levels)
+            layer_names = ", ".join(
+                entry.name or entry.ref or entry.source for entry in target.layers
+            )
+            click.echo(f"  {tid}")
+            click.echo(f"    Name: {target.name}")
+            click.echo(f"    Layers: {layer_names}")
+            click.echo(f"    Output: {target.output}")
+            click.echo(f"    Zoom levels: {zoom_str}")
+            if target.description:
+                click.echo(f"    Description: {target.description}")
+            click.echo()
 
-    for layer_id, layer in config.layers.items():
-        source = config.sources.get(layer.source)
-        source_type = source.type if source else "unknown"
-        zoom_str = ",".join(str(z) for z in layer.zoom_levels)
+    # List layer definitions
+    if config.layers:
+        click.echo(f"Layer definitions ({len(config.layers)}):\n")
+        for layer_id, layer in config.layers.items():
+            source = config.sources.get(layer.source)
+            source_type = source.type if source else "unknown"
+            zoom_str = ",".join(str(z) for z in layer.zoom_levels)
 
-        click.echo(f"  {layer_id}")
-        click.echo(f"    Name: {layer.name}")
-        click.echo(f"    Source: {layer.source} ({source_type})")
-        click.echo(f"    Zoom levels: {zoom_str}")
-        click.echo(f"    Exporter: {layer.exporter}")
-        click.echo(f"    Output: {layer.output}")
-        if layer.description:
-            click.echo(f"    Description: {layer.description}")
-        click.echo()
+            click.echo(f"  {layer_id}")
+            click.echo(f"    Name: {layer.name}")
+            click.echo(f"    Source: {layer.source} ({source_type})")
+            click.echo(f"    Format: {layer.format}")
+            click.echo(f"    Zoom levels: {zoom_str}")
+            if layer.description:
+                click.echo(f"    Description: {layer.description}")
+            click.echo()
 
 
 # ---------------------------------------------------------------------------

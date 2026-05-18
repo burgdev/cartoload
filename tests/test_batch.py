@@ -302,8 +302,6 @@ class TestExportFromTiles:
             name="Test Layer",
             source="test_source",
             zoom_levels=[10],
-            exporter="garmin_img",
-            output="test.img",
             bounds={
                 "west": 5.0,
                 "east": 10.0,
@@ -396,8 +394,6 @@ class TestBatchToIntegration:
             name="Test Layer",
             source="test_source",
             zoom_levels=[10],
-            exporter="garmin_img",
-            output="test.img",
             bounds={
                 "west": 5.0,
                 "east": 10.0,
@@ -435,8 +431,6 @@ class TestBatchToIntegration:
             name="Test",
             source="test_source",
             zoom_levels=[10, 11],
-            exporter="garmin_img",
-            output="test.img",
             bounds={"west": 5.0, "east": 10.0, "south": 45.0, "north": 48.0},
         )
 

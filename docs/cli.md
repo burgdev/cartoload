@@ -10,7 +10,7 @@ cartoload — convert geodata into GPS device maps.
 :   Analyze geodata files.
 
 `build`
-:   Build one or more layers into output files.
+:   Build one or more targets into output files.
 
 `download`
 :   Download source data only (no build).
@@ -19,7 +19,7 @@ cartoload — convert geodata into GPS device maps.
 :   Split an oversized .img into region files.
 
 `list`
-:   List all layers from the provided config files.
+:   List all layers and targets from the provided config files.
 
 `cache`
 :   Inspect and manage the tile cache.
@@ -172,20 +172,17 @@ Export IMG raster tiles to GeoTIFF format.
 
 ### `cartoload build`
 
-Build one or more layers into output files.
+Build one or more targets into output files.
 
 **Usage:** `cartoload build [OPTIONS]`
 
 **Options:**
 
-`-S, --sources PATH ...`
-:   Source config file(s) (repeatable)
-
-`-L, --layers PATH ...`
-:   Layer config file(s) (repeatable)
+`-c, --config PATH`
+:   Config file(s), repeatable. Each file uses the unified format with `sources`, `layers`, `targets`, and `includes` sections.
 
 `-l, --layer TEXT`
-:   Layer ID to build (required)
+:   Target ID to build (required). Selects a target from the `targets:` section of the config files.
 
 `-e, --exporter TEXT`
 :   Override exporter: garmin-img
@@ -254,14 +251,11 @@ Download source data only (no build).
 
 **Options:**
 
-`-S, --sources PATH ...`
-:   Source config file(s) (repeatable)
-
-`-L, --layers PATH ...`
-:   Layer config file(s) (repeatable)
+`-c, --config PATH`
+:   Config file(s), repeatable.
 
 `-l, --layer TEXT`
-:   Layer ID to download (required)
+:   Target ID to download (required). Selects a target from the `targets:` section.
 
 `-b, --bbox FLOAT`
 :   Override bounding box: W S E N
@@ -270,7 +264,7 @@ Download source data only (no build).
 :   Center longitude for extent (use with --lat/--width/--height)
 
 `-y, --lat FLOAT`
-:   Center latitude for extent (use with --lng/--width/--height)
+:   Center latitude for extent (use with --lng/--lat/--height)
 
 `-W, --width FLOAT`
 :   Extent width in km (use with --lng/--lat/--height)
@@ -307,17 +301,14 @@ Split an oversized .img into region files.
 
 ### `cartoload list`
 
-List all layers from the provided config files.
+List all layers and targets from the provided config files.
 
 **Usage:** `cartoload list [OPTIONS]`
 
 **Options:**
 
-`-S, --sources PATH ...`
-:   Source config file(s) (repeatable)
-
-`-L, --layers PATH ...`
-:   Layer config file(s) (repeatable)
+`-c, --config PATH`
+:   Config file(s), repeatable.
 
 ---
 

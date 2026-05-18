@@ -9,16 +9,21 @@ from cartoload.config import (
     LayerConfig,
     SettingsConfig,
     SourceConfig,
+    TargetConfig,
+    TargetLayerEntry,
+    _detect_source_type,
     _parse_layers_section,
     _parse_settings_section,
     _parse_sources_section,
-    _resolve_source_method,
+    _parse_targets_section,
     load_config,
     merge_layers,
     merge_settings,
     merge_sources,
+    merge_targets,
     resolve_references,
     resolve_settings,
+    resolve_target_layer_refs,
 )
 from cartoload.downloader.base import BaseDownloader
 
@@ -44,17 +49,15 @@ def test_source_config_wmts():
     assert source.max_threads == 4
 
 
-def test_source_config_geotiff():
+def test_source_config_stac():
     source = SourceConfig(
         id="swisstopo_stac",
-        type="geotiff",
+        type="stac",
         urls=["https://data.geo.admin.ch/api/stac/v1/collections/test"],
-        source_method="stac",
         attribution="© swisstopo",
     )
     assert source.id == "swisstopo_stac"
-    assert source.type == "geotiff"
-    assert source.source_method == "stac"
+    assert source.type == "stac"
     assert source.urls is not None
 
 
@@ -64,6 +67,7 @@ def test_source_config_defaults():
     assert source.attribution == ""
     assert source.rate_limit_ms == 150
     assert source.max_threads == 4
+    assert source.asset_filter is None
 
 
 def test_layer_config_raster():
@@ -72,25 +76,74 @@ def test_layer_config_raster():
         name="Switzerland 1:25k",
         description="swisstopo national map",
         type="raster",
+        format="geotiff",
         source="swisstopo_stac",
-        wmts_fallback="swisstopo_wmts",
         zoom_levels=[10, 12, 14],
-        exporter="garmin_img",
-        output="ch_basemap_25k.img",
     )
     assert layer.id == "ch_basemap_25k"
     assert layer.type == "raster"
-    assert layer.wmts_fallback == "swisstopo_wmts"
+    assert layer.format == "geotiff"
     assert layer.zoom_levels == [10, 12, 14]
-    assert layer.exporter == "garmin_img"
+
+
+def test_layer_config_no_output_or_exporter():
+    """LayerConfig is definition-only — no output/exporter fields."""
+    layer = LayerConfig(id="minimal", name="Minimal Layer")
+    assert not hasattr(layer, "output")
+    assert not hasattr(layer, "exporter")
+    assert not hasattr(layer, "wmts_fallback")
 
 
 def test_layer_config_defaults():
     layer = LayerConfig(id="minimal", name="Minimal Layer")
     assert layer.type == "raster"
     assert layer.zoom_levels == []
-    assert layer.exporter == "garmin_img"
+    assert layer.format == ""
     assert layer.bounds is None
+    assert layer.rules is None
+    assert layer.style is None
+
+
+def test_target_config():
+    target = TargetConfig(
+        id="ch_stac",
+        name="Switzerland STAC",
+        output="ch_stac.img",
+        exporter="garmin_img",
+        zoom_levels=[8, 9, 11, 12],
+        layers=[
+            TargetLayerEntry(ref="ch_basemap_25k"),
+            TargetLayerEntry(source="swisstopo_stac", format="geotiff", name="inline"),
+        ],
+    )
+    assert target.id == "ch_stac"
+    assert target.output == "ch_stac.img"
+    assert target.exporter == "garmin_img"
+    assert len(target.layers) == 2
+
+
+def test_target_config_defaults():
+    target = TargetConfig(id="minimal", output="out.img")
+    assert target.name == ""
+    assert target.exporter == "garmin_img"
+    assert target.layers == []
+    assert target.bounds is None
+
+
+def test_target_layer_entry_extension():
+    entry = TargetLayerEntry(source_args={"extension": "png"})
+    assert entry.extension == "png"
+
+    entry_default = TargetLayerEntry()
+    assert entry_default.extension == "jpeg"
+
+
+def test_target_layer_entry_is_resolved():
+    entry = TargetLayerEntry(source="swisstopo_stac")
+    assert entry.is_resolved()
+
+    entry_ref = TargetLayerEntry(ref="ch_basemap")
+    assert not entry_ref.is_resolved()
 
 
 def test_settings_config_defaults():
@@ -100,6 +153,77 @@ def test_settings_config_defaults():
     assert settings.executor is None
     assert settings.quality is None
     assert settings.rate_limit_ms is None
+
+
+# ---------------------------------------------------------------------------
+# _detect_source_type tests
+# ---------------------------------------------------------------------------
+
+
+class TestDetectSourceType:
+    """Tests for _detect_source_type() auto-detection logic."""
+
+    def test_auto_detect_stac_collections_url(self):
+        assert (
+            _detect_source_type(
+                ["https://example.com/api/stac/v1/collections/my_layer"]
+            )
+            == "stac"
+        )
+
+    def test_auto_detect_stac_in_path(self):
+        assert _detect_source_type(["https://example.com/stac/items"]) == "stac"
+
+    def test_auto_detect_wmts_tile_vars_dollar(self):
+        assert (
+            _detect_source_type(["https://wmts.example.com/${z}/${x}/${y}.png"])
+            == "wmts"
+        )
+
+    def test_auto_detect_wmts_tile_vars_curly(self):
+        assert (
+            _detect_source_type(["https://wmts.example.com/{z}/{x}/{y}.png"]) == "wmts"
+        )
+
+    def test_auto_detect_local_path_relative(self):
+        assert _detect_source_type(["./cache/geotiffs/"]) == "path"
+
+    def test_auto_detect_local_path_relative_parent(self):
+        assert _detect_source_type(["../data/tiles/"]) == "path"
+
+    def test_auto_detect_local_path_absolute(self):
+        assert _detect_source_type(["/data/tiles/"]) == "path"
+
+    def test_auto_detect_local_path_no_scheme(self):
+        assert _detect_source_type(["cache/geotiffs/"]) == "path"
+
+    def test_explicit_stac_override(self):
+        assert _detect_source_type(["./local/path"], explicit="stac") == "stac"
+
+    def test_explicit_path_override(self):
+        assert (
+            _detect_source_type(
+                ["https://stac.example.com/collections/test"], explicit="path"
+            )
+            == "path"
+        )
+
+    def test_explicit_wmts_override(self):
+        assert (
+            _detect_source_type(["https://example.com/data"], explicit="wmts") == "wmts"
+        )
+
+    def test_explicit_invalid_raises(self):
+        with pytest.raises(ValueError, match="Invalid source type 'invalid'"):
+            _detect_source_type(["https://x"], explicit="invalid")
+
+    def test_auto_detect_empty_urls_raises(self):
+        with pytest.raises(ValueError, match="no URLs provided"):
+            _detect_source_type([], explicit=None)
+
+    def test_auto_detect_unrecognized_url_raises(self):
+        with pytest.raises(ValueError, match="Cannot auto-detect source type"):
+            _detect_source_type(["https://example.com/data"])
 
 
 # ---------------------------------------------------------------------------
@@ -115,8 +239,8 @@ def test_parse_sources_section_valid():
                 "urls": ["https://example.com/{z}/{x}/{y}.png"],
                 "attribution": "Test",
             },
-            "test_geotiff": {
-                "type": "geotiff",
+            "test_stac": {
+                "type": "stac",
                 "urls": ["https://stac.example.com/collections/test"],
             },
         }
@@ -124,9 +248,9 @@ def test_parse_sources_section_valid():
     sources = _parse_sources_section(data, "test.yaml")
     assert len(sources) == 2
     assert "test_wmts" in sources
-    assert "test_geotiff" in sources
+    assert "test_stac" in sources
     assert sources["test_wmts"].type == "wmts"
-    assert sources["test_geotiff"].urls == ["https://stac.example.com/collections/test"]
+    assert sources["test_stac"].urls == ["https://stac.example.com/collections/test"]
 
 
 def test_parse_sources_section_missing():
@@ -135,18 +259,10 @@ def test_parse_sources_section_missing():
     assert sources == {}
 
 
-def test_parse_sources_section_missing_type():
-    with pytest.raises(ValueError, match="missing required field 'type'"):
-        _parse_sources_section(
-            {"sources": {"bad": {"urls": ["https://example.com"]}}},
-            "test.yaml",
-        )
-
-
 def test_parse_sources_section_invalid_type():
-    with pytest.raises(ValueError, match="has invalid type 'invalid_type'"):
+    with pytest.raises(ValueError, match="Invalid source type 'invalid_type'"):
         _parse_sources_section(
-            {"sources": {"bad": {"type": "invalid_type"}}},
+            {"sources": {"bad": {"type": "invalid_type", "urls": ["https://x"]}}},
             "test.yaml",
         )
 
@@ -157,6 +273,45 @@ def test_parse_sources_section_missing_required_field():
             {"sources": {"wmts_source": {"type": "wmts"}}},
             "test.yaml",
         )
+
+
+def test_parse_sources_section_auto_detect_stac():
+    """Source type auto-detected from URL when not explicitly set."""
+    data = {
+        "sources": {
+            "auto_stac": {
+                "urls": ["https://data.geo.admin.ch/api/stac/v1/collections/test"],
+            }
+        }
+    }
+    sources = _parse_sources_section(data, "test.yaml")
+    assert sources["auto_stac"].type == "stac"
+
+
+def test_parse_sources_section_auto_detect_wmts():
+    """WMTS auto-detected from tile variables in URL."""
+    data = {
+        "sources": {
+            "auto_wmts": {
+                "urls": ["https://example.com/${z}/${x}/${y}.png"],
+            }
+        }
+    }
+    sources = _parse_sources_section(data, "test.yaml")
+    assert sources["auto_wmts"].type == "wmts"
+
+
+def test_parse_sources_section_auto_detect_path():
+    """Path auto-detected from relative local path."""
+    data = {
+        "sources": {
+            "auto_path": {
+                "urls": ["./cache/geotiffs/"],
+            }
+        }
+    }
+    sources = _parse_sources_section(data, "test.yaml")
+    assert sources["auto_path"].type == "path"
 
 
 def test_parse_sources_section_crs_field():
@@ -235,7 +390,7 @@ def test_parse_sources_section_asset_filter():
     data = {
         "sources": {
             "test_stac": {
-                "type": "geotiff",
+                "type": "stac",
                 "urls": ["https://stac.example.com/collections/test"],
                 "defaults": {
                     "layer": "my_collection",
@@ -254,7 +409,7 @@ def test_parse_sources_section_no_asset_filter():
     data = {
         "sources": {
             "test_stac": {
-                "type": "geotiff",
+                "type": "stac",
                 "urls": ["https://stac.example.com/collections/test"],
                 "defaults": {"layer": "my_collection"},
             }
@@ -270,7 +425,7 @@ def test_parse_sources_section_asset_filter_invalid_type():
             {
                 "sources": {
                     "test_stac": {
-                        "type": "geotiff",
+                        "type": "stac",
                         "urls": ["https://stac.example.com/collections/test"],
                         "defaults": {
                             "layer": "my_collection",
@@ -300,9 +455,8 @@ def test_parse_layers_section_valid():
             "test_layer": {
                 "name": "Test Layer",
                 "source": "test_source",
+                "format": "geotiff",
                 "zoom_levels": [10, 12, 14],
-                "exporter": "garmin_img",
-                "output": "test.img",
             }
         },
     }
@@ -310,6 +464,7 @@ def test_parse_layers_section_valid():
     assert len(layers) == 1
     assert "test_layer" in layers
     assert layers["test_layer"].name == "Test Layer"
+    assert layers["test_layer"].format == "geotiff"
     assert layers["test_layer"].zoom_levels == [10, 12, 14]
     assert bounds is not None
     assert bounds["west"] == 5.0
@@ -346,8 +501,6 @@ def test_parse_layers_section_invalid_zoom_levels():
                         "name": "Bad Layer",
                         "source": "test",
                         "zoom_levels": [10, 25],
-                        "exporter": "garmin_img",
-                        "output": "test.img",
                     }
                 }
             },
@@ -364,8 +517,6 @@ def test_parse_layers_section_empty_zoom_levels():
                         "name": "Bad Layer",
                         "source": "test",
                         "zoom_levels": [],
-                        "exporter": "garmin_img",
-                        "output": "test.img",
                     }
                 }
             },
@@ -388,8 +539,6 @@ def test_parse_layers_section_invalid_bounds():
                         "name": "Test",
                         "source": "test",
                         "zoom_levels": [10],
-                        "exporter": "garmin_img",
-                        "output": "test.img",
                     }
                 },
             },
@@ -413,8 +562,6 @@ def test_parse_layers_section_asset_filter_in_source_dict():
                     "asset_filter": {"geoadmin:variant": "krel"},
                 },
                 "zoom_levels": [10],
-                "exporter": "garmin_img",
-                "output": "test.img",
             }
         },
     }
@@ -436,13 +583,386 @@ def test_parse_layers_section_no_asset_filter():
                 "name": "Test Layer",
                 "source": "test_source",
                 "zoom_levels": [10],
-                "exporter": "garmin_img",
-                "output": "test.img",
             }
         },
     }
     layers, _ = _parse_layers_section(data, "test.yaml")
     assert layers["test_layer"].asset_filter is None
+
+
+def test_parse_layers_section_invalid_format():
+    with pytest.raises(ValueError, match="invalid format 'bad_format'"):
+        _parse_layers_section(
+            {
+                "layers": {
+                    "test_layer": {
+                        "name": "Test",
+                        "source": "test",
+                        "zoom_levels": [10],
+                        "format": "bad_format",
+                    }
+                }
+            },
+            "test.yaml",
+        )
+
+
+def test_parse_layers_section_inherits_file_bounds():
+    data = {
+        "bounds": {
+            "west": 5.0,
+            "east": 10.0,
+            "south": 45.0,
+            "north": 48.0,
+        },
+        "layers": {
+            "test_layer": {
+                "name": "Test",
+                "source": "test",
+                "zoom_levels": [10],
+            }
+        },
+    }
+    layers, _ = _parse_layers_section(data, "test.yaml")
+    assert layers["test_layer"].bounds == {
+        "west": 5.0,
+        "east": 10.0,
+        "south": 45.0,
+        "north": 48.0,
+    }
+
+
+def test_parse_layers_section_wmts_layer_backward_compat():
+    """wmts_layer field is merged into source_args as 'layer'."""
+    data = {
+        "layers": {
+            "test": {
+                "name": "Test",
+                "source": "test_wmts",
+                "wmts_layer": "ch.swisstopo.pixelkarte-farbe",
+                "zoom_levels": [10],
+            }
+        },
+    }
+    layers, _ = _parse_layers_section(data, "test.yaml")
+    assert layers["test"].source_args["layer"] == "ch.swisstopo.pixelkarte-farbe"
+
+
+# ---------------------------------------------------------------------------
+# _parse_targets_section tests
+# ---------------------------------------------------------------------------
+
+
+def test_parse_targets_section_valid():
+    data = {
+        "targets": {
+            "test_target": {
+                "output": "test.img",
+                "zoom_levels": [10, 12],
+                "layers": [
+                    {"ref": "some_layer"},
+                ],
+            }
+        }
+    }
+    targets = _parse_targets_section(data, "test.yaml", None)
+    assert len(targets) == 1
+    assert "test_target" in targets
+    assert targets["test_target"].output == "test.img"
+    assert targets["test_target"].zoom_levels == [10, 12]
+    assert len(targets["test_target"].layers) == 1
+    assert targets["test_target"].layers[0].ref == "some_layer"
+
+
+def test_parse_targets_section_missing():
+    targets = _parse_targets_section({}, "test.yaml", None)
+    assert targets == {}
+
+
+def test_parse_targets_section_missing_output():
+    with pytest.raises(ValueError, match="missing required field 'output'"):
+        _parse_targets_section(
+            {"targets": {"bad": {"zoom_levels": [10]}}},
+            "test.yaml",
+            None,
+        )
+
+
+def test_parse_targets_section_inherits_file_bounds():
+    file_bounds = {"west": 5.0, "east": 10.0, "south": 45.0, "north": 48.0}
+    data = {
+        "targets": {
+            "test": {
+                "output": "test.img",
+                "zoom_levels": [10],
+                "layers": [{"ref": "some_layer"}],
+            }
+        }
+    }
+    targets = _parse_targets_section(data, "test.yaml", file_bounds)
+    assert targets["test"].bounds == file_bounds
+
+
+def test_parse_targets_section_inline_layer():
+    data = {
+        "targets": {
+            "test": {
+                "output": "test.img",
+                "zoom_levels": [10],
+                "layers": [
+                    {
+                        "name": "Inline Layer",
+                        "source": "test_source",
+                        "format": "geotiff",
+                    }
+                ],
+            }
+        }
+    }
+    targets = _parse_targets_section(data, "test.yaml", None)
+    assert targets["test"].layers[0].name == "Inline Layer"
+    assert targets["test"].layers[0].source == "test_source"
+    assert targets["test"].layers[0].format == "geotiff"
+
+
+def test_parse_targets_section_opacity_float():
+    data = {
+        "targets": {
+            "test": {
+                "output": "test.img",
+                "zoom_levels": [10],
+                "layers": [{"ref": "some_layer", "opacity": 0.5}],
+            }
+        }
+    }
+    targets = _parse_targets_section(data, "test.yaml", None)
+    assert targets["test"].layers[0].opacity == 0.5
+
+
+def test_parse_targets_section_opacity_dict():
+    data = {
+        "targets": {
+            "test": {
+                "output": "test.img",
+                "zoom_levels": [10],
+                "layers": [
+                    {"ref": "some_layer", "opacity": {10: 0.3, 12: 0.5}},
+                ],
+            }
+        }
+    }
+    targets = _parse_targets_section(data, "test.yaml", None)
+    assert targets["test"].layers[0].opacity == {10: 0.3, 12: 0.5}
+
+
+def test_parse_targets_section_opacity_invalid():
+    with pytest.raises(ValueError, match="'opacity' must be between 0.0 and 1.0"):
+        _parse_targets_section(
+            {
+                "targets": {
+                    "test": {
+                        "output": "test.img",
+                        "zoom_levels": [10],
+                        "layers": [{"ref": "x", "opacity": 1.5}],
+                    }
+                }
+            },
+            "test.yaml",
+            None,
+        )
+
+
+def test_parse_targets_section_layer_missing_ref_and_source():
+    with pytest.raises(ValueError, match="must have either 'source' or 'ref'"):
+        _parse_targets_section(
+            {
+                "targets": {
+                    "test": {
+                        "output": "test.img",
+                        "zoom_levels": [10],
+                        "layers": [{"name": "bad"}],
+                    }
+                }
+            },
+            "test.yaml",
+            None,
+        )
+
+
+def test_parse_targets_section_layer_both_ref_and_source():
+    with pytest.raises(ValueError, match="cannot have both 'source' and 'ref'"):
+        _parse_targets_section(
+            {
+                "targets": {
+                    "test": {
+                        "output": "test.img",
+                        "zoom_levels": [10],
+                        "layers": [
+                            {"ref": "x", "source": "y"},
+                        ],
+                    }
+                }
+            },
+            "test.yaml",
+            None,
+        )
+
+
+def test_parse_targets_section_empty_layers():
+    with pytest.raises(ValueError, match="'layers' cannot be empty"):
+        _parse_targets_section(
+            {
+                "targets": {
+                    "test": {
+                        "output": "test.img",
+                        "zoom_levels": [10],
+                        "layers": [],
+                    }
+                }
+            },
+            "test.yaml",
+            None,
+        )
+
+
+def test_parse_targets_section_name_description():
+    data = {
+        "targets": {
+            "test": {
+                "name": "My Target",
+                "description": "A test target",
+                "output": "test.img",
+                "zoom_levels": [10],
+                "layers": [{"ref": "x"}],
+            }
+        }
+    }
+    targets = _parse_targets_section(data, "test.yaml", None)
+    assert targets["test"].name == "My Target"
+    assert targets["test"].description == "A test target"
+
+
+# ---------------------------------------------------------------------------
+# resolve_target_layer_refs tests
+# ---------------------------------------------------------------------------
+
+
+class TestResolveTargetLayerRefs:
+    def test_resolves_ref_to_layer(self):
+        layers = {
+            "basemap": LayerConfig(
+                id="basemap",
+                name="Basemap",
+                source="swisstopo_stac",
+                format="geotiff",
+                zoom_levels=[10, 12],
+            ),
+        }
+        targets = {
+            "test": TargetConfig(
+                id="test",
+                output="test.img",
+                layers=[TargetLayerEntry(ref="basemap")],
+            ),
+        }
+        resolve_target_layer_refs(targets, layers)
+
+        entry = targets["test"].layers[0]
+        assert entry.ref is None  # resolved
+        assert entry.source == "swisstopo_stac"
+        assert entry.format == "geotiff"
+        assert entry.name == "Basemap"
+        assert entry.zoom_levels == [10, 12]
+
+    def test_inline_entry_unchanged(self):
+        layers = {}
+        targets = {
+            "test": TargetConfig(
+                id="test",
+                output="test.img",
+                layers=[
+                    TargetLayerEntry(
+                        source="swisstopo_stac", format="geotiff", name="Inline"
+                    )
+                ],
+            ),
+        }
+        resolve_target_layer_refs(targets, layers)
+        assert targets["test"].layers[0].name == "Inline"
+
+    def test_entry_overrides_ref_fields(self):
+        layers = {
+            "basemap": LayerConfig(
+                id="basemap",
+                name="Basemap",
+                source="src1",
+                format="geotiff",
+                zoom_levels=[10, 12],
+                rules=[{"filter": "type=trail"}],
+            ),
+        }
+        targets = {
+            "test": TargetConfig(
+                id="test",
+                output="test.img",
+                layers=[
+                    TargetLayerEntry(
+                        ref="basemap",
+                        name="Custom Name",
+                        zoom_levels=[14, 15],
+                        opacity=0.5,
+                    )
+                ],
+            ),
+        }
+        resolve_target_layer_refs(targets, layers)
+
+        entry = targets["test"].layers[0]
+        assert entry.name == "Custom Name"  # entry override
+        assert entry.source == "src1"  # from ref
+        assert entry.format == "geotiff"  # from ref
+        assert entry.zoom_levels == [14, 15]  # entry override
+        assert entry.opacity == 0.5  # entry override
+        assert entry.rules == [{"filter": "type=trail"}]  # from ref
+
+    def test_undefined_ref_raises(self):
+        layers = {}
+        targets = {
+            "test": TargetConfig(
+                id="test",
+                output="test.img",
+                layers=[TargetLayerEntry(ref="nonexistent")],
+            ),
+        }
+        with pytest.raises(ValueError, match="undefined layer 'nonexistent'"):
+            resolve_target_layer_refs(targets, layers)
+
+    def test_source_args_merged(self):
+        layers = {
+            "wmts_layer": LayerConfig(
+                id="wmts_layer",
+                name="WMTS",
+                source="swisstopo_wmts",
+                source_args={"layer": "base", "extension": "jpeg"},
+                zoom_levels=[10],
+            ),
+        }
+        targets = {
+            "test": TargetConfig(
+                id="test",
+                output="test.img",
+                layers=[
+                    TargetLayerEntry(
+                        ref="wmts_layer",
+                        source_args={"layer": "overlay"},
+                    )
+                ],
+            ),
+        }
+        resolve_target_layer_refs(targets, layers)
+        entry = targets["test"].layers[0]
+        assert entry.source_args["layer"] == "overlay"  # entry overrides
+        assert entry.source_args["extension"] == "jpeg"  # from ref
 
 
 # ---------------------------------------------------------------------------
@@ -453,7 +973,7 @@ def test_parse_layers_section_no_asset_filter():
 def test_merge_sources():
     sources1 = {
         "source1": SourceConfig(id="source1", type="wmts"),
-        "source2": SourceConfig(id="source2", type="geotiff"),
+        "source2": SourceConfig(id="source2", type="stac"),
     }
     sources2 = {
         "source2": SourceConfig(id="source2", type="wmts"),  # overwrite
@@ -488,6 +1008,19 @@ def test_merge_layers():
     assert merged_bounds == bounds2  # last wins
 
 
+def test_merge_targets():
+    targets1 = {
+        "t1": TargetConfig(id="t1", output="t1.img"),
+    }
+    targets2 = {
+        "t2": TargetConfig(id="t2", output="t2.img"),
+    }
+    merged = merge_targets(targets1, targets2)
+    assert len(merged) == 2
+    assert "t1" in merged
+    assert "t2" in merged
+
+
 def test_merge_settings():
     s1 = SettingsConfig(cache_dir="./a", quality=80)
     s2 = SettingsConfig(quality=90, executor="thread")
@@ -511,12 +1044,19 @@ def test_resolve_references_valid():
     layers = {
         "layer1": LayerConfig(id="layer1", name="Layer 1", source="source1"),
     }
+    targets = {
+        "t1": TargetConfig(
+            id="t1",
+            output="t1.img",
+            layers=[TargetLayerEntry(source="source1")],
+        ),
+    }
 
     # Should not raise
-    resolve_references(layers, sources)
+    resolve_references(layers, targets, sources)
 
 
-def test_resolve_references_invalid():
+def test_resolve_references_invalid_layer():
     sources = {
         "source1": SourceConfig(id="source1", type="wmts"),
     }
@@ -525,7 +1065,23 @@ def test_resolve_references_invalid():
     }
 
     with pytest.raises(ValueError, match="Unresolved source references"):
-        resolve_references(layers, sources)
+        resolve_references(layers, {}, sources)
+
+
+def test_resolve_references_invalid_target_layer():
+    sources = {
+        "source1": SourceConfig(id="source1", type="wmts"),
+    }
+    targets = {
+        "t1": TargetConfig(
+            id="t1",
+            output="t1.img",
+            layers=[TargetLayerEntry(source="nonexistent")],
+        ),
+    }
+
+    with pytest.raises(ValueError, match="Unresolved source references"):
+        resolve_references({}, targets, sources)
 
 
 # ---------------------------------------------------------------------------
@@ -541,7 +1097,7 @@ def _write_yaml(tmp_path: Path, name: str, data: dict) -> Path:
 
 
 def test_load_config_single_file(tmp_path):
-    """Single file with sources, bounds, and layers."""
+    """Single file with sources, bounds, layers, and targets."""
     cfg = _write_yaml(
         tmp_path,
         "config.yaml",
@@ -563,8 +1119,13 @@ def test_load_config_single_file(tmp_path):
                     "name": "Test Layer",
                     "source": "test_source",
                     "zoom_levels": [10, 12],
-                    "exporter": "garmin_img",
+                }
+            },
+            "targets": {
+                "test_target": {
                     "output": "test.img",
+                    "zoom_levels": [10, 12],
+                    "layers": [{"ref": "test_layer"}],
                 }
             },
         },
@@ -573,6 +1134,7 @@ def test_load_config_single_file(tmp_path):
     config = load_config([str(cfg)])
     assert len(config.sources) == 1
     assert len(config.layers) == 1
+    assert len(config.targets) == 1
     assert config.bounds is not None
     assert config.bounds["west"] == 5.0
 
@@ -594,6 +1156,7 @@ def test_load_config_sources_only(tmp_path):
     config = load_config([str(cfg)])
     assert len(config.sources) == 1
     assert len(config.layers) == 0
+    assert len(config.targets) == 0
     assert config.bounds is None
 
 
@@ -614,8 +1177,6 @@ def test_load_config_layers_only_no_sources(tmp_path):
                     "name": "Test Layer",
                     "source": "missing_source",
                     "zoom_levels": [10],
-                    "exporter": "garmin_img",
-                    "output": "test.img",
                 }
             },
         },
@@ -629,6 +1190,7 @@ def test_load_config_empty_file(tmp_path):
     config = load_config([str(cfg)])
     assert len(config.sources) == 0
     assert len(config.layers) == 0
+    assert len(config.targets) == 0
     assert config.bounds is None
 
 
@@ -636,12 +1198,57 @@ def test_load_config_no_files():
     config = load_config([])
     assert len(config.sources) == 0
     assert len(config.layers) == 0
+    assert len(config.targets) == 0
     assert config.bounds is None
 
 
 def test_load_config_nonexistent_file():
     with pytest.raises(FileNotFoundError):
         load_config(["/nonexistent/path.yaml"])
+
+
+def test_load_config_with_targets(tmp_path):
+    """Config with layers and targets, including ref resolution."""
+    cfg = _write_yaml(
+        tmp_path,
+        "config.yaml",
+        {
+            "sources": {
+                "s1": {
+                    "type": "stac",
+                    "urls": ["https://stac.example.com/collections/test"],
+                },
+            },
+            "layers": {
+                "basemap": {
+                    "name": "Basemap",
+                    "source": "s1",
+                    "format": "geotiff",
+                    "zoom_levels": [10, 12],
+                }
+            },
+            "targets": {
+                "my_target": {
+                    "output": "output.img",
+                    "zoom_levels": [10, 12],
+                    "layers": [
+                        {"ref": "basemap", "opacity": 0.8},
+                    ],
+                }
+            },
+        },
+    )
+
+    config = load_config([str(cfg)])
+    assert "my_target" in config.targets
+    target = config.targets["my_target"]
+    assert target.output == "output.img"
+    assert len(target.layers) == 1
+    # After resolution, the ref should be expanded
+    assert target.layers[0].source == "s1"
+    assert target.layers[0].format == "geotiff"
+    assert target.layers[0].opacity == 0.8
+    assert target.layers[0].ref is None  # resolved
 
 
 # ---------------------------------------------------------------------------
@@ -679,8 +1286,13 @@ def test_load_config_single_include(tmp_path):
                     "name": "Test Layer",
                     "source": "test_source",
                     "zoom_levels": [10],
-                    "exporter": "garmin_img",
+                }
+            },
+            "targets": {
+                "test_target": {
                     "output": "test.img",
+                    "zoom_levels": [10],
+                    "layers": [{"ref": "test_layer"}],
                 }
             },
         },
@@ -689,6 +1301,7 @@ def test_load_config_single_include(tmp_path):
     config = load_config([str(main_cfg)])
     assert "test_source" in config.sources
     assert "test_layer" in config.layers
+    assert "test_target" in config.targets
 
 
 def test_load_config_multiple_includes(tmp_path):
@@ -711,7 +1324,7 @@ def test_load_config_multiple_includes(tmp_path):
         {
             "sources": {
                 "s2": {
-                    "type": "geotiff",
+                    "type": "stac",
                     "urls": ["https://s2.example.com/collections/test"],
                 }
             }
@@ -727,8 +1340,6 @@ def test_load_config_multiple_includes(tmp_path):
                     "name": "Test",
                     "source": "s1",
                     "zoom_levels": [10],
-                    "exporter": "garmin_img",
-                    "output": "test.img",
                 }
             },
         },
@@ -763,8 +1374,6 @@ def test_load_config_nested_includes(tmp_path):
                     "name": "Mid Layer",
                     "source": "base_src",
                     "zoom_levels": [10],
-                    "exporter": "garmin_img",
-                    "output": "mid.img",
                 }
             },
         },
@@ -817,8 +1426,6 @@ def test_load_config_include_relative_path(tmp_path):
                     "name": "Test",
                     "source": "nested",
                     "zoom_levels": [10],
-                    "exporter": "garmin_img",
-                    "output": "test.img",
                 }
             },
         },
@@ -883,7 +1490,7 @@ def test_load_config_duplicate_source_across_includes(tmp_path):
             "includes": ["base.yaml"],
             "sources": {
                 "shared": {
-                    "type": "geotiff",
+                    "type": "stac",
                     "urls": ["https://override.example.com/collections/test"],
                 }
             },
@@ -891,7 +1498,7 @@ def test_load_config_duplicate_source_across_includes(tmp_path):
     )
 
     config = load_config([str(main_cfg)])
-    assert config.sources["shared"].type == "geotiff"
+    assert config.sources["shared"].type == "stac"
 
 
 def test_load_config_duplicate_layer_across_cli_flags(tmp_path):
@@ -911,8 +1518,6 @@ def test_load_config_duplicate_layer_across_cli_flags(tmp_path):
                     "name": "First",
                     "source": "s",
                     "zoom_levels": [10],
-                    "exporter": "garmin_img",
-                    "output": "first.img",
                 }
             },
         },
@@ -926,8 +1531,6 @@ def test_load_config_duplicate_layer_across_cli_flags(tmp_path):
                     "name": "Second",
                     "source": "s",
                     "zoom_levels": [12],
-                    "exporter": "garmin_img",
-                    "output": "second.img",
                 }
             },
         },
@@ -950,8 +1553,6 @@ def test_load_config_duplicate_bounds(tmp_path):
                     "name": "L",
                     "source": "s",
                     "zoom_levels": [10],
-                    "exporter": "garmin_img",
-                    "output": "l.img",
                 }
             },
         },
@@ -1125,228 +1726,3 @@ def test_read_cache_crs_corrupt(tmp_path):
     (source_dir / "metadata.json").write_text("not valid json{{{")
 
     assert BaseDownloader.read_cache_crs(tmp_path, "broken_source") is None
-
-
-# ---------------------------------------------------------------------------
-# Source method resolution tests (Task 1.7)
-# ---------------------------------------------------------------------------
-
-
-class TestResolveSourceMethod:
-    """Tests for _resolve_source_method() auto-detection logic."""
-
-    def test_auto_detect_stac_collections_url(self):
-        assert (
-            _resolve_source_method(
-                ["https://example.com/api/stac/v1/collections/my_layer"]
-            )
-            == "stac"
-        )
-
-    def test_auto_detect_stac_in_path(self):
-        assert _resolve_source_method(["https://example.com/stac/items"]) == "stac"
-
-    def test_auto_detect_local_path_relative(self):
-        assert _resolve_source_method(["./cache/geotiffs/"]) == "path"
-
-    def test_auto_detect_local_path_relative_parent(self):
-        assert _resolve_source_method(["../data/tiles/"]) == "path"
-
-    def test_auto_detect_local_path_absolute(self):
-        assert _resolve_source_method(["/data/tiles/"]) == "path"
-
-    def test_auto_detect_local_path_no_scheme(self):
-        assert _resolve_source_method(["cache/geotiffs/"]) == "path"
-
-    def test_explicit_stac_override(self):
-        assert _resolve_source_method(["./local/path"], explicit="stac") == "stac"
-
-    def test_explicit_path_override(self):
-        assert (
-            _resolve_source_method(
-                ["https://stac.example.com/collections/test"], explicit="path"
-            )
-            == "path"
-        )
-
-    def test_explicit_invalid_raises(self):
-        with pytest.raises(ValueError, match="Invalid source method 'invalid'"):
-            _resolve_source_method(["https://x"], explicit="invalid")
-
-    def test_auto_detect_empty_urls_raises(self):
-        with pytest.raises(ValueError, match="no URLs provided"):
-            _resolve_source_method([], explicit=None)
-
-    def test_auto_detect_unrecognized_url_raises(self):
-        with pytest.raises(ValueError, match="Cannot auto-detect source method"):
-            _resolve_source_method(["https://example.com/data"])
-
-
-class TestSourceMethodInParsedConfig:
-    """Tests that source_method is correctly set during config parsing."""
-
-    def test_geotiff_with_stac_url_auto_detected(self):
-        data = {
-            "sources": {
-                "my_geotiff": {
-                    "type": "geotiff",
-                    "urls": ["https://data.geo.admin.ch/api/stac/v1/collections/test"],
-                }
-            }
-        }
-        sources = _parse_sources_section(data, "test.yaml")
-        assert sources["my_geotiff"].source_method == "stac"
-
-    def test_geotiff_with_local_path_auto_detected(self):
-        data = {
-            "sources": {
-                "my_geotiff": {
-                    "type": "geotiff",
-                    "urls": ["./cache/geotiffs/"],
-                }
-            }
-        }
-        sources = _parse_sources_section(data, "test.yaml")
-        assert sources["my_geotiff"].source_method == "path"
-
-    def test_gpkg_with_stac_url_auto_detected(self):
-        data = {
-            "sources": {
-                "my_gpkg": {
-                    "type": "gpkg",
-                    "urls": [
-                        "https://data.geo.admin.ch/api/stac/v0.9/collections/test"
-                    ],
-                }
-            }
-        }
-        sources = _parse_sources_section(data, "test.yaml")
-        assert sources["my_gpkg"].source_method == "stac"
-
-    def test_explicit_source_field_stac(self):
-        data = {
-            "sources": {
-                "my_geotiff": {
-                    "type": "geotiff",
-                    "source": "stac",
-                    "urls": ["https://example.com/data"],
-                }
-            }
-        }
-        sources = _parse_sources_section(data, "test.yaml")
-        assert sources["my_geotiff"].source_method == "stac"
-
-    def test_explicit_source_field_path(self):
-        data = {
-            "sources": {
-                "my_geotiff": {
-                    "type": "geotiff",
-                    "source": "path",
-                    "urls": ["https://example.com/data"],
-                }
-            }
-        }
-        sources = _parse_sources_section(data, "test.yaml")
-        assert sources["my_geotiff"].source_method == "path"
-
-    def test_wmts_url_no_source_method_needed(self):
-        """WMTS sources don't need source_method — it's skipped for WMTS."""
-        data = {
-            "sources": {
-                "my_wmts": {
-                    "type": "wmts",
-                    "urls": ["https://wmts.example.com/{z}/{x}/{y}.png"],
-                }
-            }
-        }
-        sources = _parse_sources_section(data, "test.yaml")
-        assert sources["my_wmts"].type == "wmts"
-        assert sources["my_wmts"].source_method is None
-
-
-class TestDeprecatedFieldRejection:
-    """Tests that deprecated config fields are rejected with helpful messages."""
-
-    def test_type_stac_rejected(self):
-        data = {
-            "sources": {
-                "bad": {
-                    "type": "stac",
-                    "urls": ["https://stac.example.com/collections/test"],
-                }
-            }
-        }
-        with pytest.raises(
-            ValueError, match="deprecated type 'stac'.*Use type 'geotiff'"
-        ):
-            _parse_sources_section(data, "test.yaml")
-
-    def test_url_template_rejected(self):
-        data = {
-            "sources": {
-                "bad": {
-                    "type": "wmts",
-                    "url_template": "https://example.com/{z}/{x}/{y}.png",
-                }
-            }
-        }
-        with pytest.raises(
-            ValueError, match="deprecated field 'url_template'.*Use 'urls'"
-        ):
-            _parse_sources_section(data, "test.yaml")
-
-
-class TestUrlsFieldParsing:
-    """Tests for the urls field accepting both string and list."""
-
-    def test_urls_as_string_auto_wrapped(self):
-        data = {
-            "sources": {
-                "test": {
-                    "type": "geotiff",
-                    "urls": "https://stac.example.com/collections/test",
-                }
-            }
-        }
-        sources = _parse_sources_section(data, "test.yaml")
-        assert sources["test"].urls == ["https://stac.example.com/collections/test"]
-        assert sources["test"].source_method == "stac"
-
-    def test_urls_as_list(self):
-        data = {
-            "sources": {
-                "test": {
-                    "type": "geotiff",
-                    "urls": [
-                        "https://stac.example.com/collections/test1",
-                        "https://stac.example.com/collections/test2",
-                    ],
-                }
-            }
-        }
-        sources = _parse_sources_section(data, "test.yaml")
-        assert len(sources["test"].urls) == 2
-        assert sources["test"].source_method == "stac"
-
-    def test_urls_empty_list_rejected(self):
-        data = {
-            "sources": {
-                "test": {
-                    "type": "geotiff",
-                    "urls": [],
-                }
-            }
-        }
-        with pytest.raises(ValueError, match="missing required field 'urls'"):
-            _parse_sources_section(data, "test.yaml")
-
-    def test_urls_missing_rejected(self):
-        data = {
-            "sources": {
-                "test": {
-                    "type": "geotiff",
-                }
-            }
-        }
-        with pytest.raises(ValueError, match="missing required field 'urls'"):
-            _parse_sources_section(data, "test.yaml")

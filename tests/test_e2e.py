@@ -95,9 +95,8 @@ def small_geotiff(tmp_path: Path) -> Path:
 def e2e_source() -> SourceConfig:
     return SourceConfig(
         id="test_source",
-        type="geotiff",
+        type="stac",
         urls=["https://stac.example.com/collections/${layer}"],
-        source_method="stac",
         defaults={"layer": "test_collection"},
     )
 
@@ -108,9 +107,8 @@ def e2e_layer() -> LayerConfig:
         id="e2e_layer",
         name="E2E Test",
         source="test_source",
+        format="geotiff",
         zoom_levels=[10],
-        exporter="garmin-img",
-        output="e2e_output.img",
         bounds={"west": 5.0, "south": 45.0, "east": 10.0, "north": 48.0},
     )
 

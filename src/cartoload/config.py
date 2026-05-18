@@ -1,3 +1,5 @@
+"""Unified configuration loading for cartoload."""
+
 from __future__ import annotations
 
 import logging
@@ -12,15 +14,15 @@ import yaml
 class SourceConfig:
     """Configuration for a geodata source.
 
-    ``type`` is the data format: ``geotiff``, ``gpkg``, or ``wmts``.
-    ``source_method`` is how data is fetched: ``stac``, ``path``, or
-    ``None`` (auto-detected from URLs).
+    ``type`` is the fetch method: ``stac``, ``path``, or ``wmts``.
+    Previously ``type`` was the data format (geotiff, gpkg, wmts) — this has
+    been separated: format is now on the layer definition, and type is purely
+    how to fetch data.
     """
 
     id: str
-    type: str  # geotiff, gpkg, wmts
+    type: str  # stac, wmts, path
     urls: list[str] = field(default_factory=list)
-    source_method: str | None = None  # stac, path, or None (auto-detect)
     attribution: str = ""
     rate_limit_ms: int = 150
     max_threads: int = 4
@@ -33,12 +35,12 @@ class SourceConfig:
 
 
 @dataclass
-class CompositeSubLayer:
-    """A sub-layer within a composite layer definition.
+class TargetLayerEntry:
+    """An entry in a target's layer stack — either a ref or inline definition.
 
-    Sub-layers are either inline (with their own source) or
-    references to existing top-level layers. After resolution, all sub-layers
-    have concrete source values.
+    Ref entries reference a top-level layer definition. Inline entries
+    define their own source, format, and style inline. After resolution,
+    all entries have concrete source and format values.
 
     All template variables (layer, extension, etc.) are stored in source_args.
     Only per-tile variables (x, y, z, zoom) are predefined.
@@ -46,11 +48,16 @@ class CompositeSubLayer:
 
     name: str = ""
     source: str = ""
+    format: str = ""  # geotiff, gpkg, wmts — selects the LayerProvider
     zoom_levels: list[int] = field(default_factory=list)
     opacity: float | dict[int, float] = 1.0
     ref: str | None = None
     source_args: dict[str, str] = field(default_factory=dict)
     asset_filter: dict[str, str] | None = None
+    # Style configuration (for vector/rasterized layers, inline or from ref)
+    rules: list[dict] | None = None  # Inline style rules (Tier 1/2)
+    style: str | None = None  # Path to QML file (Tier 3)
+    garmin_types: dict[str, dict] | None = None  # Garmin type mapping
 
     @property
     def extension(self) -> str:
@@ -58,27 +65,32 @@ class CompositeSubLayer:
         return self.source_args.get("extension", "jpeg")
 
     def is_resolved(self) -> bool:
-        """Return True if this sub-layer has a concrete source (not a ref)."""
+        """Return True if this entry has a concrete source (not a ref)."""
         return bool(self.source)
+
+
+# Backward compat alias
+CompositeSubLayer = TargetLayerEntry
 
 
 @dataclass
 class LayerConfig:
-    """Configuration for a map layer to build."""
+    """Reusable layer definition — data source and processing config.
+
+    Defines what data to use and how to process it, but NOT what to build.
+    Build targets (with output files) are defined separately in TargetConfig.
+    """
 
     id: str
     name: str
     description: str = ""
     type: str = "raster"  # raster, raster_overlay, vector
+    format: str = ""  # geotiff, gpkg, wmts — selects the LayerProvider
     source: str = ""
-    wmts_fallback: str | None = None
     source_args: dict[str, str] = field(default_factory=dict)
     asset_filter: dict[str, str] | None = None
     zoom_levels: list[int] = field(default_factory=list)
-    exporter: str = "garmin_img"
-    output: str = ""
     bounds: dict[str, float] | None = None
-    layers: list[CompositeSubLayer] | None = None
     # Style configuration for vector/rasterized layers
     rules: list[dict] | None = None  # Inline style rules (Tier 1/2)
     style: str | None = None  # Path to QML file (Tier 3)
@@ -87,9 +99,24 @@ class LayerConfig:
         None  # Directory of the config file (for relative path resolution)
     )
 
-    def is_composite(self) -> bool:
-        """Return True if this layer is a composite of multiple sub-layers."""
-        return self.layers is not None and len(self.layers) > 0
+
+@dataclass
+class TargetConfig:
+    """Build target — what to produce.
+
+    References layer definitions (via ref) or defines inline layers,
+    and specifies the output file and format.
+    """
+
+    id: str
+    name: str = ""
+    description: str = ""
+    output: str = ""
+    exporter: str = "garmin_img"
+    layers: list[TargetLayerEntry] = field(default_factory=list)
+    zoom_levels: list[int] = field(default_factory=list)
+    bounds: dict[str, float] | None = None
+    config_dir: str | None = None
 
 
 @dataclass
@@ -105,27 +132,26 @@ class SettingsConfig:
 
 @dataclass
 class Config:
-    """Top-level configuration container holding all sources, layers, and settings."""
+    """Top-level configuration container holding all sources, layers, targets, and settings."""
 
     sources: dict[str, SourceConfig]
     layers: dict[str, LayerConfig]
+    targets: dict[str, TargetConfig] = field(default_factory=dict)
     bounds: dict[str, float] | None = None
     settings: SettingsConfig = field(default_factory=SettingsConfig)
 
 
-# Allowed source types (data formats)
-ALLOWED_SOURCE_TYPES = {"geotiff", "gpkg", "wmts"}
+# Allowed source types (fetch methods)
+ALLOWED_SOURCE_TYPES = {"stac", "wmts", "path"}
 
-# Old types that are no longer valid, with migration hints
-_DEPRECATED_TYPES = {
-    "stac": "Use type 'geotiff' — the STAC source method is auto-detected from the URL",
-}
+# Allowed layer formats (data formats — selects the LayerProvider)
+ALLOWED_FORMATS = {"geotiff", "gpkg", "wmts"}
 
 # Required fields for each source type
 SOURCE_TYPE_REQUIRED_FIELDS: dict[str, list[str]] = {
     "wmts": ["urls"],
-    "geotiff": ["urls"],
-    "gpkg": ["urls"],
+    "stac": ["urls"],
+    "path": ["urls"],
 }
 
 # Supported settings keys and their env var names
@@ -136,34 +162,39 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Source method resolution
+# Source type detection
 # ---------------------------------------------------------------------------
 
 
-def _resolve_source_method(urls: list[str], explicit: str | None = None) -> str:
-    """Determine how a source should be fetched.
+def _detect_source_type(urls: list[str], explicit: str | None = None) -> str:
+    """Determine the source type (fetch method) from URLs or explicit override.
 
     Args:
         urls: List of source location strings (URLs or paths).
-        explicit: Explicitly configured source method (``stac`` or ``path``).
+        explicit: Explicitly configured source type (``stac``, ``path``, or ``wmts``).
 
     Returns:
-        The resolved source method: ``stac`` or ``path``.
+        The resolved source type.
 
     Raises:
-        ValueError: If the method cannot be determined.
+        ValueError: If the type cannot be determined.
     """
     if explicit:
-        if explicit not in ("stac", "path"):
+        if explicit not in ALLOWED_SOURCE_TYPES:
             raise ValueError(
-                f"Invalid source method '{explicit}'. Valid values: stac, path"
+                f"Invalid source type '{explicit}'. Valid values: {', '.join(sorted(ALLOWED_SOURCE_TYPES))}"
             )
         return explicit
 
     if not urls:
-        raise ValueError("Cannot auto-detect source method: no URLs provided")
+        raise ValueError("Cannot auto-detect source type: no URLs provided")
 
     sample = urls[0]
+
+    # WMTS: URL contains tile coordinate template variables
+    _TILE_VARS = {"${x}", "${y}", "${z}", "${zoom}", "{x}", "{y}", "{z}", "{zoom}"}
+    if any(tv in sample for tv in _TILE_VARS):
+        return "wmts"
 
     # STAC collection URLs
     if "/collections/" in sample or "/stac/" in sample:
@@ -174,8 +205,8 @@ def _resolve_source_method(urls: list[str], explicit: str | None = None) -> str:
         return "path"
 
     raise ValueError(
-        f"Cannot auto-detect source method from URL '{sample}'. "
-        f"Add an explicit 'source' field (e.g. 'source: stac' or 'source: path')."
+        f"Cannot auto-detect source type from URL '{sample}'. "
+        f"Add an explicit 'type' field (e.g. 'type: stac', 'type: path', or 'type: wmts')."
     )
 
 
@@ -205,35 +236,6 @@ def _parse_sources_section(data: dict, path: str) -> dict[str, SourceConfig]:
                 f"{path}: Source '{source_id}' must be a dict, got {type(source_dict).__name__}"
             )
 
-        # Validate 'type' field exists
-        if "type" not in source_dict:
-            raise ValueError(
-                f"{path}: Source '{source_id}' missing required field 'type'"
-            )
-
-        source_type = source_dict["type"]
-
-        # Check for deprecated types with helpful migration hints
-        if source_type in _DEPRECATED_TYPES:
-            raise ValueError(
-                f"{path}: Source '{source_id}' uses deprecated type '{source_type}'. "
-                f"{_DEPRECATED_TYPES[source_type]}"
-            )
-
-        # Validate type is in allowed list
-        if source_type not in ALLOWED_SOURCE_TYPES:
-            raise ValueError(
-                f"{path}: Source '{source_id}' has invalid type '{source_type}'. "
-                f"Valid types: {', '.join(sorted(ALLOWED_SOURCE_TYPES))}"
-            )
-
-        # Reject deprecated url_template field
-        if "url_template" in source_dict:
-            raise ValueError(
-                f"{path}: Source '{source_id}' uses deprecated field 'url_template'. "
-                f"Use 'urls' instead (a string or list of strings)."
-            )
-
         # Parse URLs: accept string or list
         urls = source_dict.get("urls", [])
         if isinstance(urls, str):
@@ -242,6 +244,10 @@ def _parse_sources_section(data: dict, path: str) -> dict[str, SourceConfig]:
             raise ValueError(
                 f"{path}: Source '{source_id}' field 'urls' must be a list or string"
             )
+
+        # Detect or validate source type
+        explicit_type = source_dict.get("type")
+        source_type = _detect_source_type(urls, explicit=explicit_type)
 
         # Validate required URLs
         if not urls:
@@ -291,19 +297,11 @@ def _parse_sources_section(data: dict, path: str) -> dict[str, SourceConfig]:
 
         defaults = {str(k): str(v) for k, v in defaults_raw.items()}
 
-        # Resolve source method (explicit or auto-detected)
-        # WMTS doesn't use source_method — skip resolution
-        source_method: str | None = None
-        if source_type != "wmts":
-            explicit_source = source_dict.get("source")
-            source_method = _resolve_source_method(urls, explicit=explicit_source)
-
         # Create SourceConfig instance
         sources[source_id] = SourceConfig(
             id=source_id,
             type=source_type,
             urls=urls,
-            source_method=source_method,
             attribution=source_dict.get("attribution", ""),
             rate_limit_ms=source_dict.get("rate_limit_ms", 150),
             max_threads=source_dict.get("max_threads", 4),
@@ -340,182 +338,6 @@ def _parse_bounds(bounds_data: dict, path: str, context: str = "") -> dict[str, 
         )
 
     return bounds_data
-
-
-def _parse_layers_section(
-    data: dict, path: str
-) -> tuple[dict[str, LayerConfig], dict[str, float] | None]:
-    """Extract and validate `layers:` and `bounds:` from a unified YAML dict."""
-    # Parse file-level bounds even when no layers section exists
-    bounds = None
-    if "bounds" in data and data["bounds"] is not None:
-        bounds = _parse_bounds(data["bounds"], path)
-
-    if "layers" not in data:
-        return ({}, bounds)
-
-    layers_data = data["layers"]
-    if layers_data is None:
-        return ({}, bounds)
-    if not isinstance(layers_data, dict):
-        raise ValueError(
-            f"{path}: 'layers' must be a dict, got {type(layers_data).__name__}"
-        )
-
-    # File-level bounds already parsed above
-
-    # Parse layers
-    layers: dict[str, LayerConfig] = {}
-    required_layer_fields = ["name", "zoom_levels", "exporter", "output"]
-
-    for layer_id, layer_dict in layers_data.items():
-        if not isinstance(layer_dict, dict):
-            raise ValueError(
-                f"{path}: Layer '{layer_id}' must be a dict, got {type(layer_dict).__name__}"
-            )
-
-        # Check if this is a composite layer
-        has_sub_layers = (
-            "layers" in layer_dict
-            and layer_dict["layers"] is not None
-            and isinstance(layer_dict["layers"], list)
-        )
-
-        # Validate required fields (source is optional for composite layers)
-        if has_sub_layers:
-            for req_field in required_layer_fields:
-                if (
-                    req_field not in layer_dict
-                    or layer_dict[req_field] is None
-                    or layer_dict[req_field] == ""
-                ):
-                    raise ValueError(
-                        f"{path}: Layer '{layer_id}' missing required field '{req_field}'"
-                    )
-        else:
-            all_required = required_layer_fields + ["source"]
-            for req_field in all_required:
-                if (
-                    req_field not in layer_dict
-                    or layer_dict[req_field] is None
-                    or layer_dict[req_field] == ""
-                ):
-                    raise ValueError(
-                        f"{path}: Layer '{layer_id}' missing required field '{req_field}'"
-                    )
-
-        # Validate zoom_levels
-        zoom_levels = layer_dict["zoom_levels"]
-        if not isinstance(zoom_levels, list):
-            raise ValueError(
-                f"{path}: Layer '{layer_id}' field 'zoom_levels' must be a list, "
-                f"got {type(zoom_levels).__name__}"
-            )
-
-        if len(zoom_levels) == 0:
-            raise ValueError(
-                f"{path}: Layer '{layer_id}' field 'zoom_levels' cannot be empty"
-            )
-
-        for zoom in zoom_levels:
-            if not isinstance(zoom, int):
-                raise ValueError(
-                    f"{path}: Layer '{layer_id}' field 'zoom_levels' must contain integers, "
-                    f"got {type(zoom).__name__}"
-                )
-            if zoom < 0 or zoom > 22:
-                raise ValueError(
-                    f"{path}: Layer '{layer_id}' has invalid zoom level {zoom}. "
-                    f"Valid range: 0-22"
-                )
-
-        # Validate layer-level bounds if present
-        layer_bounds = None
-        if "bounds" in layer_dict and layer_dict["bounds"] is not None:
-            layer_bounds = _parse_bounds(
-                layer_dict["bounds"], path, context=f"Layer '{layer_id}' "
-            )
-        elif bounds is not None:
-            # Inherit file-level bounds if layer has none
-            layer_bounds = bounds
-
-        # Parse sub-layers if present (composite layer)
-        sub_layers: list[CompositeSubLayer] | None = None
-        if has_sub_layers:
-            sub_layers = _parse_sub_layers(path, layer_id, layer_dict["layers"])
-
-        # Parse source field: string (source ID) or dict (ref + args)
-        raw_source = layer_dict.get("source", "")
-        source_id, source_args, layer_asset_filter = _parse_source_field(raw_source)
-
-        # Backward compat: merge wmts_layer into source_args as 'layer'
-        wmts_layer = layer_dict.get("wmts_layer")
-        if wmts_layer is not None and "layer" not in source_args:
-            source_args["layer"] = wmts_layer
-
-        # Backward compat: merge extension into source_args
-        extension = layer_dict.get("extension")
-        if extension is not None and "extension" not in source_args:
-            source_args["extension"] = extension
-
-        # Parse style configuration
-        rules = layer_dict.get("rules")
-        style = layer_dict.get("style")
-        garmin_types = layer_dict.get("garmin_types")
-
-        # Create LayerConfig instance
-        layers[layer_id] = LayerConfig(
-            id=layer_id,
-            name=layer_dict["name"],
-            description=layer_dict.get("description", ""),
-            type=layer_dict.get("type", "raster"),
-            source=source_id,
-            wmts_fallback=layer_dict.get("wmts_fallback"),
-            source_args=source_args,
-            asset_filter=layer_asset_filter,
-            zoom_levels=zoom_levels,
-            exporter=layer_dict["exporter"],
-            output=layer_dict["output"],
-            bounds=layer_bounds,
-            layers=sub_layers,
-            rules=rules,
-            style=style,
-            garmin_types=garmin_types,
-            config_dir=str(Path(path).parent.resolve()),
-        )
-
-    return (layers, bounds)
-
-
-def _parse_settings_section(data: dict, path: str) -> SettingsConfig:
-    """Extract and validate the `settings:` section from a unified YAML dict."""
-    if "settings" not in data:
-        return SettingsConfig()
-
-    settings_data = data["settings"]
-    if settings_data is None:
-        return SettingsConfig()
-    if not isinstance(settings_data, dict):
-        raise ValueError(
-            f"{path}: 'settings' must be a dict, got {type(settings_data).__name__}"
-        )
-
-    known = {}
-    for key, value in settings_data.items():
-        if key not in SETTINGS_KEYS:
-            raise ValueError(
-                f"{path}: Unknown settings key '{key}'. "
-                f"Valid keys: {', '.join(sorted(SETTINGS_KEYS))}"
-            )
-        if value is not None:
-            known[key] = value
-
-    return SettingsConfig(**known)
-
-
-# ---------------------------------------------------------------------------
-# Source / sub-layer field helpers (unchanged)
-# ---------------------------------------------------------------------------
 
 
 def _parse_source_field(
@@ -564,10 +386,10 @@ def _extract_source_id(raw_source: str | dict) -> str:
     return source_id
 
 
-def _build_sub_source_args(
-    sub_dict: dict,
+def _build_entry_source_args(
+    entry_dict: dict,
 ) -> tuple[dict[str, str], dict[str, str] | None]:
-    """Build source_args for a sub-layer from its YAML dict.
+    """Build source_args for a target layer entry from its YAML dict.
 
     Handles both dict-style source (extract args from dict) and
     backward-compat wmts_layer and extension fields.
@@ -575,103 +397,24 @@ def _build_sub_source_args(
     Returns:
         Tuple of (source_args, asset_filter or None)
     """
-    raw_source = sub_dict.get("source", "")
+    raw_source = entry_dict.get("source", "")
     _, source_args, asset_filter = _parse_source_field(raw_source)
 
     # Backward compat: merge wmts_layer into source_args as 'layer'
-    wmts_layer = sub_dict.get("wmts_layer")
+    wmts_layer = entry_dict.get("wmts_layer")
     if wmts_layer is not None and "layer" not in source_args:
         source_args["layer"] = wmts_layer
 
     # Backward compat: merge extension into source_args
-    extension = sub_dict.get("extension")
+    extension = entry_dict.get("extension")
     if extension is not None and "extension" not in source_args:
         source_args["extension"] = extension
 
     return source_args, asset_filter
 
 
-def _parse_sub_layers(
-    path: str, layer_id: str, sub_layers_data: list
-) -> list[CompositeSubLayer]:
-    """Parse and validate sub-layers from a composite layer config."""
-    if not isinstance(sub_layers_data, list):
-        raise ValueError(f"{path}: Layer '{layer_id}' field 'layers' must be a list")
-
-    if len(sub_layers_data) == 0:
-        raise ValueError(f"{path}: Layer '{layer_id}' field 'layers' cannot be empty")
-
-    result: list[CompositeSubLayer] = []
-    for idx, sub_dict in enumerate(sub_layers_data):
-        if not isinstance(sub_dict, dict):
-            raise ValueError(
-                f"{path}: Layer '{layer_id}' sub-layer [{idx}] must be a dict"
-            )
-
-        # Determine if this is a ref or inline sub-layer
-        has_ref = "ref" in sub_dict and sub_dict["ref"] is not None
-        has_source = "source" in sub_dict and sub_dict["source"] not in (None, "")
-
-        if not has_ref and not has_source:
-            raise ValueError(
-                f"{path}: Layer '{layer_id}' sub-layer [{idx}] "
-                f"must have either 'source' or 'ref'"
-            )
-
-        if has_ref and has_source:
-            raise ValueError(
-                f"{path}: Layer '{layer_id}' sub-layer [{idx}] "
-                f"cannot have both 'source' and 'ref'"
-            )
-
-        # Validate opacity
-        opacity = sub_dict.get("opacity", 1.0)
-        opacity = _validate_opacity(path, layer_id, idx, opacity)
-
-        # Validate extension (backward compat: moved into source_args)
-        extension = sub_dict.get("extension")
-        if extension is not None and (
-            not isinstance(extension, str) or extension not in ("jpeg", "png")
-        ):
-            raise ValueError(
-                f"{path}: Layer '{layer_id}' sub-layer [{idx}] "
-                f"'extension' must be 'jpeg' or 'png'"
-            )
-
-        # Validate zoom_levels
-        zoom_levels = sub_dict.get("zoom_levels", [])
-        if zoom_levels:
-            if not isinstance(zoom_levels, list):
-                raise ValueError(
-                    f"{path}: Layer '{layer_id}' sub-layer [{idx}] "
-                    f"'zoom_levels' must be a list"
-                )
-            for z in zoom_levels:
-                if not isinstance(z, int):
-                    raise ValueError(
-                        f"{path}: Layer '{layer_id}' sub-layer [{idx}] "
-                        f"'zoom_levels' must contain integers"
-                    )
-
-        source_args, sub_asset_filter = _build_sub_source_args(sub_dict)
-
-        result.append(
-            CompositeSubLayer(
-                name=sub_dict.get("name", ""),
-                source=_extract_source_id(sub_dict.get("source", "")),
-                zoom_levels=zoom_levels,
-                opacity=opacity,
-                ref=sub_dict.get("ref") if has_ref else None,
-                source_args=source_args,
-                asset_filter=sub_asset_filter,
-            )
-        )
-
-    return result
-
-
 def _validate_opacity(
-    path: str, layer_id: str, idx: int, opacity: float | dict
+    path: str, target_id: str, idx: int, opacity: float | dict
 ) -> float | dict[int, float]:
     """Validate and return a normalized opacity value.
 
@@ -681,7 +424,7 @@ def _validate_opacity(
         val = float(opacity)
         if val < 0.0 or val > 1.0:
             raise ValueError(
-                f"{path}: Layer '{layer_id}' sub-layer [{idx}] "
+                f"{path}: Target '{target_id}' layer [{idx}] "
                 f"'opacity' must be between 0.0 and 1.0, got {val}"
             )
         return val
@@ -693,7 +436,7 @@ def _validate_opacity(
             val = float(v)
             if val < 0.0 or val > 1.0:
                 raise ValueError(
-                    f"{path}: Layer '{layer_id}' sub-layer [{idx}] "
+                    f"{path}: Target '{target_id}' layer [{idx}] "
                     f"'opacity' value for zoom {zoom} must be between "
                     f"0.0 and 1.0, got {val}"
                 )
@@ -701,9 +444,323 @@ def _validate_opacity(
         return result
 
     raise ValueError(
-        f"{path}: Layer '{layer_id}' sub-layer [{idx}] "
+        f"{path}: Target '{target_id}' layer [{idx}] "
         f"'opacity' must be a float or a dict, got {type(opacity).__name__}"
     )
+
+
+def _parse_target_layers(
+    path: str, target_id: str, layers_data: list
+) -> list[TargetLayerEntry]:
+    """Parse and validate layer entries from a target config."""
+    if not isinstance(layers_data, list):
+        raise ValueError(f"{path}: Target '{target_id}' field 'layers' must be a list")
+
+    if len(layers_data) == 0:
+        raise ValueError(f"{path}: Target '{target_id}' field 'layers' cannot be empty")
+
+    result: list[TargetLayerEntry] = []
+    for idx, entry_dict in enumerate(layers_data):
+        if not isinstance(entry_dict, dict):
+            raise ValueError(
+                f"{path}: Target '{target_id}' layer [{idx}] must be a dict"
+            )
+
+        # Determine if this is a ref or inline entry
+        has_ref = "ref" in entry_dict and entry_dict["ref"] is not None
+        has_source = "source" in entry_dict and entry_dict["source"] not in (
+            None,
+            "",
+        )
+
+        if not has_ref and not has_source:
+            raise ValueError(
+                f"{path}: Target '{target_id}' layer [{idx}] "
+                f"must have either 'source' or 'ref'"
+            )
+
+        if has_ref and has_source:
+            raise ValueError(
+                f"{path}: Target '{target_id}' layer [{idx}] "
+                f"cannot have both 'source' and 'ref'"
+            )
+
+        # Validate opacity
+        opacity = entry_dict.get("opacity", 1.0)
+        opacity = _validate_opacity(path, target_id, idx, opacity)
+
+        # Validate extension (backward compat: moved into source_args)
+        extension = entry_dict.get("extension")
+        if extension is not None and (
+            not isinstance(extension, str) or extension not in ("jpeg", "png")
+        ):
+            raise ValueError(
+                f"{path}: Target '{target_id}' layer [{idx}] "
+                f"'extension' must be 'jpeg' or 'png'"
+            )
+
+        # Validate zoom_levels
+        zoom_levels = entry_dict.get("zoom_levels", [])
+        if zoom_levels:
+            if not isinstance(zoom_levels, list):
+                raise ValueError(
+                    f"{path}: Target '{target_id}' layer [{idx}] "
+                    f"'zoom_levels' must be a list"
+                )
+            for z in zoom_levels:
+                if not isinstance(z, int):
+                    raise ValueError(
+                        f"{path}: Target '{target_id}' layer [{idx}] "
+                        f"'zoom_levels' must contain integers"
+                    )
+
+        # Validate format if present
+        fmt = entry_dict.get("format", "")
+        if fmt and fmt not in ALLOWED_FORMATS:
+            raise ValueError(
+                f"{path}: Target '{target_id}' layer [{idx}] "
+                f"has invalid format '{fmt}'. Valid formats: {', '.join(sorted(ALLOWED_FORMATS))}"
+            )
+
+        source_args, entry_asset_filter = _build_entry_source_args(entry_dict)
+
+        result.append(
+            TargetLayerEntry(
+                name=entry_dict.get("name", ""),
+                source=_extract_source_id(entry_dict.get("source", "")),
+                format=fmt,
+                zoom_levels=zoom_levels,
+                opacity=opacity,
+                ref=entry_dict.get("ref") if has_ref else None,
+                source_args=source_args,
+                asset_filter=entry_asset_filter,
+                rules=entry_dict.get("rules"),
+                style=entry_dict.get("style"),
+                garmin_types=entry_dict.get("garmin_types"),
+            )
+        )
+
+    return result
+
+
+def _parse_layers_section(
+    data: dict, path: str
+) -> tuple[dict[str, LayerConfig], dict[str, float] | None]:
+    """Extract and validate `layers:` and `bounds:` from a unified YAML dict.
+
+    Layers are definitions — they have source and format but no output/exporter.
+    """
+    # Parse file-level bounds even when no layers section exists
+    bounds = None
+    if "bounds" in data and data["bounds"] is not None:
+        bounds = _parse_bounds(data["bounds"], path)
+
+    if "layers" not in data:
+        return ({}, bounds)
+
+    layers_data = data["layers"]
+    if layers_data is None:
+        return ({}, bounds)
+    if not isinstance(layers_data, dict):
+        raise ValueError(
+            f"{path}: 'layers' must be a dict, got {type(layers_data).__name__}"
+        )
+
+    layers: dict[str, LayerConfig] = {}
+
+    for layer_id, layer_dict in layers_data.items():
+        if not isinstance(layer_dict, dict):
+            raise ValueError(
+                f"{path}: Layer '{layer_id}' must be a dict, got {type(layer_dict).__name__}"
+            )
+
+        # Validate required fields
+        if not layer_dict.get("name"):
+            raise ValueError(
+                f"{path}: Layer '{layer_id}' missing required field 'name'"
+            )
+
+        source_id, source_args, layer_asset_filter = _parse_source_field(
+            layer_dict.get("source", "")
+        )
+        if not source_id:
+            raise ValueError(
+                f"{path}: Layer '{layer_id}' missing required field 'source'"
+            )
+
+        # Validate zoom_levels
+        zoom_levels = layer_dict.get("zoom_levels", [])
+        if not isinstance(zoom_levels, list):
+            raise ValueError(
+                f"{path}: Layer '{layer_id}' field 'zoom_levels' must be a list, "
+                f"got {type(zoom_levels).__name__}"
+            )
+
+        if len(zoom_levels) == 0:
+            raise ValueError(
+                f"{path}: Layer '{layer_id}' field 'zoom_levels' cannot be empty"
+            )
+
+        for zoom in zoom_levels:
+            if not isinstance(zoom, int):
+                raise ValueError(
+                    f"{path}: Layer '{layer_id}' field 'zoom_levels' must contain integers, "
+                    f"got {type(zoom).__name__}"
+                )
+            if zoom < 0 or zoom > 22:
+                raise ValueError(
+                    f"{path}: Layer '{layer_id}' has invalid zoom level {zoom}. "
+                    f"Valid range: 0-22"
+                )
+
+        # Validate layer-level bounds if present
+        layer_bounds = None
+        if "bounds" in layer_dict and layer_dict["bounds"] is not None:
+            layer_bounds = _parse_bounds(
+                layer_dict["bounds"], path, context=f"Layer '{layer_id}' "
+            )
+        elif bounds is not None:
+            # Inherit file-level bounds if layer has none
+            layer_bounds = bounds
+
+        # Validate format if present
+        fmt = layer_dict.get("format", "")
+        if fmt and fmt not in ALLOWED_FORMATS:
+            raise ValueError(
+                f"{path}: Layer '{layer_id}' has invalid format '{fmt}'. "
+                f"Valid formats: {', '.join(sorted(ALLOWED_FORMATS))}"
+            )
+
+        # Backward compat: merge wmts_layer into source_args as 'layer'
+        wmts_layer = layer_dict.get("wmts_layer")
+        if wmts_layer is not None and "layer" not in source_args:
+            source_args["layer"] = wmts_layer
+
+        # Backward compat: merge extension into source_args
+        extension = layer_dict.get("extension")
+        if extension is not None and "extension" not in source_args:
+            source_args["extension"] = extension
+
+        layers[layer_id] = LayerConfig(
+            id=layer_id,
+            name=layer_dict["name"],
+            description=layer_dict.get("description", ""),
+            type=layer_dict.get("type", "raster"),
+            format=fmt,
+            source=source_id,
+            source_args=source_args,
+            asset_filter=layer_asset_filter,
+            zoom_levels=zoom_levels,
+            bounds=layer_bounds,
+            rules=layer_dict.get("rules"),
+            style=layer_dict.get("style"),
+            garmin_types=layer_dict.get("garmin_types"),
+            config_dir=str(Path(path).parent.resolve()),
+        )
+
+    return (layers, bounds)
+
+
+def _parse_targets_section(
+    data: dict, path: str, file_bounds: dict[str, float] | None
+) -> dict[str, TargetConfig]:
+    """Extract and validate `targets:` section from a unified YAML dict."""
+    if "targets" not in data:
+        return {}
+
+    targets_data = data["targets"]
+    if targets_data is None:
+        return {}
+    if not isinstance(targets_data, dict):
+        raise ValueError(
+            f"{path}: 'targets' must be a dict, got {type(targets_data).__name__}"
+        )
+
+    targets: dict[str, TargetConfig] = {}
+    for target_id, target_dict in targets_data.items():
+        if not isinstance(target_dict, dict):
+            raise ValueError(
+                f"{path}: Target '{target_id}' must be a dict, got {type(target_dict).__name__}"
+            )
+
+        # Validate required fields
+        if not target_dict.get("output"):
+            raise ValueError(
+                f"{path}: Target '{target_id}' missing required field 'output'"
+            )
+
+        # Validate zoom_levels
+        zoom_levels = target_dict.get("zoom_levels", [])
+        if not isinstance(zoom_levels, list):
+            raise ValueError(
+                f"{path}: Target '{target_id}' field 'zoom_levels' must be a list, "
+                f"got {type(zoom_levels).__name__}"
+            )
+
+        # zoom_levels is optional on targets; will be resolved from
+        # referenced layers at pipeline time if omitted.
+        if zoom_levels is None:
+            zoom_levels = []
+
+        for zoom in zoom_levels:
+            if not isinstance(zoom, int):
+                raise ValueError(
+                    f"{path}: Target '{target_id}' field 'zoom_levels' must contain integers"
+                )
+
+        # Validate bounds
+        target_bounds = None
+        if "bounds" in target_dict and target_dict["bounds"] is not None:
+            target_bounds = _parse_bounds(
+                target_dict["bounds"], path, context=f"Target '{target_id}' "
+            )
+        elif file_bounds is not None:
+            target_bounds = file_bounds
+
+        # Parse layer entries
+        layer_entries: list[TargetLayerEntry] = []
+        if "layers" in target_dict and target_dict["layers"] is not None:
+            layer_entries = _parse_target_layers(path, target_id, target_dict["layers"])
+
+        targets[target_id] = TargetConfig(
+            id=target_id,
+            name=target_dict.get("name", ""),
+            description=target_dict.get("description", ""),
+            output=target_dict["output"],
+            exporter=target_dict.get("exporter", "garmin_img"),
+            layers=layer_entries,
+            zoom_levels=zoom_levels,
+            bounds=target_bounds,
+            config_dir=str(Path(path).parent.resolve()),
+        )
+
+    return targets
+
+
+def _parse_settings_section(data: dict, path: str) -> SettingsConfig:
+    """Extract and validate the `settings:` section from a unified YAML dict."""
+    if "settings" not in data:
+        return SettingsConfig()
+
+    settings_data = data["settings"]
+    if settings_data is None:
+        return SettingsConfig()
+    if not isinstance(settings_data, dict):
+        raise ValueError(
+            f"{path}: 'settings' must be a dict, got {type(settings_data).__name__}"
+        )
+
+    known = {}
+    for key, value in settings_data.items():
+        if key not in SETTINGS_KEYS:
+            raise ValueError(
+                f"{path}: Unknown settings key '{key}'. "
+                f"Valid keys: {', '.join(sorted(SETTINGS_KEYS))}"
+            )
+        if value is not None:
+            known[key] = value
+
+    return SettingsConfig(**known)
 
 
 # ---------------------------------------------------------------------------
@@ -749,6 +806,21 @@ def merge_layers(
     return (merged_layers, merged_bounds)
 
 
+def merge_targets(
+    *target_dicts: dict[str, TargetConfig],
+) -> dict[str, TargetConfig]:
+    """Merge multiple target dictionaries with last-file-wins semantics."""
+    merged = {}
+    for target_dict in target_dicts:
+        for target_id, target_config in target_dict.items():
+            if target_id in merged:
+                logger.warning(
+                    f"Target '{target_id}' defined multiple times, using later definition"
+                )
+            merged[target_id] = target_config
+    return merged
+
+
 def merge_settings(*settings_list: SettingsConfig) -> SettingsConfig:
     """Merge multiple SettingsConfig instances with later-wins semantics."""
     merged = SettingsConfig()
@@ -766,24 +838,29 @@ def merge_settings(*settings_list: SettingsConfig) -> SettingsConfig:
 
 
 def resolve_references(
-    layers: dict[str, LayerConfig], sources: dict[str, SourceConfig]
+    layers: dict[str, LayerConfig],
+    targets: dict[str, TargetConfig],
+    sources: dict[str, SourceConfig],
 ) -> None:
-    """Validate that all layer source references point to loaded sources."""
+    """Validate that all layer and target source references point to loaded sources."""
     unresolved = []
+
+    # Check layer definitions
     for layer_id, layer_config in layers.items():
-        # Composite layers: validate inline sub-layer sources
-        if layer_config.is_composite():
-            for idx, sub in enumerate(layer_config.layers or []):
-                if sub.ref is None and sub.source and sub.source not in sources:
-                    unresolved.append((f"{layer_id}[{idx}]", sub.source))
-        elif layer_config.source and layer_config.source not in sources:
-            unresolved.append((layer_id, layer_config.source))
+        if layer_config.source and layer_config.source not in sources:
+            unresolved.append((f"layer '{layer_id}'", layer_config.source))
+
+    # Check target layer entries
+    for target_id, target_config in targets.items():
+        for idx, entry in enumerate(target_config.layers):
+            if entry.ref is None and entry.source and entry.source not in sources:
+                unresolved.append((f"target '{target_id}' layer [{idx}]", entry.source))
 
     if unresolved:
         available_sources = ", ".join(sorted(sources.keys()))
         error_lines = [
-            f"  - Layer '{layer_id}' references undefined source '{source_ref}'"
-            for layer_id, source_ref in unresolved
+            f"  - {ctx} references undefined source '{source_ref}'"
+            for ctx, source_ref in unresolved
         ]
         raise ValueError(
             "Unresolved source references:\n"
@@ -792,50 +869,52 @@ def resolve_references(
         )
 
 
-def resolve_sub_layer_refs(
+def resolve_target_layer_refs(
+    targets: dict[str, TargetConfig],
     layers: dict[str, LayerConfig],
 ) -> None:
-    """Resolve ref sub-layers by merging referenced layer fields."""
-    for layer_id, layer_config in layers.items():
-        if not layer_config.is_composite():
-            continue
-
-        resolved_subs: list[CompositeSubLayer] = []
-        for idx, sub in enumerate(layer_config.layers or []):
-            if sub.ref is None:
-                resolved_subs.append(sub)
+    """Resolve ref entries in targets by merging referenced layer definition fields."""
+    for target_id, target_config in targets.items():
+        resolved: list[TargetLayerEntry] = []
+        for idx, entry in enumerate(target_config.layers):
+            if entry.ref is None:
+                resolved.append(entry)
                 continue
 
-            # Look up referenced layer
-            if sub.ref not in layers:
+            # Look up referenced layer definition
+            if entry.ref not in layers:
                 raise ValueError(
-                    f"Layer '{layer_id}' sub-layer [{idx}] references "
-                    f"undefined layer '{sub.ref}'"
+                    f"Target '{target_id}' layer [{idx}] references "
+                    f"undefined layer '{entry.ref}'"
                 )
 
-            ref_layer = layers[sub.ref]
+            ref_layer = layers[entry.ref]
 
-            # Prevent composite-to-composite refs
-            if ref_layer.is_composite():
-                raise ValueError(
-                    f"Layer '{layer_id}' sub-layer [{idx}] references "
-                    f"composite layer '{sub.ref}' (not supported)"
-                )
-
-            # Merge: sub-layer source_args override ref layer source_args
-            merged = CompositeSubLayer(
-                name=sub.name or ref_layer.name,
-                source=sub.source or ref_layer.source,
-                zoom_levels=sub.zoom_levels
-                if sub.zoom_levels
+            # Merge: entry fields override ref layer fields
+            merged = TargetLayerEntry(
+                name=entry.name or ref_layer.name,
+                source=entry.source or ref_layer.source,
+                format=entry.format or ref_layer.format,
+                zoom_levels=entry.zoom_levels
+                if entry.zoom_levels
                 else list(ref_layer.zoom_levels),
-                opacity=sub.opacity,
+                opacity=entry.opacity,
                 ref=None,  # Resolved — no longer a ref
-                source_args={**ref_layer.source_args, **sub.source_args},
+                source_args={**ref_layer.source_args, **entry.source_args},
+                asset_filter=entry.asset_filter or ref_layer.asset_filter,
+                rules=entry.rules if entry.rules is not None else ref_layer.rules,
+                style=entry.style if entry.style is not None else ref_layer.style,
+                garmin_types=entry.garmin_types
+                if entry.garmin_types is not None
+                else ref_layer.garmin_types,
             )
-            resolved_subs.append(merged)
+            resolved.append(merged)
 
-        layer_config.layers = resolved_subs
+        target_config.layers = resolved
+
+
+# Backward compat alias
+resolve_sub_layer_refs = resolve_target_layer_refs
 
 
 # ---------------------------------------------------------------------------
@@ -889,6 +968,7 @@ def _load_unified_file(
 ) -> tuple[
     dict[str, SourceConfig],
     dict[str, LayerConfig],
+    dict[str, TargetConfig],
     dict[str, float] | None,
     SettingsConfig,
 ]:
@@ -899,7 +979,7 @@ def _load_unified_file(
         seen: Set of resolved file paths already loaded (for cycle detection)
 
     Returns:
-        Tuple of (sources, layers, bounds, settings)
+        Tuple of (sources, layers, targets, bounds, settings)
 
     Raises:
         FileNotFoundError: If the file does not exist
@@ -927,6 +1007,7 @@ def _load_unified_file(
     # Process includes first (depth-first)
     merged_sources: dict[str, SourceConfig] = {}
     merged_layers: dict[str, LayerConfig] = {}
+    merged_targets: dict[str, TargetConfig] = {}
     merged_bounds: dict[str, float] | None = None
     merged_settings = SettingsConfig()
 
@@ -943,9 +1024,13 @@ def _load_unified_file(
                 )
             # Resolve relative to the current file's directory
             resolved = (file_path.parent / include_path).resolve()
-            inc_sources, inc_layers, inc_bounds, inc_settings = _load_unified_file(
-                str(resolved), seen | {file_path}
-            )
+            (
+                inc_sources,
+                inc_layers,
+                inc_targets,
+                inc_bounds,
+                inc_settings,
+            ) = _load_unified_file(str(resolved), seen | {file_path})
 
             # Merge included results
             merged_sources = merge_sources(merged_sources, inc_sources)
@@ -953,11 +1038,13 @@ def _load_unified_file(
                 (merged_layers, merged_bounds), (inc_layers, inc_bounds)
             )
             merged_layers = merged_layers_dict
+            merged_targets = merge_targets(merged_targets, inc_targets)
             merged_settings = merge_settings(merged_settings, inc_settings)
 
     # Parse current file's sections
     cur_sources = _parse_sources_section(data, path)
     cur_layers, cur_bounds = _parse_layers_section(data, path)
+    cur_targets = _parse_targets_section(data, path, cur_bounds or merged_bounds)
     cur_settings = _parse_settings_section(data, path)
 
     # Merge current file on top of includes
@@ -965,22 +1052,23 @@ def _load_unified_file(
     final_layers, final_bounds = merge_layers(
         (merged_layers, merged_bounds), (cur_layers, cur_bounds)
     )
+    final_targets = merge_targets(merged_targets, cur_targets)
     final_settings = merge_settings(merged_settings, cur_settings)
 
-    return (final_sources, final_layers, final_bounds, final_settings)
+    return (final_sources, final_layers, final_targets, final_bounds, final_settings)
 
 
 def load_config(config_paths: list[str]) -> Config:
     """Load and merge config files into a single Config object.
 
     Each config file uses the unified format with optional sections:
-    includes, sources, layers, bounds, settings.
+    includes, sources, layers, targets, bounds, settings.
 
     Args:
         config_paths: List of paths to YAML config files
 
     Returns:
-        Config object containing merged sources, layers, bounds, and settings
+        Config object containing merged sources, layers, targets, bounds, and settings
 
     Raises:
         FileNotFoundError: If any config file does not exist
@@ -988,28 +1076,32 @@ def load_config(config_paths: list[str]) -> Config:
     """
     all_sources: dict[str, SourceConfig] = {}
     all_layers: dict[str, LayerConfig] = {}
+    all_targets: dict[str, TargetConfig] = {}
     all_bounds: dict[str, float] | None = None
     all_settings = SettingsConfig()
 
     for path in config_paths:
-        sources, layers, bounds, settings = _load_unified_file(path, seen=set())
+        sources, layers, targets, bounds, settings = _load_unified_file(
+            path, seen=set()
+        )
         all_sources = merge_sources(all_sources, sources)
         all_layers, all_bounds = merge_layers(
             (all_layers, all_bounds), (layers, bounds)
         )
+        all_targets = merge_targets(all_targets, targets)
         all_settings = merge_settings(all_settings, settings)
 
-    # Resolve sub-layer refs (must happen before source validation)
-    if all_layers:
-        resolve_sub_layer_refs(all_layers)
+    # Resolve target layer refs (must happen before source validation)
+    if all_targets:
+        resolve_target_layer_refs(all_targets, all_layers)
 
     # Resolve source references
-    if all_layers:
-        resolve_references(all_layers, all_sources)
+    resolve_references(all_layers, all_targets, all_sources)
 
     return Config(
         sources=all_sources,
         layers=all_layers,
+        targets=all_targets,
         bounds=all_bounds,
         settings=all_settings,
     )

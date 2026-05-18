@@ -1,4 +1,7 @@
-# France layer definitions
+# France layer definitions and build targets
+
+includes:
+  - ../sources/france_ign.yaml
 
 bounds:
   west: -5.15
@@ -11,8 +14,15 @@ layers:
     name: "France basemap"
     description: "IGN Géoportail standard basemap"
     type: raster
+    format: wmts
     source: ign_wmts
-    wmts_layer: GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2
+    source_args:
+      layer: GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2
     zoom_levels: [10, 12, 14]
-    exporter: garmin_img
+
+targets:
+  fr_basemap:
+    name: "France basemap"
     output: fr_basemap.img
+    layers:
+      - ref: fr_basemap
