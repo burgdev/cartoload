@@ -376,7 +376,7 @@ class WMTSDownloader(BaseDownloader):
                 if response.status_code == 200:
                     return response.content
                 elif response.status_code == 404:
-                    logger.warning(
+                    logger.debug(
                         "Tile (%d, %d, z=%d) returned 404, not retrying",
                         x,
                         y,
@@ -386,7 +386,7 @@ class WMTSDownloader(BaseDownloader):
                 elif response.status_code in (429, *range(500, 600)):
                     if attempt < max_retries - 1:
                         sleep_time = backoff_times[attempt]
-                        logger.warning(
+                        logger.debug(
                             "Tile (%d, %d, z=%d) HTTP %d, retry %d/%d in %ds",
                             x,
                             y,
@@ -398,7 +398,7 @@ class WMTSDownloader(BaseDownloader):
                         )
                         time.sleep(sleep_time)
                     else:
-                        logger.warning(
+                        logger.debug(
                             "Tile (%d, %d, z=%d) HTTP %d, exhausted retries",
                             x,
                             y,
@@ -406,7 +406,7 @@ class WMTSDownloader(BaseDownloader):
                             response.status_code,
                         )
                 else:
-                    logger.warning(
+                    logger.debug(
                         "Tile (%d, %d, z=%d) HTTP %d, not retrying",
                         x,
                         y,
@@ -417,7 +417,7 @@ class WMTSDownloader(BaseDownloader):
             except requests.RequestException as exc:
                 if attempt < max_retries - 1:
                     sleep_time = backoff_times[attempt]
-                    logger.warning(
+                    logger.debug(
                         "Tile (%d, %d, z=%d) request error: %s, retry %d/%d in %ds",
                         x,
                         y,
@@ -429,7 +429,7 @@ class WMTSDownloader(BaseDownloader):
                     )
                     time.sleep(sleep_time)
                 else:
-                    logger.warning(
+                    logger.debug(
                         "Tile (%d, %d, z=%d) request error: %s, exhausted retries",
                         x,
                         y,
@@ -466,7 +466,7 @@ class WMTSDownloader(BaseDownloader):
             self._write_to_cache(cache_path, data)
             self._write_world_file(cache_path, x, y, zoom)
         else:
-            logger.warning("Failed to download tile (%d, %d, z=%d)", x, y, zoom)
+            logger.debug("Failed to download tile (%d, %d, z=%d)", x, y, zoom)
 
         return cache_path
 
@@ -546,7 +546,7 @@ class WMTSDownloader(BaseDownloader):
                             failed += 1
                     except Exception:
                         failed += 1
-                        logger.warning("Tile (%d, %d, z=%d) failed", x, y, zoom)
+                        logger.debug("Tile (%d, %d, z=%d) failed", x, y, zoom)
                     progress.update(task_id, advance=1)
 
         if failed > 0:
@@ -600,7 +600,7 @@ class WMTSDownloader(BaseDownloader):
                 self._url_selector.report_success(url_template)
             return cache_path
 
-        logger.warning("Failed to download tile (%d, %d, z=%d)", x, y, zoom)
+        logger.debug("Failed to download tile (%d, %d, z=%d)", x, y, zoom)
         if self._url_selector:
             self._url_selector.report_failure(url_template)
         return None

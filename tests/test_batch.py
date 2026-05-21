@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 
 from cartoload.config import LayerConfig
-from cartoload.downloader.wmts import WMTSDownloader
+from cartoload.downloader.wmts.download import WMTSDownloader
 from cartoload.exporters.garmin_img import GarminImgExporter
 from cartoload.processor.batch import BatchTileProcessor
 
@@ -88,18 +88,15 @@ class TestBatchTileProcessorInit:
         proc = BatchTileProcessor()
         assert proc._source_crs is None
         assert proc._target_crs == "EPSG:4326"
-        assert proc._quality == 85
         assert proc._batch_size == 500
 
     def test_custom_params(self) -> None:
         proc = BatchTileProcessor(
             source_crs="EPSG:3857",
-            quality=75,
             batch_size=100,
             max_workers=4,
         )
         assert proc._source_crs == "EPSG:3857"
-        assert proc._quality == 75
         assert proc._batch_size == 100
         assert proc._max_workers == 4
 

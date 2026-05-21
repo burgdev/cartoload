@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 from cartoload.downloader.base import BaseDownloader
-from cartoload.downloader.wmts import WMTSDownloader
+from cartoload.downloader.wmts.download import WMTSDownloader
 from cartoload.processor.rasterio_warp import warp_tile_to_jpeg
 
 logger = logging.getLogger(__name__)
@@ -28,13 +28,12 @@ def _process_tile_worker(
     zoom: int,
     source_crs: str,
     target_crs: str,
-    quality: int,
 ) -> ProcessedTile | None:
     """Top-level worker function for ProcessPoolExecutor.
 
     Must be a top-level function (not a method) to be picklable.
     """
-    return warp_tile_to_jpeg(source_path, x, y, zoom, source_crs, target_crs, quality)
+    return warp_tile_to_jpeg(source_path, x, y, zoom, source_crs, target_crs)
 
 
 class BatchTileProcessor:
@@ -49,13 +48,12 @@ class BatchTileProcessor:
         self,
         source_crs: str | None = None,
         target_crs: str = "EPSG:4326",
-        quality: int = 85,
+        quality: int = 95,
         batch_size: int = 500,
         max_workers: int | None = None,
     ) -> None:
         self._source_crs = source_crs
         self._target_crs = target_crs
-        self._quality = quality
         self._batch_size = batch_size
         if max_workers is None:
             cpu_count = os.cpu_count() or 4
@@ -180,7 +178,6 @@ class BatchTileProcessor:
                     zoom,
                     source_crs,
                     self._target_crs,
-                    self._quality,
                 ): idx
                 for idx, (source_path, x, y) in enumerate(path_coords)
             }

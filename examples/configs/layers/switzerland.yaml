@@ -83,6 +83,26 @@ layers:
       extension: png
     zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16]
 
+  ch_swisstopo_snowshoes:
+    name: "Switzerland Snowshoes"
+    description: "Swisstopo snowshoes"
+    format: wmts
+    source:
+      ref: swisstopo_wmts
+      layer: ch.swisstopo-karto.schneeschuhrouten
+      extension: png
+    zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16]
+
+  ch_swisstopo_cableways_winter:
+    name: "Switzerland Cableways/Skilifts Winter"
+    description: ""
+    format: wmts
+    source:
+      ref: swisstopo_wmts
+      layer: ch.swisstopo.bahnen-winter
+      extension: png
+    zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16]
+
   ch_swisstopo_skitouring_vector:
     name: "Switzerland Skiroutes (Vector)"
     description: "Swisstopo skiroutes rasterized from vector GeoPackage"
@@ -105,6 +125,28 @@ layers:
       extension: png
     zoom_levels: [15, 16]
 
+  ch_swisstopo_designated_wildlife_areas:
+    name: "Switzerland Designated Wildlife Areas"
+    description: ""
+    type: raster_overlay
+    format: wmts
+    source:
+      ref: swisstopo_wmts
+      layer: ch.bafu.wrz-wildruhezonen_portal
+      extension: png
+    zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16]
+
+  ch_swisstopo_wildlife_reserves:
+    name: "Switzerland Wildlife Reserves"
+    description: ""
+    type: raster_overlay
+    format: wmts
+    source:
+      ref: swisstopo_wmts
+      layer: ch.bafu.wrz-jagdbanngebiete_select
+      extension: png
+    zoom_levels: [14, 15, 16]
+
   ch_swisstopo_stac_pk25:
     name: "Switzerland STAC PK25"
     description: "swisstopo national map via STAC, 1:25000"
@@ -117,28 +159,41 @@ layers:
 
 # Build targets: what to produce (with output files)
 targets:
-  ch_swisstopo_winter_outdoor:
-    name: "Switzerland Winter Outdoor"
+  ch_swisstopo_outdoor_winter:
+    name: "CH Outdoor Winter"
     description: "Swisstopo national map with skitouring and hiking overlays"
-    output: ch_swisstopo_ski_hiking.img
-    zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16]
+    output: ch_outdoor_winter.img
+    zoom_levels: [10, 11, 12, 13, 14, 15, 16]
     layers:
       - ref: ch_swisstopo_basemap_pk1000
-        zoom_levels: [9]
+        zoom_levels: [9, 10]
       - ref: ch_swisstopo_basemap
-        zoom_levels: [8, 11, 12, 13, 14, 15, 16]
-      - ref: ch_swisstopo_hiking
-        opacity:
-          { 11: 0.4, 12: 0.4, 13: 0.4, 14: 0.6, 15: 0.7, 16: 0.7, 17: 0.5 }
-        zoom_levels: [13, 14, 15, 16]
-      - ref: ch_swisstopo_skitouring
-        opacity:
-          { 11: 0.4, 12: 0.4, 13: 0.5, 14: 0.6, 15: 0.6, 16: 0.6, 17: 0.5 }
-        zoom_levels: [13, 14, 15, 16]
+        zoom_levels: [11, 12, 13, 14, 15, 16]
       - ref: ch_swisstopo_steepness
-        opacity: { 15: 0.2, 16: 0.3, 17: 0.2 }
-        zoom_levels: [15, 16]
-        extension: png
+        opacity: { 14: 0.2, 15: 0.2, 16: 0.3, 17: 0.2 }
+        zoom_levels: [14, 15, 16]
+      - ref: ch_swisstopo_designated_wildlife_areas
+        #opacity: { 12: 0.3, 13: 0.3, 14: 0.3, 15: 0.2, 16: 0.1 }
+        opacity: { 12: 0.6, 13: 0.7, 14: 0.7, 15: 0.6, 16: 0.4 }
+        #opacity: 0.7
+        zoom_levels: [12, 13, 14, 15, 16]
+      - ref: ch_swisstopo_wildlife_reserves
+        #opacity: 0.7
+        opacity: { 12: 0.6, 13: 0.7, 14: 0.7, 15: 0.6, 16: 0.4 }
+        zoom_levels: [12, 13, 14, 15, 16]
+      - ref: ch_swisstopo_hiking
+        opacity: { 14: 0.3, 15: 0.4, 16: 0.5, 17: 0.4 }
+        zoom_levels: [14, 15, 16]
+      - ref: ch_swisstopo_skitouring
+        opacity: { 14: 0.4, 15: 0.6, 16: 0.5, 17: 0.4 }
+        #opacity: { 16: 0.4, 17: 0.4 }
+        zoom_levels: [14, 15, 16]
+      - ref: ch_swisstopo_snowshoes
+        opacity: { 14: 0.2, 15: 0.5, 16: 0.4, 17: 0.4 }
+        zoom_levels: [14, 15, 16]
+      - ref: ch_swisstopo_cableways_winter
+        opacity: { 14: 0.4, 15: 0.6, 16: 0.5, 17: 0.4 }
+        zoom_levels: [14, 15, 16]
 
   ch_swisstopo_basemap:
     output: ch_swisstopo_basemap.img

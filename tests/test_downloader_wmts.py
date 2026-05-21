@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
-from cartoload.downloader.wmts import WMTSDownloader
+from cartoload.downloader.wmts.download import WMTSDownloader
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +169,8 @@ class TestConcurrentDownload:
         assert len(tiles) > 0
 
         with patch(
-            "cartoload.downloader.wmts.requests.get", return_value=_mock_response()
+            "cartoload.downloader.wmts.download.requests.get",
+            return_value=_mock_response(),
         ):
             results = dl.download_grid(bbox, zoom)
 
@@ -195,7 +196,8 @@ class TestConcurrentDownload:
         zoom = 3
 
         with patch(
-            "cartoload.downloader.wmts.requests.get", side_effect=track_concurrent
+            "cartoload.downloader.wmts.download.requests.get",
+            side_effect=track_concurrent,
         ):
             dl.download_grid(bbox, zoom)
 
@@ -217,9 +219,10 @@ class TestRateLimiting:
 
         with (
             patch(
-                "cartoload.downloader.wmts.requests.get", return_value=_mock_response()
+                "cartoload.downloader.wmts.download.requests.get",
+                return_value=_mock_response(),
             ),
-            patch("cartoload.downloader.wmts.time.sleep") as mock_sleep,
+            patch("cartoload.downloader.wmts.download.time.sleep") as mock_sleep,
         ):
             dl.download_tile(0, 0, 1)
 
@@ -254,7 +257,8 @@ class TestCaching:
     def test_cache_miss_downloads_and_writes(self, tmp_path: Path) -> None:
         dl = _make_downloader(tmp_path)
         with patch(
-            "cartoload.downloader.wmts.requests.get", return_value=_mock_response()
+            "cartoload.downloader.wmts.download.requests.get",
+            return_value=_mock_response(),
         ):
             path = dl.download_tile(0, 0, 1)
         assert path.exists()
@@ -267,7 +271,7 @@ class TestCaching:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"cached-tile")
 
-        with patch("cartoload.downloader.wmts.requests.get") as mock_get:
+        with patch("cartoload.downloader.wmts.download.requests.get") as mock_get:
             result = dl.download_tile(0, 0, 1)
 
         mock_get.assert_not_called()
@@ -299,8 +303,10 @@ class TestRetryBackoff:
         responses = [_mock_response(503), _mock_response(200, b"ok")]
 
         with (
-            patch("cartoload.downloader.wmts.requests.get", side_effect=responses),
-            patch("cartoload.downloader.wmts.time.sleep"),
+            patch(
+                "cartoload.downloader.wmts.download.requests.get", side_effect=responses
+            ),
+            patch("cartoload.downloader.wmts.download.time.sleep"),
         ):
             data = dl._download_with_retry("http://x", 0, 0, 1)
 
@@ -312,8 +318,10 @@ class TestRetryBackoff:
         responses = [_mock_response(429), _mock_response(200, b"ok")]
 
         with (
-            patch("cartoload.downloader.wmts.requests.get", side_effect=responses),
-            patch("cartoload.downloader.wmts.time.sleep"),
+            patch(
+                "cartoload.downloader.wmts.download.requests.get", side_effect=responses
+            ),
+            patch("cartoload.downloader.wmts.download.time.sleep"),
         ):
             data = dl._download_with_retry("http://x", 0, 0, 1)
 
@@ -325,10 +333,10 @@ class TestRetryBackoff:
 
         with (
             patch(
-                "cartoload.downloader.wmts.requests.get",
+                "cartoload.downloader.wmts.download.requests.get",
                 return_value=_mock_response(503),
             ),
-            patch("cartoload.downloader.wmts.time.sleep"),
+            patch("cartoload.downloader.wmts.download.time.sleep"),
         ):
             data = dl._download_with_retry("http://x", 0, 0, 1)
 
@@ -340,10 +348,10 @@ class TestRetryBackoff:
 
         with (
             patch(
-                "cartoload.downloader.wmts.requests.get",
+                "cartoload.downloader.wmts.download.requests.get",
                 return_value=_mock_response(404),
             ),
-            patch("cartoload.downloader.wmts.time.sleep") as mock_sleep,
+            patch("cartoload.downloader.wmts.download.time.sleep") as mock_sleep,
         ):
             data = dl._download_with_retry("http://x", 0, 0, 1)
 
@@ -357,10 +365,10 @@ class TestRetryBackoff:
 
         with (
             patch(
-                "cartoload.downloader.wmts.requests.get",
+                "cartoload.downloader.wmts.download.requests.get",
                 return_value=_mock_response(503),
             ),
-            patch("cartoload.downloader.wmts.time.sleep") as mock_sleep,
+            patch("cartoload.downloader.wmts.download.time.sleep") as mock_sleep,
         ):
             dl._download_with_retry("http://x", 0, 0, 1)
 
@@ -385,7 +393,8 @@ class TestProgressOutput:
         zoom = 2
 
         with patch(
-            "cartoload.downloader.wmts.requests.get", return_value=_mock_response()
+            "cartoload.downloader.wmts.download.requests.get",
+            return_value=_mock_response(),
         ):
             results = dl.download_grid(bbox, zoom)
 
@@ -406,7 +415,8 @@ class TestProgressOutput:
             path.write_bytes(b"cached")
 
         with patch(
-            "cartoload.downloader.wmts.requests.get", return_value=_mock_response()
+            "cartoload.downloader.wmts.download.requests.get",
+            return_value=_mock_response(),
         ) as mock_get:
             results = dl.download_grid(bbox, zoom)
 
@@ -434,7 +444,8 @@ class TestEndToEnd:
         assert len(tiles) > 0
 
         with patch(
-            "cartoload.downloader.wmts.requests.get", return_value=_mock_response()
+            "cartoload.downloader.wmts.download.requests.get",
+            return_value=_mock_response(),
         ):
             results = dl.download_grid(bbox, zoom)
 
@@ -463,9 +474,10 @@ class TestEndToEnd:
 
         with (
             patch(
-                "cartoload.downloader.wmts.requests.get", side_effect=partial_download
+                "cartoload.downloader.wmts.download.requests.get",
+                side_effect=partial_download,
             ),
-            patch("cartoload.downloader.wmts.time.sleep"),
+            patch("cartoload.downloader.wmts.download.time.sleep"),
         ):
             results1 = dl.download_grid(bbox, zoom)
 
@@ -479,7 +491,9 @@ class TestEndToEnd:
             call_count2[0] += 1
             return _mock_response(content=b"resumed")
 
-        with patch("cartoload.downloader.wmts.requests.get", side_effect=full_download):
+        with patch(
+            "cartoload.downloader.wmts.download.requests.get", side_effect=full_download
+        ):
             results2 = dl.download_grid(bbox, zoom)
 
         # Only uncached tiles should have been fetched
@@ -519,9 +533,10 @@ class TestEndToEnd:
 
         with (
             patch(
-                "cartoload.downloader.wmts.requests.get", side_effect=scheduled_response
+                "cartoload.downloader.wmts.download.requests.get",
+                side_effect=scheduled_response,
             ),
-            patch("cartoload.downloader.wmts.time.sleep"),
+            patch("cartoload.downloader.wmts.download.time.sleep"),
         ):
             results = dl.download_grid(bbox, zoom)
 
@@ -544,25 +559,25 @@ class TestPerUrlRateLimiter:
 
     def test_allows_immediate_first_request(self) -> None:
         """First request should not wait."""
-        from cartoload.downloader.wmts import _PerUrlRateLimiter
+        from cartoload.downloader.wmts.download import _PerUrlRateLimiter
 
         limiter = _PerUrlRateLimiter(delay_ms=1000)
-        with patch("cartoload.downloader.wmts.time.sleep") as mock_sleep:
+        with patch("cartoload.downloader.wmts.download.time.sleep") as mock_sleep:
             limiter.wait()
         # No sleep needed for the very first request
         mock_sleep.assert_not_called()
 
     def test_enforces_delay_between_requests(self) -> None:
         """Second request too soon should trigger sleep."""
-        from cartoload.downloader.wmts import _PerUrlRateLimiter
+        from cartoload.downloader.wmts.download import _PerUrlRateLimiter
 
         limiter = _PerUrlRateLimiter(delay_ms=200)
         # First call sets _last_request
         limiter.wait()
         # Advance time only 50ms (less than 200ms delay)
         with (
-            patch("cartoload.downloader.wmts.time.monotonic") as mock_mono,
-            patch("cartoload.downloader.wmts.time.sleep") as mock_sleep,
+            patch("cartoload.downloader.wmts.download.time.monotonic") as mock_mono,
+            patch("cartoload.downloader.wmts.download.time.sleep") as mock_sleep,
         ):
             # Return sequence: now=50ms after first request
             mock_mono.return_value = limiter._last_request + 0.05
@@ -575,14 +590,14 @@ class TestPerUrlRateLimiter:
 
     def test_no_sleep_when_enough_time_elapsed(self) -> None:
         """If enough time has passed since last request, no sleep needed."""
-        from cartoload.downloader.wmts import _PerUrlRateLimiter
+        from cartoload.downloader.wmts.download import _PerUrlRateLimiter
 
         limiter = _PerUrlRateLimiter(delay_ms=100)
         limiter.wait()
         # Simulate a long delay
         limiter._last_request = time.monotonic() - 1.0
 
-        with patch("cartoload.downloader.wmts.time.sleep") as mock_sleep:
+        with patch("cartoload.downloader.wmts.download.time.sleep") as mock_sleep:
             limiter.wait()
         mock_sleep.assert_not_called()
 
@@ -590,7 +605,7 @@ class TestPerUrlRateLimiter:
         """Multiple threads should be able to use the limiter safely."""
         import threading
 
-        from cartoload.downloader.wmts import _PerUrlRateLimiter
+        from cartoload.downloader.wmts.download import _PerUrlRateLimiter
 
         limiter = _PerUrlRateLimiter(delay_ms=0)  # No actual delay
         errors: list[Exception] = []
@@ -618,7 +633,7 @@ class TestUrlSelector:
 
     def test_round_robin_distribution(self) -> None:
         """URLs should be distributed in round-robin order."""
-        from cartoload.downloader.wmts import _UrlSelector
+        from cartoload.downloader.wmts.download import _UrlSelector
 
         selector = _UrlSelector(["a", "b", "c"])
         results = [selector.next() for _ in range(6)]
@@ -626,7 +641,7 @@ class TestUrlSelector:
 
     def test_single_url(self) -> None:
         """With one URL, should always return that URL."""
-        from cartoload.downloader.wmts import _UrlSelector
+        from cartoload.downloader.wmts.download import _UrlSelector
 
         selector = _UrlSelector(["only"])
         assert selector.next() == "only"
@@ -634,14 +649,14 @@ class TestUrlSelector:
 
     def test_active_urls_property(self) -> None:
         """active_urls should list all non-disabled URLs."""
-        from cartoload.downloader.wmts import _UrlSelector
+        from cartoload.downloader.wmts.download import _UrlSelector
 
         selector = _UrlSelector(["a", "b", "c"])
         assert selector.active_urls == ["a", "b", "c"]
 
     def test_disable_after_consecutive_failures(self) -> None:
         """URL should be disabled after max_consecutive_failures."""
-        from cartoload.downloader.wmts import _UrlSelector
+        from cartoload.downloader.wmts.download import _UrlSelector
 
         selector = _UrlSelector(["a", "b"], max_consecutive_failures=3)
         for _ in range(3):
@@ -652,7 +667,7 @@ class TestUrlSelector:
 
     def test_not_disabled_before_threshold(self) -> None:
         """URL should not be disabled before reaching the threshold."""
-        from cartoload.downloader.wmts import _UrlSelector
+        from cartoload.downloader.wmts.download import _UrlSelector
 
         selector = _UrlSelector(["a", "b"], max_consecutive_failures=5)
         for _ in range(4):
@@ -662,7 +677,7 @@ class TestUrlSelector:
 
     def test_success_resets_failure_count(self) -> None:
         """A success should reset the consecutive failure counter."""
-        from cartoload.downloader.wmts import _UrlSelector
+        from cartoload.downloader.wmts.download import _UrlSelector
 
         selector = _UrlSelector(["a", "b"], max_consecutive_failures=3)
         selector.report_failure("a")
@@ -674,7 +689,7 @@ class TestUrlSelector:
 
     def test_returns_none_when_all_disabled(self) -> None:
         """Should return None when all URLs are disabled."""
-        from cartoload.downloader.wmts import _UrlSelector
+        from cartoload.downloader.wmts.download import _UrlSelector
 
         selector = _UrlSelector(["a"], max_consecutive_failures=2)
         selector.report_failure("a")
@@ -683,7 +698,7 @@ class TestUrlSelector:
 
     def test_round_robin_skips_disabled(self) -> None:
         """Round-robin should skip disabled URLs."""
-        from cartoload.downloader.wmts import _UrlSelector
+        from cartoload.downloader.wmts.download import _UrlSelector
 
         selector = _UrlSelector(["a", "b", "c"], max_consecutive_failures=2)
         # Disable 'b'
@@ -727,7 +742,8 @@ class TestMultiUrlDownloader:
         zoom = 2
 
         with patch(
-            "cartoload.downloader.wmts.requests.get", return_value=_mock_response()
+            "cartoload.downloader.wmts.download.requests.get",
+            return_value=_mock_response(),
         ):
             results = dl.download_grid(bbox, zoom)
 
@@ -755,9 +771,10 @@ class TestMultiUrlDownloader:
 
         with (
             patch(
-                "cartoload.downloader.wmts.requests.get", side_effect=selective_response
+                "cartoload.downloader.wmts.download.requests.get",
+                side_effect=selective_response,
             ),
-            patch("cartoload.downloader.wmts.time.sleep"),
+            patch("cartoload.downloader.wmts.download.time.sleep"),
         ):
             dl.download_grid(bbox, zoom)
 

@@ -40,11 +40,25 @@ from cartoload.processor.checkpoint import (
     write_checkpoint,
 )
 from cartoload.processor.provider import make_provider
+from cartoload.processor.wmts_provider import WmtsProvider
 
 if TYPE_CHECKING:
     from cartoload.processor.provider import LayerProvider
 
 logger = logging.getLogger(__name__)
+
+
+def _human_size(size: float) -> str:
+    """Format a byte count as a human-readable string."""
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024:
+            formatted = f"{value:.2f}".rstrip("0").rstrip(".")
+            return f"{formatted} {unit}"
+        value /= 1024
+    formatted = f"{value:.2f}".rstrip("0").rstrip(".")
+    return f"{formatted} TB"
+
 
 # Import domain exceptions from pipeline module.
 # This is safe because pipeline.py uses lazy imports to avoid circular deps.
@@ -239,21 +253,18 @@ def _compute_target_metadata(
 
 def _make_single_provider_processor(
     provider: LayerProvider,
-    quality: int | None = None,
 ):
     """Create a tile processor callable for the fast (single-provider) path.
 
     The processor uses the provider's to_raster() to get an Image, then
-    encodes to JPEG. This avoids the RGBA round-trip for providers that
-    can produce JPEG bytes directly (like GeotiffProvider).
+    encodes to JPEG at quality 95 (intermediate step). The target quality
+    is applied only during the final IMG write step.
 
     Returns a callable with the signature:
         (source_path, x, y, zoom, source_crs, quality) -> (jpeg_bytes, bounds) | None
     """
     from cartoload.exporters.garmin_img_writer import ProcessedTile
     from cartoload.processor.rasterio_warp import compute_bounds_4326
-
-    _quality = quality or 85
 
     def single_processor(
         source_path: Path | None,
@@ -267,9 +278,7 @@ def _make_single_provider_processor(
         if img is None:
             return None
 
-        effective_quality = jpeg_quality or _quality
-
-        # Convert to JPEG
+        # Convert to JPEG at high quality (95) — target quality applied later
         if img.mode == "RGBA":
             background = Image.new("RGB", img.size, (255, 255, 255))
             background.paste(img, mask=img.split()[3])
@@ -278,7 +287,7 @@ def _make_single_provider_processor(
             img = img.convert("RGB")
 
         buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=effective_quality, optimize=True)
+        img.save(buf, format="JPEG", quality=95, optimize=True)
         jpeg_bytes = buf.getvalue()
         bounds = compute_bounds_4326(x, y, zoom)
         return (jpeg_bytes, bounds)
@@ -288,12 +297,13 @@ def _make_single_provider_processor(
 
 def _make_composite_processor(
     providers: list[tuple[TargetLayerEntry, LayerProvider, LayerConfig]],
-    quality: int | None = None,
 ):
     """Create a tile processor callable for the composite (multi-provider) path.
 
     For each tile coordinate, reads RGBA images from all providers,
-    composites them using painter's algorithm, and encodes to JPEG.
+    composites them using painter's algorithm, and encodes to JPEG
+    at quality 95 (intermediate step). The target quality is applied
+    only during the final IMG write step.
 
     Returns a callable with the signature:
         (source_path, x, y, zoom, source_crs, quality) -> (jpeg_bytes, bounds) | None
@@ -305,8 +315,6 @@ def _make_composite_processor(
         resolve_opacity,
     )
     from cartoload.processor.rasterio_warp import compute_bounds_4326
-
-    _quality = quality or 85
 
     def composite_processor(
         source_path: Path | None,
@@ -340,9 +348,8 @@ def _make_composite_processor(
         # Composite all layers
         composited = composite_tiles(images)
 
-        # Encode to JPEG
-        effective_quality = jpeg_quality or _quality
-        jpeg_bytes = encode_composite_to_jpeg(composited, quality=effective_quality)
+        # Encode to JPEG at high quality (95) — target quality applied later
+        jpeg_bytes = encode_composite_to_jpeg(composited)
 
         bounds = compute_bounds_4326(x, y, zoom)
         return (jpeg_bytes, bounds)
@@ -510,6 +517,23 @@ async def build_target(
             except Exception as e:
                 source_id = lc.source
                 raise DownloadError(source_id, str(e), cause=e) from e
+
+            # Pre-fetch WMTS tiles with progress bars (download_grid() shows
+            # per-zoom Rich progress). Without this, tiles are fetched one at
+            # a time during export with no visible progress.
+            if (
+                isinstance(provider, WmtsProvider)
+                and provider.downloader is not None
+                and lc.bounds
+            ):
+                bbox = (
+                    lc.bounds["west"],
+                    lc.bounds["south"],
+                    lc.bounds["east"],
+                    lc.bounds["north"],
+                )
+                for zoom in lc.zoom_levels:
+                    provider.downloader.download_grid(bbox, zoom)
     else:
         logger.info("Skipping download stage (--no-download)")
 
@@ -645,13 +669,26 @@ async def build_target(
     if len(providers) == 1:
         # Fast path: single provider, no compositing
         _entry, provider, _lc = providers[0]
-        tile_processor = _make_single_provider_processor(provider, quality=quality)
+        tile_processor = _make_single_provider_processor(provider)
     else:
         # Composite path: multiple providers
-        tile_processor = _make_composite_processor(providers, quality=quality)
+        tile_processor = _make_composite_processor(providers)
 
     # Refine jpeg_size estimates by sampling a few tiles
-    _refine_jpeg_sizes(tile_metadata, tile_processor)
+    _refine_jpeg_sizes(tile_metadata, tile_processor, quality=quality or 85)
+
+    # Report tile count and estimated output size
+    estimated_jpeg_total = sum(
+        t.jpeg_size for tiles in tile_metadata.values() for t in tiles
+    )
+    # JPEG data is ~85% of total GMP size; add overhead for headers/RGN2/LBL
+    estimated_total = estimated_jpeg_total / 0.85 if estimated_jpeg_total > 0 else 0
+    if progress_callback:
+        size_str = _human_size(estimated_total)
+        progress_callback(
+            "export",
+            f"  {total_tiles:,} tiles, estimated output: ~{size_str}",
+        )
 
     # Determine effective CRS
     source_crs = "EPSG:4326"  # All providers output in 4326
@@ -784,15 +821,24 @@ def _refine_jpeg_sizes(
     tile_metadata: dict[int, list],
     tile_processor: Callable,
     max_samples_per_zoom: int = 20,
+    *,
+    quality: int = 85,
 ) -> None:
     """Sample tiles through the processor and update jpeg_size estimates.
 
     Processes tiles per zoom level, measures actual JPEG output sizes,
     and updates the jpeg_size in tile metadata for accurate layout planning.
+
+    The tile processor produces quality-95 intermediate JPEGs. If the target
+    quality differs, samples are re-encoded at the target quality so the
+    stored jpeg_size reflects the actual output size.
     """
     import random
 
     from cartoload.exporters.garmin_img_model import TileMetadata as ExportTileMetadata
+    from cartoload.exporters.garmin_img_writer import _reencode_jpeg
+
+    needs_reencode = quality < 95
 
     for zoom, tiles in tile_metadata.items():
         if not tiles:
@@ -814,10 +860,13 @@ def _refine_jpeg_sizes(
                 tile.y,
                 tile.zoom,
                 "EPSG:4326",
-                85,
+                quality,
             )
             if result is not None:
-                samples.append(len(result[0]))
+                jpeg_bytes = result[0]
+                if needs_reencode:
+                    jpeg_bytes = _reencode_jpeg(jpeg_bytes, quality)
+                samples.append(len(jpeg_bytes))
 
         if not samples:
             continue
@@ -829,8 +878,9 @@ def _refine_jpeg_sizes(
                 tile.jpeg_size = median_size
 
         logger.debug(
-            "Target jpeg_size for zoom %d: %d bytes (from %d samples)",
+            "Target jpeg_size for zoom %d: %d bytes (from %d samples, quality=%d)",
             zoom,
             median_size,
             len(samples),
+            quality,
         )

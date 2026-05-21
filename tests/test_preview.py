@@ -9,7 +9,7 @@ import pytest
 from PIL import Image
 
 from cartoload.config import LayerConfig
-from cartoload.downloader.wmts import WMTSDownloader
+from cartoload.downloader.wmts.download import WMTSDownloader
 from cartoload.processor.preview import (
     assemble_preview,
     compute_preview_center,

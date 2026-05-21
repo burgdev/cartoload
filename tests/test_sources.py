@@ -316,10 +316,253 @@ class TestWmtsSource:
             zoom_levels=[10],
         )
 
-        from cartoload.downloader.wmts import WMTSDownloader
+        from cartoload.downloader.wmts.download import WMTSDownloader
 
         dl = source.get_downloader(source_config, layer_config, tmp_path)
         assert isinstance(dl, WMTSDownloader)
+
+
+class TestWmtsSourceXyzAlias:
+    """Tests for type: xyz alias resolving to WmtsSource."""
+
+    def test_can_handle_xyz(self):
+        config = SourceConfig(
+            id="s",
+            type="xyz",
+            urls=["https://tiles.example.com/${z}/${x}/${y}.png"],
+        )
+        assert WmtsSource.can_handle(config)
+
+    def test_xyz_resolves_to_wmts_source(self):
+        from cartoload.downloader.source import resolve_source
+
+        assert resolve_source("xyz") is WmtsSource
+
+    def test_xyz_template_mode_download(self, tmp_path):
+        """type: xyz uses template mode (not Capabilities mode)."""
+        source = WmtsSource()
+        source_config = SourceConfig(
+            id="test_xyz",
+            type="xyz",
+            urls=["https://tiles.example.com/${z}/${x}/${y}.png"],
+        )
+        layer_config = LayerConfig(
+            id="test",
+            name="Test",
+            source="test_xyz",
+            zoom_levels=[10],
+        )
+
+        # Verify it detects template mode
+        assert not source._is_capabilities_mode(source_config)
+
+        result = source.download(source_config, layer_config, tmp_path)
+        assert len(result) == 1
+
+        from cartoload.downloader.wmts.download import WMTSDownloader
+
+        dl = source.get_downloader(source_config, layer_config, tmp_path)
+        assert isinstance(dl, WMTSDownloader)
+
+
+class TestWmtsSourceCapabilitiesMode:
+    """Tests for WmtsSource Capabilities mode."""
+
+    def _make_capabilities_xml(self) -> str:
+        """Create a minimal WMTS Capabilities XML for testing."""
+        return """\
+<?xml version="1.0" encoding="UTF-8"?>
+<Capabilities xmlns="http://www.opengis.net/wmts/1.0"
+              xmlns:ows="http://www.opengis.net/ows/1.1">
+  <Contents>
+    <Layer>
+      <ows:Identifier>ch.swisstopo.pixelkarte-farbe</ows:Identifier>
+      <ows:Title>Pixelkarte Farbe</ows:Title>
+      <Style isDefault="true">
+        <ows:Identifier>default</ows:Identifier>
+      </Style>
+      <Format>image/jpeg</Format>
+      <TileMatrixSetLink>
+        <TileMatrixSet>3857</TileMatrixSet>
+      </TileMatrixSetLink>
+      <ResourceURL format="image/jpeg"
+        resourceType="tile"
+        template="https://wmts0.geo.admin.ch/1.0.0/ch.swisstopo.pixelkarte-farbe/default/current/3857/{TileMatrix}/{TileRow}/{TileCol}.jpeg"/>
+    </Layer>
+    <TileMatrixSet>
+      <ows:Identifier>3857</ows:Identifier>
+      <ows:SupportedCRS>urn:ogc:def:crs:EPSG::3857</ows:SupportedCRS>
+      <TileMatrix>
+        <ows:Identifier>0</ows:Identifier>
+        <ScaleDenominator>559082264.0287178</ScaleDenominator>
+        <TopLeftCorner>-20037508.3427892 20037508.3427892</TopLeftCorner>
+        <TileWidth>256</TileWidth>
+        <TileHeight>256</TileHeight>
+        <MatrixWidth>1</MatrixWidth>
+        <MatrixHeight>1</MatrixHeight>
+      </TileMatrix>
+      <TileMatrix>
+        <ows:Identifier>1</ows:Identifier>
+        <ScaleDenominator>279541132.0143589</ScaleDenominator>
+        <TopLeftCorner>-20037508.3427892 20037508.3427892</TopLeftCorner>
+        <TileWidth>256</TileWidth>
+        <TileHeight>256</TileHeight>
+        <MatrixWidth>2</MatrixWidth>
+        <MatrixHeight>2</MatrixHeight>
+      </TileMatrix>
+    </TileMatrixSet>
+  </Contents>
+</Capabilities>"""
+
+    def test_capabilities_url_triggers_capabilities_mode(self):
+        source = WmtsSource()
+        config = SourceConfig(
+            id="test_caps",
+            type="wmts",
+            capabilities_url="https://wmts.geo.admin.ch/EPSG/3857/1.0.0/WMTSCapabilities.xml",
+            layer="ch.swisstopo.pixelkarte-farbe",
+            tile_matrix_set="3857",
+        )
+        assert source._is_capabilities_mode(config)
+
+    def test_capabilities_url_pattern_triggers_capabilities_mode(self):
+        """URL ending with WMTSCapabilities.xml triggers Capabilities mode."""
+        source = WmtsSource()
+        config = SourceConfig(
+            id="test_caps",
+            type="wmts",
+            urls=["https://wmts.geo.admin.ch/1.0.0/WMTSCapabilities.xml"],
+        )
+        assert source._is_capabilities_mode(config)
+
+    def test_url_template_does_not_trigger_capabilities_mode(self):
+        """URL with ${x}/${y}/${z} does NOT trigger Capabilities mode."""
+        source = WmtsSource()
+        config = SourceConfig(
+            id="test_tpl",
+            type="wmts",
+            urls=["https://wmts0.geo.admin.ch/1.0.0/${layer}/${z}/${x}/${y}.jpeg"],
+        )
+        assert not source._is_capabilities_mode(config)
+
+    def test_capabilities_mode_download(self, tmp_path):
+        """Capabilities mode fetches XML and creates a working downloader."""
+        source = WmtsSource()
+        source_config = SourceConfig(
+            id="test_caps",
+            type="wmts",
+            capabilities_url="https://example.com/WMTSCapabilities.xml",
+            layer="ch.swisstopo.pixelkarte-farbe",
+            tile_matrix_set="3857",
+        )
+        layer_config = LayerConfig(
+            id="test",
+            name="Test",
+            source="test_caps",
+            zoom_levels=[10],
+        )
+
+        # Mock the HTTP request to return our test Capabilities XML
+        mock_response = MagicMock()
+        mock_response.text = self._make_capabilities_xml()
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("requests.get", return_value=mock_response):
+            result = source.download(source_config, layer_config, tmp_path)
+
+        assert len(result) == 1
+
+        from cartoload.downloader.wmts.download import WMTSDownloader
+
+        with patch("requests.get", return_value=mock_response):
+            dl = source.get_downloader(source_config, layer_config, tmp_path)
+        assert isinstance(dl, WMTSDownloader)
+
+        # Verify the URL template was constructed from Capabilities
+        assert "${z}" in dl._url_template
+        assert "${x}" in dl._url_template
+        assert "${y}" in dl._url_template
+
+    def test_capabilities_mode_offline_raises(self, tmp_path):
+        """Capabilities mode in offline mode raises RuntimeError."""
+        source = WmtsSource()
+        source_config = SourceConfig(
+            id="test_caps",
+            type="wmts",
+            capabilities_url="https://example.com/WMTSCapabilities.xml",
+            layer="ch.swisstopo.pixelkarte-farbe",
+        )
+        layer_config = LayerConfig(
+            id="test",
+            name="Test",
+            source="test_caps",
+            zoom_levels=[10],
+        )
+
+        with pytest.raises(RuntimeError, match="offline mode"):
+            source.download(source_config, layer_config, tmp_path, offline=True)
+
+    def test_capabilities_no_layer_raises(self, tmp_path):
+        """Capabilities mode without a layer identifier raises ValueError."""
+        source = WmtsSource()
+        source_config = SourceConfig(
+            id="test_caps",
+            type="wmts",
+            capabilities_url="https://example.com/WMTSCapabilities.xml",
+        )
+        layer_config = LayerConfig(
+            id="test",
+            name="Test",
+            source="test_caps",
+            zoom_levels=[10],
+        )
+
+        mock_response = MagicMock()
+        mock_response.text = self._make_capabilities_xml()
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("requests.get", return_value=mock_response):
+            with pytest.raises(ValueError, match="No layer identifier"):
+                source.download(source_config, layer_config, tmp_path)
+
+
+class TestWmtsSourceTemplateModePreserved:
+    """Tests that existing URL-template mode still works unchanged."""
+
+    def test_wmts_with_url_template_uses_template_mode(self):
+        source = WmtsSource()
+        config = SourceConfig(
+            id="test",
+            type="wmts",
+            urls=["https://tiles.example.com/${z}/${x}/${y}.png"],
+        )
+        assert not source._is_capabilities_mode(config)
+
+    def test_wmts_template_download_unchanged(self, tmp_path):
+        source = WmtsSource()
+        source_config = SourceConfig(
+            id="test_wmts",
+            type="wmts",
+            urls=["https://wmts.example.com/${layer}/${z}/${x}/${y}.jpeg"],
+            defaults={"layer": "base"},
+        )
+        layer_config = LayerConfig(
+            id="test",
+            name="Test",
+            source="test_wmts",
+            source_args={"layer": "overlay"},
+            zoom_levels=[10],
+        )
+
+        result = source.download(source_config, layer_config, tmp_path)
+        assert len(result) == 1
+
+        from cartoload.downloader.wmts.download import WMTSDownloader
+
+        dl = source.get_downloader(source_config, layer_config, tmp_path)
+        assert isinstance(dl, WMTSDownloader)
+        # Verify template was expanded with the layer variable
+        assert "overlay" in dl._url_template
 
 
 # ---------------------------------------------------------------------------

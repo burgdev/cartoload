@@ -326,7 +326,7 @@ class TestProviderLifecycle:
     def test_wmts_download_creates_downloader(self, tmp_path):
         """WmtsProvider.download() creates internal WMTSDownloader."""
         from cartoload.downloader.wmts_source import WmtsSource
-        from cartoload.downloader.wmts import WMTSDownloader
+        from cartoload.downloader.wmts.download import WMTSDownloader
 
         wmts_source = WmtsSource()
         sc = SourceConfig(

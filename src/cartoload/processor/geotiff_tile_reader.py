@@ -159,7 +159,7 @@ def read_tile_from_geotiff(
     x: int,
     y: int,
     zoom: int,
-    quality: int = 85,
+    quality: int = 95,
 ) -> ProcessedTile | None:
     """Read a tile-sized window from a GeoTIFF and return JPEG bytes.
 
@@ -285,7 +285,7 @@ def read_tile_from_warped_geotiff(
     x: int,
     y: int,
     zoom: int,
-    quality: int = 85,
+    quality: int = 95,
 ) -> ProcessedTile | None:
     """Read a tile from a pre-warped (EPSG:4326, RGB) GeoTIFF.
 

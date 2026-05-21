@@ -194,8 +194,8 @@ class TestWarpTileToJpeg:
             assert warp_bounds[2] == pytest.approx(expected_bounds[2], abs=1e-6)
             assert warp_bounds[3] == pytest.approx(expected_bounds[3], abs=1e-6)
 
-    def test_quality_affects_output_size(self):
-        """Lower quality should produce smaller JPEG output."""
+    def test_warp_produces_valid_output(self):
+        """Warp should produce valid JPEG output."""
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "tile.jpeg"
             # Use a non-uniform image to make quality differences visible
@@ -208,17 +208,10 @@ class TestWarpTileToJpeg:
             img.save(buf, format="JPEG", quality=95)
             path.write_bytes(buf.getvalue())
 
-            result_high = warp_tile_to_jpeg(
-                path, 17000, 11300, 15, "EPSG:3857", quality=95
-            )
-            result_low = warp_tile_to_jpeg(
-                path, 17000, 11300, 15, "EPSG:3857", quality=30
-            )
+            result = warp_tile_to_jpeg(path, 17000, 11300, 15, "EPSG:3857")
 
-            assert result_high is not None
-            assert result_low is not None
-            # Higher quality should produce larger (or equal) output
-            assert len(result_high[0]) >= len(result_low[0])
+            assert result is not None
+            assert len(result[0]) > 0
 
     def test_warp_preserves_approximate_dimensions(self):
         """Warped tile dimensions should be close to source (256x256)."""

@@ -3282,7 +3282,7 @@ class TestReencodeJpeg:
 
 
 class TestWarpTileQuality:
-    """Tests for warp_tile_to_jpeg quality parameter."""
+    """Tests for warp_tile_to_jpeg — always encodes at quality 85 internally."""
 
     @staticmethod
     def _make_3857_jpeg(
@@ -3297,30 +3297,25 @@ class TestWarpTileQuality:
         img.save(p, format="JPEG", quality=85)
         return p
 
-    def test_quality_affects_warp_output_size(self, tmp_path):
-        """Different quality levels should produce different sized warp output."""
+    def test_warp_ignores_quality_param(self, tmp_path):
+        """Warp always encodes at high quality, ignoring quality parameter."""
         from cartoload.processor.rasterio_warp import warp_tile_to_jpeg
 
         tile_path = self._make_3857_jpeg(tmp_path)
 
-        result_85 = warp_tile_to_jpeg(
-            tile_path, 34178, 23118, 16, "EPSG:3857", quality=85
-        )
-        result_20 = warp_tile_to_jpeg(
-            tile_path, 34178, 23118, 16, "EPSG:3857", quality=20
-        )
+        # quality parameter is no longer accepted — warp always encodes at 95
+        result = warp_tile_to_jpeg(tile_path, 34178, 23118, 16, "EPSG:3857")
 
-        assert result_85 is not None
-        assert result_20 is not None
-        assert len(result_20[0]) < len(result_85[0])
+        assert result is not None
+        assert len(result[0]) > 0
 
     def test_warp_output_is_valid_jpeg(self, tmp_path):
-        """Warped output should be valid JPEG regardless of quality."""
+        """Warped output should be valid JPEG."""
         from PIL import Image
         from cartoload.processor.rasterio_warp import warp_tile_to_jpeg
 
         tile_path = self._make_3857_jpeg(tmp_path)
-        result = warp_tile_to_jpeg(tile_path, 34178, 23118, 16, "EPSG:3857", quality=50)
+        result = warp_tile_to_jpeg(tile_path, 34178, 23118, 16, "EPSG:3857")
 
         assert result is not None
         img = Image.open(io.BytesIO(result[0]))
@@ -3409,6 +3404,7 @@ class TestBatchedLBL28Write:
             ),
             source_crs="EPSG:3857",
             jpeg_quality=30,
+            sequential_only=True,
         )
 
         assert output.exists()

@@ -120,7 +120,7 @@ class GeotiffProvider(LayerProvider):
             read_tile_from_warped_geotiff,
         )
 
-        result = read_tile_from_warped_geotiff(self._mosaic_path, x, y, z, quality=85)
+        result = read_tile_from_warped_geotiff(self._mosaic_path, x, y, z, quality=95)
         if result is None:
             return None
 

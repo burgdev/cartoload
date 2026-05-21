@@ -8,7 +8,7 @@ from pathlib import Path
 from PIL import Image
 
 from cartoload.config import LayerConfig
-from cartoload.downloader.wmts import WMTSDownloader
+from cartoload.downloader.wmts.download import WMTSDownloader
 from cartoload.processor.build_summary import (
     _FALLBACK_TILE_SIZE_BYTES,
     BuildSummary,

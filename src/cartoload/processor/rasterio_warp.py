@@ -81,13 +81,15 @@ def warp_tile_to_jpeg(
     zoom: int,
     source_crs: str,
     target_crs: str = "EPSG:4326",
-    quality: int = 85,
 ) -> ProcessedTile | None:
     """Warp a single tile and return JPEG bytes with geographic bounds.
 
     Handles two cases:
     - Source CRS matches target CRS: read raw JPEG, compute bounds from coords
     - Source CRS differs: warp in-process via rasterio, output JPEG via MemoryFile
+
+    Always encodes at quality 95 (high quality intermediate step).
+    The target quality is applied only during the final IMG write step.
 
     Args:
         source_path: Path to the source tile file
@@ -96,7 +98,6 @@ def warp_tile_to_jpeg(
         zoom: Zoom level
         source_crs: Source CRS string (e.g., "EPSG:3857")
         target_crs: Target CRS string (default "EPSG:4326")
-        quality: JPEG output quality (1-100)
 
     Returns:
         (jpeg_bytes, (lat_min, lon_min, lat_max, lon_max)) or None if failed
@@ -113,9 +114,9 @@ def warp_tile_to_jpeg(
         jpeg_bytes = source_path.read_bytes()
         return (jpeg_bytes, bounds)
 
-    # Warp needed
+    # Warp needed — always encode at high quality (95)
     try:
-        return _warp_to_jpeg(source_path, x, y, zoom, src_crs, dst_crs, quality)
+        return _warp_to_jpeg(source_path, x, y, zoom, src_crs, dst_crs)
     except Exception as e:
         logger.warning("Warp failed for (%d, %d, z=%d): %s", x, y, zoom, e)
         return None
@@ -266,7 +267,6 @@ def _warp_to_jpeg(
     zoom: int,
     src_crs: CRS,
     dst_crs: CRS,
-    quality: int,
 ) -> ProcessedTile:
     """Warp a tile from source CRS to target CRS, outputting JPEG bytes."""
     src_transform, src_width, src_height = compute_transform_3857(x, y, zoom)
@@ -315,11 +315,11 @@ def _warp_to_jpeg(
                 resampling=Resampling.cubic,
             )
 
-    # Encode to JPEG via PIL (rasterio's MemoryFile ignores JPEG_QUALITY)
+    # Encode to JPEG at high quality (intermediate step)
     dst_rgb = np.moveaxis(dst_data, 0, -1)  # (C, H, W) → (H, W, C)
     img = Image.fromarray(dst_rgb)
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=quality, optimize=True)
+    img.save(buf, format="JPEG", quality=95, optimize=True)
     jpeg_bytes = buf.getvalue()
 
     # Compute bounds from tile coordinates (WGS84)

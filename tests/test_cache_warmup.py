@@ -141,7 +141,7 @@ class TestCacheWarmup:
         cache_dir = tmp_path / "cache"
 
         # Pre-create tiles in cache so the pipeline succeeds
-        from cartoload.downloader.wmts import WMTSDownloader
+        from cartoload.downloader.wmts.download import WMTSDownloader
         from cartoload.pipeline import _compute_tile_coords
         from cartoload.config import LayerConfig
 

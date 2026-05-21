@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from cartoload.config import LayerConfig, SourceConfig, TargetConfig
-from cartoload.downloader.wmts import WMTSDownloader
+from cartoload.downloader.wmts.download import WMTSDownloader
 from cartoload.exporters.garmin_img import GarminImgExporter
 from cartoload.pipeline import (
     DownloadError,
@@ -102,7 +102,7 @@ class TestGetDownloader:
             get_downloader(stac_source, tmp_path)
 
     def test_wmts_returns_wmts_downloader(self, wmts_source, tmp_path):
-        from cartoload.downloader.wmts import WMTSDownloader
+        from cartoload.downloader.wmts.download import WMTSDownloader
 
         dl = get_downloader(wmts_source, tmp_path)
         assert isinstance(dl, WMTSDownloader)

@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Union
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 from .garmin_img_model import (
     GMPGroup,
@@ -209,7 +209,7 @@ def _warp_tile_worker(
 
         warp_fn = warp_tile_to_jpeg
 
-    result = warp_fn(source_path, x, y, zoom, source_crs, target_crs, quality)
+    result = warp_fn(source_path, x, y, zoom, source_crs, target_crs)
     if result is not None:
         return (x, y, zoom, result[0])
     return (x, y, zoom, None)
@@ -2744,6 +2744,7 @@ class StreamingIMGWriter:
         jpeg_sizes: list[int] = []  # Track actual JPEG sizes for RGN2 fixup
         running_offset = 0
         tiles_processed = 0
+        tiles_failed = 0  # Track failed tiles for error reporting
 
         try:
             for batch_start in range(0, len(all_tiles), batch_size):
@@ -2841,6 +2842,8 @@ class StreamingIMGWriter:
 
                 # Write batch results sequentially (preserving order)
                 for i, jpeg_data in enumerate(batch_jpegs):
+                    if len(jpeg_data) == 0:
+                        tiles_failed += 1
                     lbl28_offsets.append(running_offset)
                     jpeg_sizes.append(len(jpeg_data))
                     actual_lbl29_size += len(jpeg_data)
@@ -2879,6 +2882,12 @@ class StreamingIMGWriter:
         logger.info(
             f"  LBL29 complete: {tiles_processed} tiles, {actual_lbl29_size:,} bytes"
         )
+
+        if tiles_failed > 0:
+            fail_pct = tiles_failed / total_tiles * 100
+            logger.error(
+                f"  {tiles_failed}/{total_tiles} tiles ({fail_pct:.1f}%) failed to process"
+            )
 
         # --- Fix up LBL28 offsets (batched single write) ---
         f.seek(lbl28_file_pos)
@@ -2928,12 +2937,93 @@ class StreamingIMGWriter:
         return current_pos - start_offset
 
 
+_BORDER_MARGIN = 16  # pixels to mirror-pad (2 JPEG MCU blocks)
+
+
 def _reencode_jpeg(jpeg_bytes: bytes, quality: int) -> bytes:
     """Re-encode JPEG bytes at the specified quality level.
 
     Uses PIL (backed by libjpeg-turbo) for fast in-memory re-encoding.
+
+    For quality < 85, mirror-pads the image by _BORDER_MARGIN pixels on all
+    sides before encoding. This gives DCT blocks at tile edges smooth neighbor
+    context, eliminating visible border artifacts between adjacent tiles.
+    The padded image is encoded at the target quality, decoded, the center
+    is cropped back to the original size, and re-encoded at the target quality.
+
+    If the input cannot be decoded as JPEG, returns the original bytes unchanged.
     """
-    img = Image.open(io.BytesIO(jpeg_bytes))
+    try:
+        img = Image.open(io.BytesIO(jpeg_bytes))
+    except Exception:
+        return jpeg_bytes
+
+    if quality < 85:
+        # Mirror-pad → encode → decode → crop → encode
+        orig_w, orig_h = img.size
+        m = _BORDER_MARGIN
+        padded = ImageOps.expand(img, border=m, fill=0)
+        # Mirror-reflect edges into the padding
+        padded.paste(
+            img.crop((0, 0, orig_w, m)).transpose(Image.Transpose.FLIP_TOP_BOTTOM),
+            (m, 0),
+        )  # top
+        padded.paste(
+            img.crop((0, orig_h - m, orig_w, orig_h)).transpose(
+                Image.Transpose.FLIP_TOP_BOTTOM
+            ),
+            (m, orig_h + m),
+        )  # bottom
+        padded.paste(
+            img.crop((0, 0, m, orig_h)).transpose(Image.Transpose.FLIP_LEFT_RIGHT),
+            (0, m),
+        )  # left
+        padded.paste(
+            img.crop((orig_w - m, 0, orig_w, orig_h)).transpose(
+                Image.Transpose.FLIP_LEFT_RIGHT
+            ),
+            (orig_w + m, m),
+        )  # right
+        # Fill corners with 180° rotated tile corners
+        padded.paste(
+            img.crop((0, 0, m, m)).transpose(Image.Transpose.ROTATE_180), (0, 0)
+        )  # top-left
+        padded.paste(
+            img.crop((orig_w - m, 0, orig_w, m)).transpose(Image.Transpose.ROTATE_180),
+            (orig_w + m, 0),
+        )  # top-right
+        padded.paste(
+            img.crop((0, orig_h - m, m, orig_h)).transpose(Image.Transpose.ROTATE_180),
+            (0, orig_h + m),
+        )  # bottom-left
+        padded.paste(
+            img.crop((orig_w - m, orig_h - m, orig_w, orig_h)).transpose(
+                Image.Transpose.ROTATE_180
+            ),
+            (orig_w + m, orig_h + m),
+        )  # bottom-right
+
+        # Encode padded image at target quality
+        buf = io.BytesIO()
+        padded.save(buf, format="JPEG", quality=quality, optimize=True)
+
+        # Decode and crop center
+        decoded = Image.open(io.BytesIO(buf.getvalue()))
+        cropped = decoded.crop(
+            (
+                m,
+                m,
+                m + orig_w,
+                m + orig_h,
+            )
+        )
+
+        # Re-encode at target quality
+        buf = io.BytesIO()
+        cropped.save(buf, format="JPEG", quality=quality, optimize=True)
+        return buf.getvalue()
+
+    # High quality: direct encode (no padding needed)
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=quality, optimize=True)
     return buf.getvalue()
@@ -3033,7 +3123,11 @@ def _process_tile_jpeg(
             jpeg_quality,
         )
         if result is not None:
-            return result[0]  # (jpeg_bytes, bounds)
+            jpeg_bytes = result[0]  # (jpeg_bytes, bounds)
+            # Apply target quality (with mirror-padding fix if needed)
+            if jpeg_quality is not None:
+                return _reencode_jpeg(jpeg_bytes, jpeg_quality)
+            return jpeg_bytes
         return None
 
     if tile.source_path is None or not tile.source_path.exists():
@@ -3382,7 +3476,7 @@ class TileEncoder:
     """Encodes raw pixel data into the Garmin tile format."""
 
     @staticmethod
-    def encode_tile(tile_array: np.ndarray, quality: int = 85) -> bytes:
+    def encode_tile(tile_array: np.ndarray, quality: int = 95) -> bytes:
         """
         Encode a tile array to JPEG bytes for Garmin IMG.
 
@@ -3411,7 +3505,7 @@ class TileEncoder:
     @staticmethod
     def encode_tiles(
         tiles: list[np.ndarray],
-        quality: int = 85,
+        quality: int = 95,
     ) -> list[bytes]:
         """Encode multiple tiles."""
         return [TileEncoder.encode_tile(t, quality) for t in tiles]

@@ -80,17 +80,19 @@ def encode_composite_to_jpeg(image: Image.Image, quality: int = 85) -> bytes:
     """Convert an RGBA composited image to JPEG bytes.
 
     Discards the alpha channel (converts to RGB) before JPEG encoding.
+    Always encodes at quality 95 (high quality intermediate step).
+    The target quality is applied during the final IMG write step.
 
     Args:
         image: RGBA PIL Image to encode.
-        quality: JPEG quality (1-100).
+        quality: Ignored (always encodes at 95). Kept for API compatibility.
 
     Returns:
         JPEG bytes.
     """
     rgb = image.convert("RGB")
     buf = io.BytesIO()
-    rgb.save(buf, format="JPEG", quality=quality, optimize=True)
+    rgb.save(buf, format="JPEG", quality=95, optimize=True)
     return buf.getvalue()
 
 

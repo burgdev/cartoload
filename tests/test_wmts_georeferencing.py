@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
-from cartoload.downloader.wmts import WMTSDownloader
+from cartoload.downloader.wmts.download import WMTSDownloader
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +207,7 @@ class TestIsCached:
         tile_path.write_bytes(b"cached-tile")
 
         # Tile exists but no world file → should regenerate without download
-        with patch("cartoload.downloader.wmts.requests.get") as mock_get:
+        with patch("cartoload.downloader.wmts.download.requests.get") as mock_get:
             result = dl.download_tile(0, 0, 1)
 
         mock_get.assert_not_called()
@@ -227,7 +227,8 @@ class TestGeoreferencedVRT:
         """download_tile should create both tile and world file."""
         dl = _make_downloader(tmp_path)
         with patch(
-            "cartoload.downloader.wmts.requests.get", return_value=_mock_response()
+            "cartoload.downloader.wmts.download.requests.get",
+            return_value=_mock_response(),
         ):
             path = dl.download_tile(541, 362, 10)
 
@@ -246,7 +247,8 @@ class TestGeoreferencedVRT:
         zoom = 2
 
         with patch(
-            "cartoload.downloader.wmts.requests.get", return_value=_mock_response()
+            "cartoload.downloader.wmts.download.requests.get",
+            return_value=_mock_response(),
         ):
             results = dl.download_grid(bbox, zoom)
 

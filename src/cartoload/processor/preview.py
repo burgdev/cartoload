@@ -220,6 +220,30 @@ def _assemble_mosaic(
     return buf.getvalue()
 
 
+def _cleanup_stale_previews(
+    preview_dir: Path,
+    layer_id: str,
+    current_zoom_levels: list[int],
+) -> None:
+    """Remove stale preview files for a layer from previous runs.
+
+    Deletes preview files for zoom levels no longer in the config.
+    """
+    prefix = f"{layer_id}_zoom"
+    current_zooms = set(current_zoom_levels)
+    for f in preview_dir.iterdir():
+        if f.name.startswith(prefix) and f.suffix == ".jpg":
+            # Extract zoom level from filename: {layer_id}_zoom{N}.jpg
+            zoom_str = f.name[len(prefix) : -len(".jpg")]
+            try:
+                zoom = int(zoom_str)
+            except ValueError:
+                continue
+            if zoom not in current_zooms:
+                f.unlink()
+                logger.debug("Removed stale preview: %s", f.name)
+
+
 def generate_previews(
     layer: LayerConfig,
     downloader: WMTSDownloader,
@@ -241,6 +265,9 @@ def generate_previews(
     """
     preview_dir = output_dir / "previews"
     preview_dir.mkdir(parents=True, exist_ok=True)
+
+    # Remove stale preview files from previous runs for this target
+    _cleanup_stale_previews(preview_dir, layer.id, layer.zoom_levels)
 
     generated: list[Path] = []
 
@@ -304,6 +331,9 @@ def generate_previews_from_processor(
     """
     preview_dir = output_dir / "previews"
     preview_dir.mkdir(parents=True, exist_ok=True)
+
+    # Remove stale preview files from previous runs for this target
+    _cleanup_stale_previews(preview_dir, layer.id, layer.zoom_levels)
 
     generated: list[Path] = []
 

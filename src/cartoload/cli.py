@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import click
+from rich.logging import RichHandler
 from rich.progress import (
     BarColumn,
     Progress,
@@ -408,10 +409,6 @@ def build(
         if force:
             delete_checkpoint(cache, layer)
 
-        # Progress callback
-        def on_progress(stage: str, description: str) -> None:
-            click.echo(f"{description}")
-
         # Rich progress bar for export stage
         progress = Progress(
             SpinnerColumn(),
@@ -419,10 +416,34 @@ def build(
             BarColumn(),
             TextColumn("{task.completed}/{task.total}"),
             TimeElapsedColumn(),
-            TimeRemainingColumn(),
+            TextColumn("ETA "),
+            TimeRemainingColumn(compact=True, elapsed_when_finished=True),
             console=None,
             transient=False,
         )
+
+        # Use Rich's console for all output to avoid double-printing
+        # when progress bars refresh
+        rich_console = progress.console
+
+        # Route Python logging through Rich so log messages don't corrupt
+        # the progress bar display
+        import logging
+
+        log_level = logging.INFO if verbose else logging.WARNING
+        rich_handler = RichHandler(
+            console=rich_console,
+            level=log_level,
+            show_time=False,
+            show_path=False,
+            markup=True,
+        )
+        root_logger = logging.getLogger()
+        root_logger.addHandler(rich_handler)
+        root_logger.setLevel(log_level)
+
+        def on_progress(stage: str, description: str) -> None:
+            rich_console.print(description)
 
         with progress:
             extract_task = None
@@ -490,6 +511,8 @@ def build(
             )
 
         # Summary
+        root_logger.removeHandler(rich_handler)
+
         if cache_warmup:
             click.echo("Cache warmup complete. Tiles are cached and ready for build.")
         else:
@@ -897,3 +920,68 @@ def cache_clean(ctx: click.Context, source: str | None, force: bool) -> None:
         click.echo(f"Removed: {d.name}")
 
     click.echo(f"Freed: {_human_size(total_size)}")
+
+
+# ---------------------------------------------------------------------------
+# Watermark commands
+# ---------------------------------------------------------------------------
+
+_ENV_KEY = "CARTOLOAD_WATERMARK_KEY"
+
+
+def _resolve_key(key: str | None, key_file: str | None) -> str:
+    """Resolve watermark key from --key, --key-file, or env var."""
+    if key:
+        return key
+    if key_file:
+        return Path(key_file).read_text().strip()
+    env_key = os.environ.get(_ENV_KEY)
+    if env_key:
+        return env_key
+    raise click.ClickException(
+        f"No key provided. Use --key, --key-file, or set {_ENV_KEY} env var."
+    )
+
+
+@main.group()
+def watermark() -> None:
+    """Read and write forensic watermarks in Garmin IMG files."""
+
+
+@watermark.command("write")
+@click.argument("img_file", type=click.Path(exists=True))
+@click.argument("payload")
+@click.option("--key", default=None, help="Encryption key")
+@click.option(
+    "--key-file", default=None, type=click.Path(exists=True), help="Read key from file"
+)
+def watermark_write(
+    img_file: str, payload: str, key: str | None, key_file: str | None
+) -> None:
+    """Write a watermark string into a Garmin IMG file."""
+    from cartoload.watermark import write_watermark
+
+    resolved_key = _resolve_key(key, key_file)
+    try:
+        write_watermark(img_file, payload, resolved_key)
+        click.echo("Watermark written.")
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+
+
+@watermark.command("read")
+@click.argument("img_file", type=click.Path(exists=True))
+@click.option("--key", default=None, help="Encryption key")
+@click.option(
+    "--key-file", default=None, type=click.Path(exists=True), help="Read key from file"
+)
+def watermark_read(img_file: str, key: str | None, key_file: str | None) -> None:
+    """Read and print the watermark from a Garmin IMG file."""
+    from cartoload.watermark import read_watermark
+
+    resolved_key = _resolve_key(key, key_file)
+    result = read_watermark(img_file, resolved_key)
+    if result is None:
+        click.echo("No watermark found.")
+    else:
+        click.echo(result)

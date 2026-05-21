@@ -21,7 +21,7 @@ class SourceConfig:
     """
 
     id: str
-    type: str  # stac, wmts, path
+    type: str  # stac, wmts, path, xyz
     urls: list[str] = field(default_factory=list)
     attribution: str = ""
     rate_limit_ms: int = 150
@@ -32,6 +32,12 @@ class SourceConfig:
     config_dir: str | None = (
         None  # Directory of the source config file (for relative path resolution)
     )
+    # WMTS Capabilities mode fields
+    capabilities_url: str | None = None
+    tile_matrix_set: str | None = (
+        None  # TMS identifier, e.g. "3857" or "GoogleMapsCompatible"
+    )
+    layer: str | None = None  # WMTS layer identifier for Capabilities mode
 
 
 @dataclass
@@ -309,6 +315,9 @@ def _parse_sources_section(data: dict, path: str) -> dict[str, SourceConfig]:
             defaults=defaults,
             asset_filter=asset_filter,
             config_dir=str(file_path.parent.resolve()),
+            capabilities_url=source_dict.get("capabilities_url"),
+            tile_matrix_set=source_dict.get("tile_matrix_set"),
+            layer=source_dict.get("layer"),
         )
 
     return sources

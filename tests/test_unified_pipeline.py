@@ -21,7 +21,7 @@ from cartoload.config import (
     TargetConfig,
     TargetLayerEntry,
 )
-from cartoload.downloader.wmts import WMTSDownloader
+from cartoload.downloader.wmts.download import WMTSDownloader
 from cartoload.pipeline import _compute_tile_coords
 from cartoload.processor.unified_pipeline import build_target
 
