@@ -17,8 +17,8 @@ from typing import Callable
 from PIL import Image
 
 from ..config import LayerConfig
-from ..downloader.wmts import WMTSDownloader
-from ..pipeline import _compute_tile_coords
+from ..source.wmts import WmtsDownloader
+from cartoload.tile_math import bounds_to_tile_coords, lon_to_tile_x, lat_to_tile_y
 
 logger = logging.getLogger(__name__)
 
@@ -45,32 +45,6 @@ def compute_preview_center(bounds: dict[str, float]) -> tuple[float, float]:
     return (lng, lat)
 
 
-def _lat_lon_to_tile(lat: float, lon: float, zoom: int) -> tuple[int, int]:
-    """Convert lat/lon to tile coordinates at the given zoom level."""
-    n = 2**zoom
-    x = max(0, min(int((lon + 180.0) / 360.0 * n), n - 1))
-    lat_rad = math.radians(lat)
-    y = max(
-        0,
-        min(
-            int(
-                (
-                    1.0
-                    - math.log(
-                        max(math.tan(lat_rad), 1e-10)
-                        + 1.0 / max(math.cos(lat_rad), 1e-10)
-                    )
-                    / math.pi
-                )
-                / 2.0
-                * n
-            ),
-            n - 1,
-        ),
-    )
-    return x, y
-
-
 def compute_preview_grid(
     layer: LayerConfig,
     zoom: int,
@@ -92,7 +66,16 @@ def compute_preview_grid(
     Returns:
         List of (x, y) tile coordinates for the preview
     """
-    all_coords = _compute_tile_coords(layer, zoom)
+    if not layer.bounds:
+        return []
+
+    all_coords = bounds_to_tile_coords(
+        layer.bounds["west"],
+        layer.bounds["south"],
+        layer.bounds["east"],
+        layer.bounds["north"],
+        zoom,
+    )
     if not all_coords:
         return []
 
@@ -129,7 +112,8 @@ def _select_grid_from_available(
         return sorted(available)[:max_tiles]
 
     center_lng, center_lat = compute_preview_center(bounds)
-    cx, cy = _lat_lon_to_tile(center_lat, center_lng, zoom)
+    cx = lon_to_tile_x(center_lng, zoom)
+    cy = lat_to_tile_y(center_lat, zoom)
 
     # Determine grid dimensions: try square grid that fits max_tiles
     grid_side = int(math.sqrt(max_tiles))
@@ -155,7 +139,7 @@ def _select_grid_from_available(
 
 
 def assemble_preview(
-    downloader: WMTSDownloader,
+    downloader: WmtsDownloader,
     coords: list[tuple[int, int]],
     zoom: int,
     quality: int = 85,
@@ -246,7 +230,7 @@ def _cleanup_stale_previews(
 
 def generate_previews(
     layer: LayerConfig,
-    downloader: WMTSDownloader,
+    downloader: WmtsDownloader,
     output_dir: Path,
     max_tiles_per_zoom: int = 9,
     quality: int = 85,
@@ -273,7 +257,13 @@ def generate_previews(
 
     for zoom in layer.zoom_levels:
         # Scan for cached tiles at this zoom to guide selection
-        all_coords = _compute_tile_coords(layer, zoom)
+        all_coords = bounds_to_tile_coords(
+            layer.bounds["west"],
+            layer.bounds["south"],
+            layer.bounds["east"],
+            layer.bounds["north"],
+            zoom,
+        )
         cached_at_zoom: set[tuple[int, int]] = set()
         for x, y in all_coords:
             if downloader._cache_path(x, y, zoom).exists():

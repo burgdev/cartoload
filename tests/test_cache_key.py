@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from cartoload.downloader.cache_key import migrate_cache_key, url_to_cache_key
+from cartoload.source.cache_key import migrate_cache_key, url_to_cache_key
 
 
 class TestSchemeHostStripping:

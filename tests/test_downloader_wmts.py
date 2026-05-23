@@ -1,4 +1,4 @@
-"""Tests for WMTSDownloader: tile grid, URL interpolation, caching, retries, progress."""
+"""Tests for WmtsDownloader: tile grid, URL interpolation, caching, retries, progress."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
-from cartoload.downloader.wmts.download import WMTSDownloader
+from cartoload.source.wmts.download import WmtsDownloader
 
 
 # ---------------------------------------------------------------------------
@@ -20,8 +20,8 @@ def _make_downloader(
     tmp_path: Path,
     url_template: str = "https://example.com/{zoom}/{x}/{y}.jpeg",
     **kwargs,
-) -> WMTSDownloader:
-    return WMTSDownloader(
+) -> WmtsDownloader:
+    return WmtsDownloader(
         source_id="test_source",
         url_template=url_template,
         cache_dir=tmp_path / "cache",
@@ -50,7 +50,7 @@ class TestTileGridComputation:
 
     def test_known_bbox_zoom10(self) -> None:
         """Bbox (7,46)-(8,47) at zoom 10 should produce valid tile indices."""
-        tiles = WMTSDownloader._bbox_to_tile_indices((7.0, 46.0, 8.0, 47.0), 10)
+        tiles = WmtsDownloader._bbox_to_tile_indices((7.0, 46.0, 8.0, 47.0), 10)
         assert len(tiles) > 0
         for x, y in tiles:
             assert 0 <= x < 2**10
@@ -58,17 +58,17 @@ class TestTileGridComputation:
 
     def test_single_tile_bbox(self) -> None:
         """A tiny bbox should produce exactly one tile at low zoom."""
-        tiles = WMTSDownloader._bbox_to_tile_indices((0.0, 0.0, 0.001, 0.001), 0)
+        tiles = WmtsDownloader._bbox_to_tile_indices((0.0, 0.0, 0.001, 0.001), 0)
         assert len(tiles) == 1
 
     def test_zoom0_whole_world(self) -> None:
         """At zoom 0, any bbox should produce exactly one tile (0, 0)."""
-        tiles = WMTSDownloader._bbox_to_tile_indices((-180.0, -85.0, 180.0, 85.0), 0)
+        tiles = WmtsDownloader._bbox_to_tile_indices((-180.0, -85.0, 180.0, 85.0), 0)
         assert tiles == [(0, 0)]
 
     def test_antimeridian_wrapping(self) -> None:
         """Bbox crossing the antimeridian (min_lon > max_lon) wraps correctly."""
-        tiles = WMTSDownloader._bbox_to_tile_indices((179.0, 0.0, -179.0, 1.0), 5)
+        tiles = WmtsDownloader._bbox_to_tile_indices((179.0, 0.0, -179.0, 1.0), 5)
         assert len(tiles) > 0
         xs = {x for x, _ in tiles}
         # Should include tiles at both edges of the x range
@@ -77,13 +77,13 @@ class TestTileGridComputation:
     def test_tile_boundary_bbox(self) -> None:
         """Bbox right on a tile boundary should include that tile."""
         # Zoom 1: 2 tiles wide. Tile boundary at lon 0.
-        tiles = WMTSDownloader._bbox_to_tile_indices((-1.0, -1.0, 1.0, 1.0), 1)
+        tiles = WmtsDownloader._bbox_to_tile_indices((-1.0, -1.0, 1.0, 1.0), 1)
         xs = {x for x, _ in tiles}
         assert 0 in xs and 1 in xs
 
     def test_returns_sorted_list(self) -> None:
         """Output should be sorted by (x, y)."""
-        tiles = WMTSDownloader._bbox_to_tile_indices((7.0, 46.0, 8.0, 47.0), 10)
+        tiles = WmtsDownloader._bbox_to_tile_indices((7.0, 46.0, 8.0, 47.0), 10)
         assert tiles == sorted(tiles)
 
 
@@ -96,7 +96,7 @@ class TestURLInterpolation:
     """Unit tests for _build_tile_url."""
 
     def test_xyz_style(self) -> None:
-        url = WMTSDownloader._build_tile_url(
+        url = WmtsDownloader._build_tile_url(
             "https://wmts.example.com/tiles/{zoom}/{x}/{y}.jpeg",
             x=543,
             y=361,
@@ -105,7 +105,7 @@ class TestURLInterpolation:
         assert url == "https://wmts.example.com/tiles/10/543/361.jpeg"
 
     def test_kvp_style_wmts(self) -> None:
-        url = WMTSDownloader._build_tile_url(
+        url = WmtsDownloader._build_tile_url(
             "https://wmts.example.com/wmts?SERVICE=WMTS&REQUEST=GetTile"
             "&LAYER=basemap&TILEMATRIXSET=3857"
             "&TILEMATRIX={zoom}&TILECOL={x}&TILEROW={y}&FORMAT=image/jpeg",
@@ -118,7 +118,7 @@ class TestURLInterpolation:
         assert "TILEROW=361" in url
 
     def test_source_id_placeholder(self) -> None:
-        url = WMTSDownloader._build_tile_url(
+        url = WmtsDownloader._build_tile_url(
             "https://example.com/{source_id}/{zoom}/{x}/{y}.png",
             x=1,
             y=2,
@@ -130,7 +130,7 @@ class TestURLInterpolation:
 
     def test_z_alias(self) -> None:
         """{z} should work as an alias for {zoom}."""
-        url = WMTSDownloader._build_tile_url(
+        url = WmtsDownloader._build_tile_url(
             "https://tiles.example.com/{z}/{x}/{y}.png",
             x=5,
             y=3,
@@ -140,7 +140,7 @@ class TestURLInterpolation:
 
     def test_layer_placeholder(self) -> None:
         """{layer} should be replaced with layer_name."""
-        url = WMTSDownloader._build_tile_url(
+        url = WmtsDownloader._build_tile_url(
             "https://wmts.example.com/{layer}/{z}/{x}/{y}.jpeg",
             x=1,
             y=2,
@@ -165,11 +165,11 @@ class TestConcurrentDownload:
         # Use a small bbox at zoom 2 -> few tiles
         bbox = (0.0, 0.0, 10.0, 10.0)
         zoom = 2
-        tiles = WMTSDownloader._bbox_to_tile_indices(bbox, zoom)
+        tiles = WmtsDownloader._bbox_to_tile_indices(bbox, zoom)
         assert len(tiles) > 0
 
         with patch(
-            "cartoload.downloader.wmts.download.requests.get",
+            "cartoload.source.wmts.download.requests.get",
             return_value=_mock_response(),
         ):
             results = dl.download_grid(bbox, zoom)
@@ -196,7 +196,7 @@ class TestConcurrentDownload:
         zoom = 3
 
         with patch(
-            "cartoload.downloader.wmts.download.requests.get",
+            "cartoload.source.wmts.download.requests.get",
             side_effect=track_concurrent,
         ):
             dl.download_grid(bbox, zoom)
@@ -219,10 +219,10 @@ class TestRateLimiting:
 
         with (
             patch(
-                "cartoload.downloader.wmts.download.requests.get",
+                "cartoload.source.wmts.download.requests.get",
                 return_value=_mock_response(),
             ),
-            patch("cartoload.downloader.wmts.download.time.sleep") as mock_sleep,
+            patch("cartoload.source.wmts.download.time.sleep") as mock_sleep,
         ):
             dl.download_tile(0, 0, 1)
 
@@ -257,7 +257,7 @@ class TestCaching:
     def test_cache_miss_downloads_and_writes(self, tmp_path: Path) -> None:
         dl = _make_downloader(tmp_path)
         with patch(
-            "cartoload.downloader.wmts.download.requests.get",
+            "cartoload.source.wmts.download.requests.get",
             return_value=_mock_response(),
         ):
             path = dl.download_tile(0, 0, 1)
@@ -271,7 +271,7 @@ class TestCaching:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"cached-tile")
 
-        with patch("cartoload.downloader.wmts.download.requests.get") as mock_get:
+        with patch("cartoload.source.wmts.download.requests.get") as mock_get:
             result = dl.download_tile(0, 0, 1)
 
         mock_get.assert_not_called()
@@ -303,10 +303,8 @@ class TestRetryBackoff:
         responses = [_mock_response(503), _mock_response(200, b"ok")]
 
         with (
-            patch(
-                "cartoload.downloader.wmts.download.requests.get", side_effect=responses
-            ),
-            patch("cartoload.downloader.wmts.download.time.sleep"),
+            patch("cartoload.source.wmts.download.requests.get", side_effect=responses),
+            patch("cartoload.source.wmts.download.time.sleep"),
         ):
             data = dl._download_with_retry("http://x", 0, 0, 1)
 
@@ -318,10 +316,8 @@ class TestRetryBackoff:
         responses = [_mock_response(429), _mock_response(200, b"ok")]
 
         with (
-            patch(
-                "cartoload.downloader.wmts.download.requests.get", side_effect=responses
-            ),
-            patch("cartoload.downloader.wmts.download.time.sleep"),
+            patch("cartoload.source.wmts.download.requests.get", side_effect=responses),
+            patch("cartoload.source.wmts.download.time.sleep"),
         ):
             data = dl._download_with_retry("http://x", 0, 0, 1)
 
@@ -333,10 +329,10 @@ class TestRetryBackoff:
 
         with (
             patch(
-                "cartoload.downloader.wmts.download.requests.get",
+                "cartoload.source.wmts.download.requests.get",
                 return_value=_mock_response(503),
             ),
-            patch("cartoload.downloader.wmts.download.time.sleep"),
+            patch("cartoload.source.wmts.download.time.sleep"),
         ):
             data = dl._download_with_retry("http://x", 0, 0, 1)
 
@@ -348,10 +344,10 @@ class TestRetryBackoff:
 
         with (
             patch(
-                "cartoload.downloader.wmts.download.requests.get",
+                "cartoload.source.wmts.download.requests.get",
                 return_value=_mock_response(404),
             ),
-            patch("cartoload.downloader.wmts.download.time.sleep") as mock_sleep,
+            patch("cartoload.source.wmts.download.time.sleep") as mock_sleep,
         ):
             data = dl._download_with_retry("http://x", 0, 0, 1)
 
@@ -365,10 +361,10 @@ class TestRetryBackoff:
 
         with (
             patch(
-                "cartoload.downloader.wmts.download.requests.get",
+                "cartoload.source.wmts.download.requests.get",
                 return_value=_mock_response(503),
             ),
-            patch("cartoload.downloader.wmts.download.time.sleep") as mock_sleep,
+            patch("cartoload.source.wmts.download.time.sleep") as mock_sleep,
         ):
             dl._download_with_retry("http://x", 0, 0, 1)
 
@@ -393,7 +389,7 @@ class TestProgressOutput:
         zoom = 2
 
         with patch(
-            "cartoload.downloader.wmts.download.requests.get",
+            "cartoload.source.wmts.download.requests.get",
             return_value=_mock_response(),
         ):
             results = dl.download_grid(bbox, zoom)
@@ -408,14 +404,14 @@ class TestProgressOutput:
         zoom = 2
 
         # Pre-cache some tiles
-        tiles = WMTSDownloader._bbox_to_tile_indices(bbox, zoom)
+        tiles = WmtsDownloader._bbox_to_tile_indices(bbox, zoom)
         for x, y in tiles[:2]:
             path = dl._cache_path(x, y, zoom)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"cached")
 
         with patch(
-            "cartoload.downloader.wmts.download.requests.get",
+            "cartoload.source.wmts.download.requests.get",
             return_value=_mock_response(),
         ) as mock_get:
             results = dl.download_grid(bbox, zoom)
@@ -440,11 +436,11 @@ class TestEndToEnd:
         bbox = (7.0, 46.0, 7.5, 46.5)
         zoom = 8
 
-        tiles = WMTSDownloader._bbox_to_tile_indices(bbox, zoom)
+        tiles = WmtsDownloader._bbox_to_tile_indices(bbox, zoom)
         assert len(tiles) > 0
 
         with patch(
-            "cartoload.downloader.wmts.download.requests.get",
+            "cartoload.source.wmts.download.requests.get",
             return_value=_mock_response(),
         ):
             results = dl.download_grid(bbox, zoom)
@@ -459,7 +455,7 @@ class TestEndToEnd:
         dl = _make_downloader(tmp_path)
         bbox = (0.0, 0.0, 10.0, 10.0)
         zoom = 3
-        tiles = WMTSDownloader._bbox_to_tile_indices(bbox, zoom)
+        tiles = WmtsDownloader._bbox_to_tile_indices(bbox, zoom)
         half = len(tiles) // 2
 
         # First run: only "succeed" for the first half of tiles
@@ -474,10 +470,10 @@ class TestEndToEnd:
 
         with (
             patch(
-                "cartoload.downloader.wmts.download.requests.get",
+                "cartoload.source.wmts.download.requests.get",
                 side_effect=partial_download,
             ),
-            patch("cartoload.downloader.wmts.download.time.sleep"),
+            patch("cartoload.source.wmts.download.time.sleep"),
         ):
             results1 = dl.download_grid(bbox, zoom)
 
@@ -492,7 +488,7 @@ class TestEndToEnd:
             return _mock_response(content=b"resumed")
 
         with patch(
-            "cartoload.downloader.wmts.download.requests.get", side_effect=full_download
+            "cartoload.source.wmts.download.requests.get", side_effect=full_download
         ):
             results2 = dl.download_grid(bbox, zoom)
 
@@ -506,7 +502,7 @@ class TestEndToEnd:
         dl = _make_downloader(tmp_path)
         bbox = (0.0, 0.0, 30.0, 30.0)
         zoom = 4
-        tiles = WMTSDownloader._bbox_to_tile_indices(bbox, zoom)
+        tiles = WmtsDownloader._bbox_to_tile_indices(bbox, zoom)
         assert len(tiles) >= 3
 
         # Build a response schedule:
@@ -533,10 +529,10 @@ class TestEndToEnd:
 
         with (
             patch(
-                "cartoload.downloader.wmts.download.requests.get",
+                "cartoload.source.wmts.download.requests.get",
                 side_effect=scheduled_response,
             ),
-            patch("cartoload.downloader.wmts.download.time.sleep"),
+            patch("cartoload.source.wmts.download.time.sleep"),
         ):
             results = dl.download_grid(bbox, zoom)
 
@@ -559,25 +555,25 @@ class TestPerUrlRateLimiter:
 
     def test_allows_immediate_first_request(self) -> None:
         """First request should not wait."""
-        from cartoload.downloader.wmts.download import _PerUrlRateLimiter
+        from cartoload.source.wmts.download import _PerUrlRateLimiter
 
         limiter = _PerUrlRateLimiter(delay_ms=1000)
-        with patch("cartoload.downloader.wmts.download.time.sleep") as mock_sleep:
+        with patch("cartoload.source.wmts.download.time.sleep") as mock_sleep:
             limiter.wait()
         # No sleep needed for the very first request
         mock_sleep.assert_not_called()
 
     def test_enforces_delay_between_requests(self) -> None:
         """Second request too soon should trigger sleep."""
-        from cartoload.downloader.wmts.download import _PerUrlRateLimiter
+        from cartoload.source.wmts.download import _PerUrlRateLimiter
 
         limiter = _PerUrlRateLimiter(delay_ms=200)
         # First call sets _last_request
         limiter.wait()
         # Advance time only 50ms (less than 200ms delay)
         with (
-            patch("cartoload.downloader.wmts.download.time.monotonic") as mock_mono,
-            patch("cartoload.downloader.wmts.download.time.sleep") as mock_sleep,
+            patch("cartoload.source.wmts.download.time.monotonic") as mock_mono,
+            patch("cartoload.source.wmts.download.time.sleep") as mock_sleep,
         ):
             # Return sequence: now=50ms after first request
             mock_mono.return_value = limiter._last_request + 0.05
@@ -590,14 +586,14 @@ class TestPerUrlRateLimiter:
 
     def test_no_sleep_when_enough_time_elapsed(self) -> None:
         """If enough time has passed since last request, no sleep needed."""
-        from cartoload.downloader.wmts.download import _PerUrlRateLimiter
+        from cartoload.source.wmts.download import _PerUrlRateLimiter
 
         limiter = _PerUrlRateLimiter(delay_ms=100)
         limiter.wait()
         # Simulate a long delay
         limiter._last_request = time.monotonic() - 1.0
 
-        with patch("cartoload.downloader.wmts.download.time.sleep") as mock_sleep:
+        with patch("cartoload.source.wmts.download.time.sleep") as mock_sleep:
             limiter.wait()
         mock_sleep.assert_not_called()
 
@@ -605,7 +601,7 @@ class TestPerUrlRateLimiter:
         """Multiple threads should be able to use the limiter safely."""
         import threading
 
-        from cartoload.downloader.wmts.download import _PerUrlRateLimiter
+        from cartoload.source.wmts.download import _PerUrlRateLimiter
 
         limiter = _PerUrlRateLimiter(delay_ms=0)  # No actual delay
         errors: list[Exception] = []
@@ -633,7 +629,7 @@ class TestUrlSelector:
 
     def test_round_robin_distribution(self) -> None:
         """URLs should be distributed in round-robin order."""
-        from cartoload.downloader.wmts.download import _UrlSelector
+        from cartoload.source.wmts.download import _UrlSelector
 
         selector = _UrlSelector(["a", "b", "c"])
         results = [selector.next() for _ in range(6)]
@@ -641,7 +637,7 @@ class TestUrlSelector:
 
     def test_single_url(self) -> None:
         """With one URL, should always return that URL."""
-        from cartoload.downloader.wmts.download import _UrlSelector
+        from cartoload.source.wmts.download import _UrlSelector
 
         selector = _UrlSelector(["only"])
         assert selector.next() == "only"
@@ -649,14 +645,14 @@ class TestUrlSelector:
 
     def test_active_urls_property(self) -> None:
         """active_urls should list all non-disabled URLs."""
-        from cartoload.downloader.wmts.download import _UrlSelector
+        from cartoload.source.wmts.download import _UrlSelector
 
         selector = _UrlSelector(["a", "b", "c"])
         assert selector.active_urls == ["a", "b", "c"]
 
     def test_disable_after_consecutive_failures(self) -> None:
         """URL should be disabled after max_consecutive_failures."""
-        from cartoload.downloader.wmts.download import _UrlSelector
+        from cartoload.source.wmts.download import _UrlSelector
 
         selector = _UrlSelector(["a", "b"], max_consecutive_failures=3)
         for _ in range(3):
@@ -667,7 +663,7 @@ class TestUrlSelector:
 
     def test_not_disabled_before_threshold(self) -> None:
         """URL should not be disabled before reaching the threshold."""
-        from cartoload.downloader.wmts.download import _UrlSelector
+        from cartoload.source.wmts.download import _UrlSelector
 
         selector = _UrlSelector(["a", "b"], max_consecutive_failures=5)
         for _ in range(4):
@@ -677,7 +673,7 @@ class TestUrlSelector:
 
     def test_success_resets_failure_count(self) -> None:
         """A success should reset the consecutive failure counter."""
-        from cartoload.downloader.wmts.download import _UrlSelector
+        from cartoload.source.wmts.download import _UrlSelector
 
         selector = _UrlSelector(["a", "b"], max_consecutive_failures=3)
         selector.report_failure("a")
@@ -689,7 +685,7 @@ class TestUrlSelector:
 
     def test_returns_none_when_all_disabled(self) -> None:
         """Should return None when all URLs are disabled."""
-        from cartoload.downloader.wmts.download import _UrlSelector
+        from cartoload.source.wmts.download import _UrlSelector
 
         selector = _UrlSelector(["a"], max_consecutive_failures=2)
         selector.report_failure("a")
@@ -698,7 +694,7 @@ class TestUrlSelector:
 
     def test_round_robin_skips_disabled(self) -> None:
         """Round-robin should skip disabled URLs."""
-        from cartoload.downloader.wmts.download import _UrlSelector
+        from cartoload.source.wmts.download import _UrlSelector
 
         selector = _UrlSelector(["a", "b", "c"], max_consecutive_failures=2)
         # Disable 'b'
@@ -742,7 +738,7 @@ class TestMultiUrlDownloader:
         zoom = 2
 
         with patch(
-            "cartoload.downloader.wmts.download.requests.get",
+            "cartoload.source.wmts.download.requests.get",
             return_value=_mock_response(),
         ):
             results = dl.download_grid(bbox, zoom)
@@ -771,10 +767,10 @@ class TestMultiUrlDownloader:
 
         with (
             patch(
-                "cartoload.downloader.wmts.download.requests.get",
+                "cartoload.source.wmts.download.requests.get",
                 side_effect=selective_response,
             ),
-            patch("cartoload.downloader.wmts.download.time.sleep"),
+            patch("cartoload.source.wmts.download.time.sleep"),
         ):
             dl.download_grid(bbox, zoom)
 
@@ -784,7 +780,7 @@ class TestMultiUrlDownloader:
 
     def test_per_url_rate_limiters_created(self, tmp_path: Path) -> None:
         """Each URL should have its own rate limiter."""
-        dl = WMTSDownloader(
+        dl = WmtsDownloader(
             source_id="test_source",
             url_template="https://s1.example.com/{z}/{x}/{y}.jpeg",
             cache_dir=tmp_path / "cache",

@@ -1,7 +1,7 @@
 """Pipeline orchestration: wires config → downloader → processor → exporter.
 
 This module provides the public API for building targets. The core
-implementation lives in ``processor.unified_pipeline.build_target()``.
+implementation lives in ``processor.pipeline.build_target()``.
 This module re-exports exceptions and provides backward-compatible
 adapter functions.
 """
@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Callable
 
 from .config import LayerConfig, SourceConfig, TargetConfig, TargetLayerEntry
 from .template import check_unresolved, resolve_templates
+from .utils import ExportProgressCallback, ProgressCallback
 
 logger = logging.getLogger(__name__)
 
@@ -58,19 +58,11 @@ class ExportError(PipelineError):
 
 
 # ---------------------------------------------------------------------------
-# Type aliases
-# ---------------------------------------------------------------------------
-
-ProgressCallback = Callable[[str, str], None]
-ExportProgressCallback = Callable[[str, int, int], None]
-
-
-# ---------------------------------------------------------------------------
 # Source resolution
 # ---------------------------------------------------------------------------
 
 
-def resolve_source(
+def resolve_source_config(
     layer: LayerConfig,
     sources: dict[str, SourceConfig],
 ) -> SourceConfig:
@@ -135,7 +127,7 @@ def get_downloader(
     *,
     source_args: dict[str, str] | None = None,
     display_name: str = "",
-) -> "WMTSDownloader":  # noqa: F821
+) -> "WmtsDownloader":  # noqa: F821
     """Return a WMTS downloader for the given source config.
 
     This function is retained for backward compatibility with the CLI's
@@ -148,12 +140,12 @@ def get_downloader(
         display_name: Name shown in download progress bars.
 
     Returns:
-        A WMTSDownloader instance
+        A WmtsDownloader instance
 
     Raises:
         PipelineError: If the source type is not 'wmts'
     """
-    from .downloader.wmts import WMTSDownloader
+    from .source.wmts import WmtsDownloader
 
     if source.type != "wmts":
         raise PipelineError(
@@ -185,7 +177,7 @@ def get_downloader(
     layer_name = variables.get("layer", "")
     effective_template = resolved_urls[0] if resolved_urls else ""
 
-    return WMTSDownloader(
+    return WmtsDownloader(
         source_id=source.id,
         url_template=effective_template,
         cache_dir=cache_dir,
@@ -217,52 +209,15 @@ def _compute_tile_coords(layer: LayerConfig, zoom: int) -> list[tuple[int, int]]
     Returns:
         List of (x, y) tile coordinates
     """
-    import math as _math
+    from cartoload.tile_math import bounds_to_tile_coords
 
     bounds = layer.bounds
     if not bounds:
         return []
 
-    n = 2**zoom
-    west = bounds["west"]
-    east = bounds["east"]
-    north = bounds["north"]
-    south = bounds["south"]
-
-    def lon_to_x(lon: float) -> int:
-        return max(0, min(int((lon + 180.0) / 360.0 * n), n - 1))
-
-    def lat_to_y(lat: float) -> int:
-        lat_rad = _math.radians(lat)
-        return max(
-            0,
-            min(
-                int(
-                    (
-                        1.0
-                        - _math.log(
-                            max(_math.tan(lat_rad), 1e-10)
-                            + 1.0 / max(_math.cos(lat_rad), 1e-10)
-                        )
-                        / _math.pi
-                    )
-                    / 2.0
-                    * n
-                ),
-                n - 1,
-            ),
-        )
-
-    x_min = lon_to_x(west)
-    x_max = lon_to_x(east)
-    y_min = lat_to_y(north)
-    y_max = lat_to_y(south)
-
-    coords = []
-    for x in range(x_min, x_max + 1):
-        for y in range(y_min, y_max + 1):
-            coords.append((x, y))
-    return coords
+    return bounds_to_tile_coords(
+        bounds["west"], bounds["south"], bounds["east"], bounds["north"], zoom
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -321,7 +276,7 @@ async def build_layer(
     Returns:
         List of paths to output files
     """
-    from .processor.unified_pipeline import build_target
+    from .processor.pipeline import build_target
 
     # Convert LayerConfig → TargetConfig
     target = _layer_to_target(layer)
@@ -393,9 +348,9 @@ def _layer_to_target(layer: LayerConfig) -> TargetConfig:
 
 
 def __getattr__(name: str):
-    """Lazy re-export from unified_pipeline to avoid circular imports."""
+    """Lazy re-export from pipeline to avoid circular imports."""
     if name == "build_target":
-        from .processor.unified_pipeline import build_target
+        from .processor.pipeline import build_target
 
         return build_target
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

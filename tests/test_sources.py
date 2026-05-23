@@ -18,19 +18,19 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from cartoload.config import LayerConfig, SourceConfig
-from cartoload.downloader.source import (
+from cartoload.source.base import (
     Source,
     get_source_registry,
     register_source,
     resolve_source,
 )
-from cartoload.downloader.stac_source import (
+from cartoload.source.stac.source import (
     StacSource,
     _find_geotiff_asset,
     _find_gpkg_asset,
 )
-from cartoload.downloader.wmts_source import WmtsSource
-from cartoload.downloader.path_source import PathSource
+from cartoload.source.wmts.source import WmtsSource
+from cartoload.source.path import PathSource
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +55,7 @@ class TestSourceRegistry:
         assert resolve_source("path") is PathSource
 
     def test_resolve_unknown_raises(self):
-        with pytest.raises(ValueError, match="Unknown source type 'ftp'"):
+        with pytest.raises(ValueError, match="Unknown source 'ftp'"):
             resolve_source("ftp")
 
     def test_register_custom_source(self):
@@ -83,9 +83,9 @@ class TestSourceRegistry:
         assert resolve_source("custom") is CustomSource
 
         # Clean up
-        from cartoload.downloader import source as source_mod
+        from cartoload.source import base as source_mod
 
-        source_mod._SOURCE_TYPES.pop("custom", None)
+        source_mod._SOURCE_REGISTRY._types.pop("custom", None)
 
 
 # ---------------------------------------------------------------------------
@@ -316,10 +316,10 @@ class TestWmtsSource:
             zoom_levels=[10],
         )
 
-        from cartoload.downloader.wmts.download import WMTSDownloader
+        from cartoload.source.wmts.download import WmtsDownloader
 
         dl = source.get_downloader(source_config, layer_config, tmp_path)
-        assert isinstance(dl, WMTSDownloader)
+        assert isinstance(dl, WmtsDownloader)
 
 
 class TestWmtsSourceXyzAlias:
@@ -334,7 +334,7 @@ class TestWmtsSourceXyzAlias:
         assert WmtsSource.can_handle(config)
 
     def test_xyz_resolves_to_wmts_source(self):
-        from cartoload.downloader.source import resolve_source
+        from cartoload.source.base import resolve_source
 
         assert resolve_source("xyz") is WmtsSource
 
@@ -359,10 +359,10 @@ class TestWmtsSourceXyzAlias:
         result = source.download(source_config, layer_config, tmp_path)
         assert len(result) == 1
 
-        from cartoload.downloader.wmts.download import WMTSDownloader
+        from cartoload.source.wmts.download import WmtsDownloader
 
         dl = source.get_downloader(source_config, layer_config, tmp_path)
-        assert isinstance(dl, WMTSDownloader)
+        assert isinstance(dl, WmtsDownloader)
 
 
 class TestWmtsSourceCapabilitiesMode:
@@ -472,11 +472,11 @@ class TestWmtsSourceCapabilitiesMode:
 
         assert len(result) == 1
 
-        from cartoload.downloader.wmts.download import WMTSDownloader
+        from cartoload.source.wmts.download import WmtsDownloader
 
         with patch("requests.get", return_value=mock_response):
             dl = source.get_downloader(source_config, layer_config, tmp_path)
-        assert isinstance(dl, WMTSDownloader)
+        assert isinstance(dl, WmtsDownloader)
 
         # Verify the URL template was constructed from Capabilities
         assert "${z}" in dl._url_template
@@ -557,10 +557,10 @@ class TestWmtsSourceTemplateModePreserved:
         result = source.download(source_config, layer_config, tmp_path)
         assert len(result) == 1
 
-        from cartoload.downloader.wmts.download import WMTSDownloader
+        from cartoload.source.wmts.download import WmtsDownloader
 
         dl = source.get_downloader(source_config, layer_config, tmp_path)
-        assert isinstance(dl, WMTSDownloader)
+        assert isinstance(dl, WmtsDownloader)
         # Verify template was expanded with the layer variable
         assert "overlay" in dl._url_template
 
@@ -843,7 +843,7 @@ class TestStacCacheFreshness:
         )
         return source, source_config, layer_config
 
-    @patch("cartoload.downloader.stac_source.query_stac_collection")
+    @patch("cartoload.source.stac.source.query_stac_collection")
     def test_default_no_freshness_check(self, mock_query, tmp_path):
         """By default (update=False, max_age_days=None), cached files are
         returned without any HTTP HEAD requests."""
@@ -875,8 +875,8 @@ class TestStacCacheFreshness:
         assert len(result) == 1
         assert result[0] == tif_path
 
-    @patch("cartoload.downloader.stac_source.query_stac_collection")
-    @patch("cartoload.downloader.stac_source.requests.head")
+    @patch("cartoload.source.stac.source.query_stac_collection")
+    @patch("cartoload.source.stac.source.requests.head")
     def test_update_true_checks_freshness(self, mock_head, mock_query, tmp_path):
         """With update=True, HTTP HEAD is used to check freshness."""
         source, sc, lc = self._make_source_and_configs()
@@ -913,7 +913,7 @@ class TestStacCacheFreshness:
         mock_head.assert_called()
         assert len(result) == 1
 
-    @patch("cartoload.downloader.stac_source.query_stac_collection")
+    @patch("cartoload.source.stac.source.query_stac_collection")
     def test_max_age_days_skips_recent_file(self, mock_query, tmp_path):
         """With max_age_days=10, a file downloaded 2 days ago is skipped."""
         source, sc, lc = self._make_source_and_configs()
@@ -945,8 +945,8 @@ class TestStacCacheFreshness:
         assert len(result) == 1
         assert result[0] == tif_path
 
-    @patch("cartoload.downloader.stac_source.query_stac_collection")
-    @patch("cartoload.downloader.stac_source.requests.head")
+    @patch("cartoload.source.stac.source.query_stac_collection")
+    @patch("cartoload.source.stac.source.requests.head")
     def test_max_age_days_checks_old_file(self, mock_head, mock_query, tmp_path):
         """With max_age_days=10, a file downloaded 20 days ago triggers freshness check."""
         source, sc, lc = self._make_source_and_configs()

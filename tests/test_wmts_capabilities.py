@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from cartoload.downloader.wmts.capabilities import (
+from cartoload.source.wmts.capabilities import (
     TileMatrix,
     TileMatrixSet,
     parse_capabilities,
     resource_url_to_template,
 )
-from cartoload.downloader.wmts.tile_grid import (
+from cartoload.source.wmts.tile_grid import (
     bbox_to_tile_indices,
     compute_tile_bounds,
     wgs84_to_tms_bbox,
@@ -362,7 +362,7 @@ class TestComputeTileBounds:
 
 class TestGoogleMapsCompatibleMatchesHardcodedMath:
     """Verify that the TileMatrixSet-based computation matches the existing
-    hardcoded Web Mercator tile math in WMTSDownloader."""
+    hardcoded Web Mercator tile math in WmtsDownloader."""
 
     @pytest.fixture
     def tms_3857(self):
@@ -370,7 +370,7 @@ class TestGoogleMapsCompatibleMatchesHardcodedMath:
 
     def test_zoom_10_matches_hardcoded(self, tms_3857):
         """Compare tile bounds at zoom 10 between TMS-based and hardcoded math."""
-        from cartoload.downloader.wmts.download import WMTSDownloader
+        from cartoload.source.wmts.download import WmtsDownloader
 
         # Swiss bounding box in WGS84
         bbox_wgs84 = (5.96, 45.82, 10.49, 47.81)
@@ -384,7 +384,7 @@ class TestGoogleMapsCompatibleMatchesHardcodedMath:
         )  # zoom 10 maps to index 2 in our 3-entry fixture
 
         # Get tile indices from hardcoded math
-        hardcoded_tiles = set(WMTSDownloader._bbox_to_tile_indices(bbox_wgs84, 10))
+        hardcoded_tiles = set(WmtsDownloader._bbox_to_tile_indices(bbox_wgs84, 10))
 
         # For zoom 10, the TMS fixture only has 3 entries, so we just
         # verify both approaches produce valid results

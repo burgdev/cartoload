@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
-import io
 from pathlib import Path
 from unittest.mock import MagicMock
 
 
 from cartoload.config import LayerConfig
-from cartoload.downloader.wmts.download import WMTSDownloader
+from cartoload.source.wmts.download import WmtsDownloader
 from cartoload.exporters.garmin_img import GarminImgExporter
-from cartoload.processor.batch import BatchTileProcessor
+from cartoload.processor.wmts.batch import BatchTileProcessor
+
+from helpers import (
+    make_jpeg as _make_jpeg,
+    write_tile_with_world_file as _write_tile_with_world_file,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -18,47 +22,12 @@ from cartoload.processor.batch import BatchTileProcessor
 # ---------------------------------------------------------------------------
 
 
-def _make_jpeg(width: int = 256, height: int = 256) -> bytes:
-    """Create a minimal JPEG image."""
-    from PIL import Image
-
-    img = Image.new("RGB", (width, height), color=(128, 128, 128))
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=85)
-    return buf.getvalue()
-
-
-def _write_tile_with_world_file(
-    tile_path: Path,
-    pixel_size_x: float = 0.01,
-    pixel_size_y: float = -0.01,
-    top_left_x: float = 7.0,
-    top_left_y: float = 47.0,
-) -> Path:
-    """Write a JPEG tile + world file to the given path."""
-    tile_path.parent.mkdir(parents=True, exist_ok=True)
-    jpeg_bytes = _make_jpeg()
-    tile_path.write_bytes(jpeg_bytes)
-
-    # Write world file
-    wf_path = tile_path.with_suffix(".jgw")
-    wf_path.write_text(
-        f"{pixel_size_x:.10f}\n"
-        f"0.0000000000\n"
-        f"0.0000000000\n"
-        f"{pixel_size_y:.10f}\n"
-        f"{top_left_x:.10f}\n"
-        f"{top_left_y:.10f}\n"
-    )
-    return tile_path
-
-
 def _make_downloader(
     tmp_path: Path,
     source_id: str = "test_source",
     crs: str | None = None,
-) -> WMTSDownloader:
-    return WMTSDownloader(
+) -> WmtsDownloader:
+    return WmtsDownloader(
         source_id=source_id,
         url_template="https://example.com/{z}/{x}/{y}.jpeg",
         cache_dir=tmp_path / "cache",
@@ -68,7 +37,7 @@ def _make_downloader(
 
 
 def _write_cached_tiles(
-    downloader: WMTSDownloader,
+    downloader: WmtsDownloader,
     tile_coords: list[tuple[int, int]],
     zoom: int,
 ) -> None:
@@ -281,7 +250,7 @@ class TestGetSourceTilePath:
 
     def test_non_wmts_returns_none(self) -> None:
         proc = BatchTileProcessor()
-        dl = MagicMock(spec=[])  # Not a WMTSDownloader
+        dl = MagicMock(spec=[])  # Not a WmtsDownloader
 
         path = proc._get_source_tile_path(dl, 541, 362, 10)
         assert path is None

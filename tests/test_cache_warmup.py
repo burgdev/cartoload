@@ -141,7 +141,7 @@ class TestCacheWarmup:
         cache_dir = tmp_path / "cache"
 
         # Pre-create tiles in cache so the pipeline succeeds
-        from cartoload.downloader.wmts.download import WMTSDownloader
+        from cartoload.source.wmts.download import WmtsDownloader
         from cartoload.pipeline import _compute_tile_coords
         from cartoload.config import LayerConfig
 
@@ -153,7 +153,7 @@ class TestCacheWarmup:
             zoom_levels=[10],
             bounds={"west": 7.0, "east": 7.5, "south": 46.0, "north": 46.5},
         )
-        dl = WMTSDownloader(
+        dl = WmtsDownloader(
             source_id="test_src",
             url_template="https://example.com/{z}/{x}/{y}.jpeg",
             cache_dir=cache_dir,

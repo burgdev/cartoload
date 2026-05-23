@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 
 from ..exporters.garmin_img_model import TileMetadata
-from .rasterio_warp import compute_bounds_4326
+from cartoload.tile_math import compute_bounds_4326
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ def _resolve_source_path(downloader, x: int, y: int, zoom: int) -> Path | None:
     """Resolve the source tile cache path from the downloader.
 
     Uses the downloader's _cache_path method if available (duck typing),
-    falling back to isinstance check for WMTSDownloader.
+    falling back to isinstance check for WmtsDownloader.
     """
     if hasattr(downloader, "_cache_path"):
         return downloader._cache_path(x, y, zoom)

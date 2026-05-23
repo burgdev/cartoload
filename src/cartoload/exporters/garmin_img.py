@@ -7,7 +7,8 @@ import struct
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from .base import BaseExporter
 from .garmin_img_model import (
@@ -29,12 +30,10 @@ from .garmin_img_writer import (
     TileEncoder,
     TileExtractor,
 )
+from ..utils import ExportProgressCallback
 
 if TYPE_CHECKING:
     from cartoload.config import LayerConfig
-
-# Type alias for the export progress callback
-ExportProgressCallback = Callable[[str, int, int], None]
 
 logger = logging.getLogger(__name__)
 
@@ -990,7 +989,7 @@ class GarminImgExporter(BaseExporter):
         }
         from functools import partial
 
-        from ..processor.rasterio_warp import warp_tile_to_jpeg
+        from ..processor.warp import warp_tile_to_jpeg
 
         tile_processor = None
         if tile_processor_override is not None:

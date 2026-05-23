@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from cartoload.downloader.stac_query import query_stac_collection
+from cartoload.source.stac.query import query_stac_collection
 
 
 def _make_asset_finder(href: str = "https://example.com/asset.tif"):
@@ -48,7 +48,7 @@ BBOX = [7.0, 46.0, 8.0, 47.0]
 class TestQueryStacCollection:
     """Tests for query_stac_collection."""
 
-    @patch("cartoload.downloader.stac_query.requests.get")
+    @patch("cartoload.source.stac.query.requests.get")
     def test_basic_query_returns_items(self, mock_get):
         finder = _make_asset_finder()
         items = [_make_item("item1"), _make_item("item2")]
@@ -64,7 +64,7 @@ class TestQueryStacCollection:
         assert result[0] == ("item1", "https://example.com/asset.tif", None)
         assert result[1] == ("item2", "https://example.com/asset.tif", None)
 
-    @patch("cartoload.downloader.stac_query.requests.get")
+    @patch("cartoload.source.stac.query.requests.get")
     def test_empty_features_returns_empty(self, mock_get):
         finder = _make_asset_finder()
         mock_get.return_value = _make_stac_response([])
@@ -77,7 +77,7 @@ class TestQueryStacCollection:
 
         assert result == []
 
-    @patch("cartoload.downloader.stac_query.requests.get")
+    @patch("cartoload.source.stac.query.requests.get")
     def test_non_overlapping_items_filtered(self, mock_get):
         finder = _make_asset_finder()
         # item1 overlaps bbox, item2 is far away
@@ -96,7 +96,7 @@ class TestQueryStacCollection:
         assert len(result) == 1
         assert result[0][0] == "item1"
 
-    @patch("cartoload.downloader.stac_query.requests.get")
+    @patch("cartoload.source.stac.query.requests.get")
     def test_asset_finder_called_per_item(self, mock_get):
         finder = MagicMock(side_effect=["url1", None, "url3"])
         items = [_make_item("a"), _make_item("b"), _make_item("c")]
@@ -112,7 +112,7 @@ class TestQueryStacCollection:
         assert result[0][0] == "a"
         assert result[1][0] == "c"
 
-    @patch("cartoload.downloader.stac_query.requests.get")
+    @patch("cartoload.source.stac.query.requests.get")
     def test_request_params(self, mock_get):
         finder = _make_asset_finder()
         mock_get.return_value = _make_stac_response([])
@@ -129,7 +129,7 @@ class TestQueryStacCollection:
         assert call_args[1]["params"]["bbox"] == "7.0,46.0,8.0,47.0"
         assert call_args[1]["params"]["limit"] == "500"
 
-    @patch("cartoload.downloader.stac_query.requests.get")
+    @patch("cartoload.source.stac.query.requests.get")
     def test_request_error_raises(self, mock_get):
         import requests
 
@@ -143,7 +143,7 @@ class TestQueryStacCollection:
                 finder,
             )
 
-    @patch("cartoload.downloader.stac_query.requests.get")
+    @patch("cartoload.source.stac.query.requests.get")
     def test_item_without_bbox_included(self, mock_get):
         """Items without bbox are included (no spatial filter applied)."""
         finder = _make_asset_finder()
@@ -160,7 +160,7 @@ class TestQueryStacCollection:
         assert len(result) == 1
         assert result[0][0] == "no_bbox"
 
-    @patch("cartoload.downloader.stac_query.requests.get")
+    @patch("cartoload.source.stac.query.requests.get")
     def test_trailing_slash_in_url(self, mock_get):
         finder = _make_asset_finder()
         mock_get.return_value = _make_stac_response([])

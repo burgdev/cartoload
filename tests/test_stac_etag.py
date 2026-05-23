@@ -6,7 +6,7 @@ import json
 import tempfile
 from unittest.mock import MagicMock, patch
 
-from cartoload.downloader.stac import STACDownloader
+from cartoload.source.stac.downloader import STACDownloader
 
 
 class TestCheckFreshness:
@@ -30,7 +30,7 @@ class TestCheckFreshness:
         meta_path = tmp_path / "item1.json"
         meta_path.write_text(json.dumps({"etag": '"abc123"'}))
 
-        with patch("cartoload.downloader.stac.requests.head") as mock_head:
+        with patch("cartoload.source.stac.downloader.requests.head") as mock_head:
             mock_head.return_value = MagicMock(
                 status_code=200, ok=True, headers={"ETag": '"abc123"'}
             )
@@ -47,7 +47,7 @@ class TestCheckFreshness:
         meta_path = tmp_path / "item1.json"
         meta_path.write_text(json.dumps({"etag": '"old"'}))
 
-        with patch("cartoload.downloader.stac.requests.head") as mock_head:
+        with patch("cartoload.source.stac.downloader.requests.head") as mock_head:
             mock_head.return_value = MagicMock(
                 status_code=200, ok=True, headers={"ETag": '"new"'}
             )
@@ -66,7 +66,7 @@ class TestCheckFreshness:
             json.dumps({"last_modified": "Wed, 01 Jan 2025 00:00:00 GMT"})
         )
 
-        with patch("cartoload.downloader.stac.requests.head") as mock_head:
+        with patch("cartoload.source.stac.downloader.requests.head") as mock_head:
             mock_head.return_value = MagicMock(
                 status_code=200,
                 ok=True,
@@ -85,7 +85,7 @@ class TestCheckFreshness:
         meta_path = tmp_path / "item1.json"
         meta_path.write_text(json.dumps({"etag": '"abc"'}))
 
-        with patch("cartoload.downloader.stac.requests.head") as mock_head:
+        with patch("cartoload.source.stac.downloader.requests.head") as mock_head:
             mock_head.return_value = MagicMock(status_code=405, ok=False)
             result = self.dl._check_freshness(
                 "https://example.com/item1.tif", cache_path
@@ -102,7 +102,7 @@ class TestCheckFreshness:
         meta_path = tmp_path / "item1.json"
         meta_path.write_text(json.dumps({"etag": '"abc"'}))
 
-        with patch("cartoload.downloader.stac.requests.head") as mock_head:
+        with patch("cartoload.source.stac.downloader.requests.head") as mock_head:
             mock_head.side_effect = requests.RequestException("timeout")
             result = self.dl._check_freshness(
                 "https://example.com/item1.tif", cache_path
@@ -117,7 +117,7 @@ class TestCheckFreshness:
         meta_path = tmp_path / "item1.json"
         meta_path.write_text(json.dumps({"etag": '"abc"'}))
 
-        with patch("cartoload.downloader.stac.requests.head") as mock_head:
+        with patch("cartoload.source.stac.downloader.requests.head") as mock_head:
             mock_head.return_value = MagicMock(status_code=200, ok=True, headers={})
             result = self.dl._check_freshness(
                 "https://example.com/item1.tif", cache_path
@@ -138,7 +138,7 @@ class TestWriteMetadata:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_bytes(b"fake")
 
-        with patch("cartoload.downloader.stac.requests.head") as mock_head:
+        with patch("cartoload.source.stac.downloader.requests.head") as mock_head:
             mock_head.return_value = MagicMock(
                 status_code=200,
                 ok=True,
@@ -165,7 +165,7 @@ class TestWriteMetadata:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_bytes(b"fake")
 
-        with patch("cartoload.downloader.stac.requests.head") as mock_head:
+        with patch("cartoload.source.stac.downloader.requests.head") as mock_head:
             mock_head.side_effect = requests.RequestException("fail")
             self.dl._write_metadata(cache_path, "https://example.com/item1.tif")
 

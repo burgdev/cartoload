@@ -130,7 +130,7 @@ class TestEndToEnd:
         """Run the full pipeline end-to-end: download → process → export."""
         import asyncio
 
-        from cartoload.downloader.stac import STACDownloader
+        from cartoload.source.stac.downloader import STACDownloader
         from cartoload.template import expand
 
         # Place the GeoTIFF in the STAC cache structure
@@ -171,7 +171,7 @@ class TestEndToEnd:
         """Verify the output file starts with the DSKIMG magic bytes."""
         import asyncio
 
-        from cartoload.downloader.stac import STACDownloader
+        from cartoload.source.stac.downloader import STACDownloader
         from cartoload.template import expand
 
         cache_dir = tmp_path / "cache"

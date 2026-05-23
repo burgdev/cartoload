@@ -306,7 +306,7 @@ class TestDownloadCommand:
 
     @patch("cartoload.cli.get_downloader")
     def test_download_invokes_downloader(self, mock_get_dl, runner, tmp_path):
-        from cartoload.downloader.stac import STACDownloader
+        from cartoload.source.stac.downloader import STACDownloader
 
         cfg = _make_config_file(tmp_path)
         mock_dl = MagicMock(spec=STACDownloader)

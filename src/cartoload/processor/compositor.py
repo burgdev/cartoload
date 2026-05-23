@@ -7,13 +7,13 @@ are treated as fully opaque. Output is always RGB JPEG bytes.
 
 from __future__ import annotations
 
-import io
 import logging
 from pathlib import Path
 
 from PIL import Image
 
 from ..config import CompositeSubLayer
+from ..utils import ensure_rgba
 
 logger = logging.getLogger(__name__)
 
@@ -90,10 +90,9 @@ def encode_composite_to_jpeg(image: Image.Image, quality: int = 85) -> bytes:
     Returns:
         JPEG bytes.
     """
-    rgb = image.convert("RGB")
-    buf = io.BytesIO()
-    rgb.save(buf, format="JPEG", quality=95, optimize=True)
-    return buf.getvalue()
+    from ..utils import encode_jpeg
+
+    return encode_jpeg(image, quality=95)
 
 
 def load_tile_as_rgba(path: Path) -> Image.Image | None:
@@ -113,15 +112,7 @@ def load_tile_as_rgba(path: Path) -> Image.Image | None:
 
     try:
         img = Image.open(path)
-        if img.mode == "RGBA":
-            return img
-        elif img.mode == "RGB":
-            return img.convert("RGBA")
-        elif img.mode == "P":
-            # Palette mode — convert through RGBA to preserve transparency
-            return img.convert("RGBA")
-        else:
-            return img.convert("RGBA")
+        return ensure_rgba(img)
     except Exception as e:
         logger.warning("Failed to load tile %s: %s", path, e)
         return None
@@ -230,7 +221,7 @@ def _cache_path(
 ) -> Path:
     """Resolve a tile cache path.
 
-    Matches the WMTSDownloader cache structure:
+    Matches the WmtsDownloader cache structure:
     - With cache_key: cache_dir / source_id / cache_key / zoom / x / y.<ext>
     - Without cache_key: cache_dir / source_id / zoom / x / y.<ext>
     """

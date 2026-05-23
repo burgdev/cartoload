@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
-from cartoload.downloader.wmts.download import WMTSDownloader
+from cartoload.source.wmts.download import WmtsDownloader
 
 
 # ---------------------------------------------------------------------------
@@ -23,8 +23,8 @@ def _make_downloader(
     tmp_path: Path,
     url_template: str = "https://example.com/{z}/{x}/{y}.jpeg",
     **kwargs,
-) -> WMTSDownloader:
-    return WMTSDownloader(
+) -> WmtsDownloader:
+    return WmtsDownloader(
         source_id="test_source",
         url_template=url_template,
         cache_dir=tmp_path / "cache",
@@ -50,7 +50,7 @@ class TestComputeTileBounds:
 
     def test_zoom0_covers_world(self) -> None:
         """At zoom 0, tile (0,0) should cover the full Web Mercator extent."""
-        left, top, right, bottom = WMTSDownloader._compute_tile_bounds(0, 0, 0)
+        left, top, right, bottom = WmtsDownloader._compute_tile_bounds(0, 0, 0)
         half_world = 20037508.342789244
         assert abs(left - (-half_world)) < 0.01
         assert abs(top - half_world) < 0.01  # top (north edge) is +half_world
@@ -59,7 +59,7 @@ class TestComputeTileBounds:
 
     def test_zoom10_tile_541_362(self) -> None:
         """Known tile (541, 362, z=10) should have correct bounds."""
-        left, top, right, bottom = WMTSDownloader._compute_tile_bounds(541, 362, 10)
+        left, top, right, bottom = WmtsDownloader._compute_tile_bounds(541, 362, 10)
         tile_size = 40075016.68557849 / 2**10
         expected_left = ORIGIN + 541 * tile_size
         expected_top = -ORIGIN - 362 * tile_size  # -ORIGIN = +half_world
@@ -70,22 +70,22 @@ class TestComputeTileBounds:
 
     def test_adjacent_tiles_touch(self) -> None:
         """Adjacent tiles should share boundaries exactly."""
-        left1, _top1, right1, _bottom1 = WMTSDownloader._compute_tile_bounds(0, 0, 5)
-        left2, _top2, right2, _bottom2 = WMTSDownloader._compute_tile_bounds(1, 0, 5)
+        left1, _top1, right1, _bottom1 = WmtsDownloader._compute_tile_bounds(0, 0, 5)
+        left2, _top2, right2, _bottom2 = WmtsDownloader._compute_tile_bounds(1, 0, 5)
         assert abs(right1 - left2) < 1e-6
 
-        _left3, top3, _right3, bottom3 = WMTSDownloader._compute_tile_bounds(0, 0, 5)
-        _left4, top4, _right4, bottom4 = WMTSDownloader._compute_tile_bounds(0, 1, 5)
+        _left3, top3, _right3, bottom3 = WmtsDownloader._compute_tile_bounds(0, 0, 5)
+        _left4, top4, _right4, bottom4 = WmtsDownloader._compute_tile_bounds(0, 1, 5)
         assert abs(bottom3 - top4) < 1e-6
 
     def test_tile_size_halves_per_zoom(self) -> None:
         """Tile size should halve with each zoom level."""
-        _, _, r0, _ = WMTSDownloader._compute_tile_bounds(0, 0, 0)
-        l0, _, _, _ = WMTSDownloader._compute_tile_bounds(0, 0, 0)
+        _, _, r0, _ = WmtsDownloader._compute_tile_bounds(0, 0, 0)
+        l0, _, _, _ = WmtsDownloader._compute_tile_bounds(0, 0, 0)
         size0 = r0 - l0
 
-        _, _, r1, _ = WMTSDownloader._compute_tile_bounds(0, 0, 1)
-        l1, _, _, _ = WMTSDownloader._compute_tile_bounds(0, 0, 1)
+        _, _, r1, _ = WmtsDownloader._compute_tile_bounds(0, 0, 1)
+        l1, _, _, _ = WmtsDownloader._compute_tile_bounds(0, 0, 1)
         size1 = r1 - l1
 
         assert abs(size0 / 2 - size1) < 1e-6
@@ -207,7 +207,7 @@ class TestIsCached:
         tile_path.write_bytes(b"cached-tile")
 
         # Tile exists but no world file → should regenerate without download
-        with patch("cartoload.downloader.wmts.download.requests.get") as mock_get:
+        with patch("cartoload.source.wmts.download.requests.get") as mock_get:
             result = dl.download_tile(0, 0, 1)
 
         mock_get.assert_not_called()
@@ -227,7 +227,7 @@ class TestGeoreferencedVRT:
         """download_tile should create both tile and world file."""
         dl = _make_downloader(tmp_path)
         with patch(
-            "cartoload.downloader.wmts.download.requests.get",
+            "cartoload.source.wmts.download.requests.get",
             return_value=_mock_response(),
         ):
             path = dl.download_tile(541, 362, 10)
@@ -247,7 +247,7 @@ class TestGeoreferencedVRT:
         zoom = 2
 
         with patch(
-            "cartoload.downloader.wmts.download.requests.get",
+            "cartoload.source.wmts.download.requests.get",
             return_value=_mock_response(),
         ):
             results = dl.download_grid(bbox, zoom)
@@ -258,11 +258,11 @@ class TestGeoreferencedVRT:
             assert world_file.exists(), f"Missing world file for {tile_path}"
 
     def test_world_file_suffix_jpeg(self) -> None:
-        assert WMTSDownloader._world_file_suffix("jpeg") == ".jgw"
-        assert WMTSDownloader._world_file_suffix("jpg") == ".jgw"
+        assert WmtsDownloader._world_file_suffix("jpeg") == ".jgw"
+        assert WmtsDownloader._world_file_suffix("jpg") == ".jgw"
 
     def test_world_file_suffix_png(self) -> None:
-        assert WMTSDownloader._world_file_suffix("png") == ".pgw"
+        assert WmtsDownloader._world_file_suffix("png") == ".pgw"
 
     def test_world_file_path_method(self, tmp_path: Path) -> None:
         """_world_file_path should return the correct path."""

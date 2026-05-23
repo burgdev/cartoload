@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import io
 from pathlib import Path
 
 import pytest
 
 from cartoload.config import LayerConfig, SourceConfig, TargetConfig
-from cartoload.downloader.wmts.download import WMTSDownloader
+from cartoload.source.wmts.download import WmtsDownloader
 from cartoload.exporters.garmin_img import GarminImgExporter
 from cartoload.pipeline import (
     DownloadError,
@@ -19,34 +18,10 @@ from cartoload.pipeline import (
     build_layer,
     get_downloader,
     get_exporter,
-    resolve_source,
+    resolve_source_config,
 )
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _make_jpeg(width: int = 256, height: int = 256) -> bytes:
-    """Create a minimal JPEG image."""
-    from PIL import Image
-
-    img = Image.new("RGB", (width, height), color=(128, 128, 128))
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=85)
-    return buf.getvalue()
-
-
-def _write_tile_with_world_file(
-    tile_path: Path, top_left_x: float = 7.0, top_left_y: float = 47.0
-) -> Path:
-    """Write a JPEG tile + world file to the given path."""
-    tile_path.parent.mkdir(parents=True, exist_ok=True)
-    tile_path.write_bytes(_make_jpeg())
-    wf = tile_path.with_suffix(".jgw")
-    wf.write_text(f"0.01\n0.0\n0.0\n-0.01\n{top_left_x}\n{top_left_y}\n")
-    return tile_path
+from helpers import write_tile_with_world_file as _write_tile_with_world_file
 
 
 # ---------------------------------------------------------------------------
@@ -102,10 +77,10 @@ class TestGetDownloader:
             get_downloader(stac_source, tmp_path)
 
     def test_wmts_returns_wmts_downloader(self, wmts_source, tmp_path):
-        from cartoload.downloader.wmts.download import WMTSDownloader
+        from cartoload.source.wmts.download import WmtsDownloader
 
         dl = get_downloader(wmts_source, tmp_path)
-        assert isinstance(dl, WMTSDownloader)
+        assert isinstance(dl, WmtsDownloader)
 
     def test_unknown_type_raises_pipeline_error(self, tmp_path):
         unknown_source = SourceConfig(id="bad", type="xyz", urls=["https://x"])
@@ -143,23 +118,23 @@ class TestGetExporter:
 
 
 # ---------------------------------------------------------------------------
-# resolve_source
+# resolve_source_config
 # ---------------------------------------------------------------------------
 
 
 class TestResolveSource:
     def test_found(self, layer, sources):
-        result = resolve_source(layer, sources)
+        result = resolve_source_config(layer, sources)
         assert result.id == "wmts_src"
 
     def test_missing_raises(self, layer):
         with pytest.raises(PipelineError, match="unknown source"):
-            resolve_source(layer, {})
+            resolve_source_config(layer, {})
 
     def test_missing_with_available(self, layer):
         extra = SourceConfig(id="other", type="stac", urls=["https://x"])
         with pytest.raises(PipelineError, match="other"):
-            resolve_source(layer, {"other": extra})
+            resolve_source_config(layer, {"other": extra})
 
 
 # ---------------------------------------------------------------------------
@@ -335,7 +310,7 @@ class TestIntegrationCacheToImg:
             "north": 45.5,
         }
 
-        dl = WMTSDownloader(
+        dl = WmtsDownloader(
             source_id="wmts_src",
             url_template="https://example.com/{z}/{x}/{y}.jpeg",
             cache_dir=cache_dir,
@@ -425,7 +400,7 @@ class TestIntegrationDownloadReprojectImg:
             bounds=bounds,
         )
 
-        dl = WMTSDownloader(
+        dl = WmtsDownloader(
             source_id="wmts_src",
             url_template="https://example.com/{z}/{x}/{y}.jpeg",
             cache_dir=cache_dir,

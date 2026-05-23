@@ -54,7 +54,7 @@ class TargetLayerEntry:
 
     name: str = ""
     source: str = ""
-    format: str = ""  # geotiff, gpkg, wmts — selects the LayerProvider
+    format: str = ""  # geotiff, gpkg, wmts — selects the LayerProcessor
     zoom_levels: list[int] = field(default_factory=list)
     opacity: float | dict[int, float] = 1.0
     ref: str | None = None
@@ -91,7 +91,7 @@ class LayerConfig:
     name: str
     description: str = ""
     type: str = "raster"  # raster, raster_overlay, vector
-    format: str = ""  # geotiff, gpkg, wmts — selects the LayerProvider
+    format: str = ""  # geotiff, gpkg, wmts — selects the LayerProcessor
     source: str = ""
     source_args: dict[str, str] = field(default_factory=dict)
     asset_filter: dict[str, str] | None = None
@@ -148,9 +148,9 @@ class Config:
 
 
 # Allowed source types (fetch methods)
-ALLOWED_SOURCE_TYPES = {"stac", "wmts", "path"}
+ALLOWED_SOURCE_TYPES = {"stac", "wmts", "xyz", "path"}
 
-# Allowed layer formats (data formats — selects the LayerProvider)
+# Allowed layer formats (data formats — selects the LayerProcessor)
 ALLOWED_FORMATS = {"geotiff", "gpkg", "wmts"}
 
 # Required fields for each source type

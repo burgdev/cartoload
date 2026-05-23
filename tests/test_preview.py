@@ -9,7 +9,7 @@ import pytest
 from PIL import Image
 
 from cartoload.config import LayerConfig
-from cartoload.downloader.wmts.download import WMTSDownloader
+from cartoload.source.wmts.download import WmtsDownloader
 from cartoload.processor.preview import (
     assemble_preview,
     compute_preview_center,
@@ -18,24 +18,16 @@ from cartoload.processor.preview import (
 )
 from cartoload.pipeline import _compute_tile_coords
 
+from helpers import make_jpeg as _make_jpeg
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _make_jpeg(
-    width: int = 256, height: int = 256, color: tuple = (128, 128, 128)
-) -> bytes:
-    """Create a minimal JPEG image."""
-    img = Image.new("RGB", (width, height), color=color)
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=85)
-    return buf.getvalue()
-
-
 def _cache_tiles(
-    dl: WMTSDownloader,
+    dl: WmtsDownloader,
     coords: list[tuple[int, int]],
     zoom: int,
 ) -> None:
@@ -120,7 +112,7 @@ class TestComputePreviewGrid:
 
 class TestAssemblePreview:
     def test_single_tile(self, tmp_path: Path):
-        dl = WMTSDownloader(
+        dl = WmtsDownloader(
             source_id="src",
             url_template="https://example.com/{z}/{x}/{y}.jpeg",
             cache_dir=tmp_path,
@@ -133,7 +125,7 @@ class TestAssemblePreview:
         assert result[:2] == b"\xff\xd8"  # JPEG magic
 
     def test_multiple_tiles(self, tmp_path: Path):
-        dl = WMTSDownloader(
+        dl = WmtsDownloader(
             source_id="src",
             url_template="https://example.com/{z}/{x}/{y}.jpeg",
             cache_dir=tmp_path,
@@ -148,7 +140,7 @@ class TestAssemblePreview:
         assert img.width > 256 or img.height > 256
 
     def test_no_tiles_returns_none(self, tmp_path: Path):
-        dl = WMTSDownloader(
+        dl = WmtsDownloader(
             source_id="src",
             url_template="https://example.com/{z}/{x}/{y}.jpeg",
             cache_dir=tmp_path,
@@ -157,7 +149,7 @@ class TestAssemblePreview:
         assert result is None
 
     def test_empty_coords_returns_none(self, tmp_path: Path):
-        dl = WMTSDownloader(
+        dl = WmtsDownloader(
             source_id="src",
             url_template="https://example.com/{z}/{x}/{y}.jpeg",
             cache_dir=tmp_path,
@@ -173,7 +165,7 @@ class TestAssemblePreview:
 
 class TestGeneratePreviews:
     def test_generates_preview_file(self, tmp_path: Path):
-        dl = WMTSDownloader(
+        dl = WmtsDownloader(
             source_id="src",
             url_template="https://example.com/{z}/{x}/{y}.jpeg",
             cache_dir=tmp_path / "cache",
@@ -198,7 +190,7 @@ class TestGeneratePreviews:
         assert paths[0].stat().st_size > 0
 
     def test_skips_zoom_with_no_tiles(self, tmp_path: Path):
-        dl = WMTSDownloader(
+        dl = WmtsDownloader(
             source_id="src",
             url_template="https://example.com/{z}/{x}/{y}.jpeg",
             cache_dir=tmp_path / "cache",
@@ -242,7 +234,7 @@ class TestGeneratePreviews:
             assert c in cached
 
     def test_output_location(self, tmp_path: Path):
-        dl = WMTSDownloader(
+        dl = WmtsDownloader(
             source_id="src",
             url_template="https://example.com/{z}/{x}/{y}.jpeg",
             cache_dir=tmp_path / "cache",

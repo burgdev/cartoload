@@ -140,7 +140,7 @@ class TestComputeTileMetadata:
 
     def test_bounds_match_compute_bounds_4326(self):
         """Bounds should match compute_bounds_4326 exactly."""
-        from cartoload.processor.rasterio_warp import compute_bounds_4326
+        from cartoload.processor.warp import compute_bounds_4326
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "source/15/17000/11300.jpeg"

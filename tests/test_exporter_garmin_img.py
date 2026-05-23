@@ -789,122 +789,6 @@ class TestIMGFileWrite:
         total_tile_bytes = len(tile_data) * 5
         assert len(data) >= total_tile_bytes + 4096  # tiles + overhead
 
-    @pytest.mark.skip(reason="Tile index table removed - replaced by LBL28/LBL29")
-    def test_tile_index_offsets_point_to_jpeg_data(self, tmp_path):
-        """Verify that tile index entries point to valid JPEG SOI markers.
-
-        Regression test: tile index offsets must be relative to GMP subfile start,
-        not relative to the tile data region within GMP.
-
-        NOTE: This test is obsolete. Tile index table has been replaced by
-        LBL28 (image index) and LBL29 (image storage) sections.
-        """
-        output = tmp_path / "tile_index_test.img"
-        zoom_levels = [
-            ZoomLevel(level_number=10, zoom_code=0x81),
-            ZoomLevel(level_number=12, zoom_code=0x00),
-        ]
-        # Create distinguishable tile data for each zoom level
-        tile_10a = b"\xff\xd8\xff\xe0" + b"\x0a" * 500
-        tile_10b = b"\xff\xd8\xff\xe0" + b"\x0b" * 500
-        tile_12a = b"\xff\xd8\xff\xe0" + b"\xc0" * 500
-        tile_12b = b"\xff\xd8\xff\xe0" + b"\xc1" * 500
-        tile_12c = b"\xff\xd8\xff\xe0" + b"\xc2" * 500
-
-        compressed_tiles = {
-            10: [tile_10a, tile_10b],
-            12: [tile_12a, tile_12b, tile_12c],
-        }
-        img_file = _make_img_file(zoom_levels=zoom_levels)
-        writer = IMGWriter(output)
-        writer.write(img_file, compressed_tiles)
-
-        data = output.read_bytes()
-
-        # Compute GMP layout to find GMP start offset
-        computer = LayoutComputer(img_file, compressed_tiles)
-        layouts = computer.compute()
-        gmp_layout = next(lay for lay in layouts if lay.subfile_type == SubfileType.GMP)
-        gmp_start = gmp_layout.start_offset
-
-        # Compute the tile index position within the GMP subfile
-        # by reproducing the GMP writer's layout calculation
-        from cartoload.exporters.garmin_img_writer import (
-            GMP_CONTAINER_HEADER_SIZE,
-            LBL_HEADER_LENGTH,
-            NET_HEADER_LENGTH,
-            RGN_HEADER_LENGTH,
-            TRE_HEADER_LENGTH,
-        )
-
-        copyright_str = img_file.copyright_string or "Copyright GARMIN."
-        copyright_bytes = copyright_str.encode("cp1252") + b"\x00" + b"\x00"
-        pos = 0
-        pos += GMP_CONTAINER_HEADER_SIZE
-        pos += len(copyright_bytes)
-        pos += TRE_HEADER_LENGTH
-        map_info = b"Raster Map\0" + copyright_str.encode("cp1252") + b"\x00"
-        pos += len(map_info)
-        pos += RGN_HEADER_LENGTH
-        pos += LBL_HEADER_LENGTH
-        pos += NET_HEADER_LENGTH
-        pos += 6  # TRE copyright
-        pos += len(zoom_levels) * 8  # subdivisions
-        pos += len(zoom_levels) * 4  # map levels
-        pos += 1582  # RGN data
-        total_tiles = 5
-        for i in range(total_tiles):
-            pos += len(f"{i}.jpg\0".encode("ascii"))
-        tile_index_pos = pos
-
-        # Read each tile index entry and verify it points to a JPEG SOI marker
-        for i in range(total_tiles):
-            offset_in_gmp = struct.unpack_from(
-                "<I", data, gmp_start + tile_index_pos + i * 4
-            )[0]
-            abs_pos = gmp_start + offset_in_gmp
-            assert data[abs_pos : abs_pos + 2] == b"\xff\xd8", (
-                f"Tile {i}: offset {offset_in_gmp} (abs {abs_pos}) "
-                f"does not point to JPEG SOI, found {data[abs_pos : abs_pos + 4].hex()}"
-            )
-
-    @pytest.mark.skip(reason="Tile index table removed - replaced by LBL28/LBL29")
-    def test_tile_index_offsets_multi_zoom(self, tmp_path):
-        """Verify tile offsets are correct with 3 zoom levels and varying tile counts.
-
-        NOTE: This test is obsolete. Tile index table has been replaced by
-        LBL28 (image index) and LBL29 (image storage) sections.
-        """
-        output = tmp_path / "multi_zoom_index.img"
-        zoom_levels = [
-            ZoomLevel(level_number=10, zoom_code=0x82),
-            ZoomLevel(level_number=11, zoom_code=0x01),
-            ZoomLevel(level_number=12, zoom_code=0x00),
-        ]
-        compressed_tiles = {
-            10: [b"\xff\xd8" + b"\x10" * 200] * 2,
-            11: [b"\xff\xd8" + b"\x11" * 200] * 5,
-            12: [b"\xff\xd8" + b"\x12" * 200] * 12,
-        }
-        img_file = _make_img_file(zoom_levels=zoom_levels)
-        writer = IMGWriter(output)
-        writer.write(img_file, compressed_tiles)
-
-        data = output.read_bytes()
-
-        # Count JPEG SOI markers in the file
-        jpeg_count = 0
-        p = 0
-        while True:
-            idx = data.find(b"\xff\xd8", p)
-            if idx == -1:
-                break
-            jpeg_count += 1
-            p = idx + 1
-
-        # Should find exactly 2 + 5 + 12 = 19 JPEG markers
-        assert jpeg_count == 19, f"Expected 19 JPEG markers, found {jpeg_count}"
-
 
 # ---------------------------------------------------------------------------
 # GarminImgExporter integration
@@ -3299,7 +3183,7 @@ class TestWarpTileQuality:
 
     def test_warp_ignores_quality_param(self, tmp_path):
         """Warp always encodes at high quality, ignoring quality parameter."""
-        from cartoload.processor.rasterio_warp import warp_tile_to_jpeg
+        from cartoload.processor.warp import warp_tile_to_jpeg
 
         tile_path = self._make_3857_jpeg(tmp_path)
 
@@ -3312,7 +3196,7 @@ class TestWarpTileQuality:
     def test_warp_output_is_valid_jpeg(self, tmp_path):
         """Warped output should be valid JPEG."""
         from PIL import Image
-        from cartoload.processor.rasterio_warp import warp_tile_to_jpeg
+        from cartoload.processor.warp import warp_tile_to_jpeg
 
         tile_path = self._make_3857_jpeg(tmp_path)
         result = warp_tile_to_jpeg(tile_path, 34178, 23118, 16, "EPSG:3857")

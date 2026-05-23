@@ -10,7 +10,6 @@ Tests the full pipeline from config resolution through export for:
 from __future__ import annotations
 
 import asyncio
-import io
 from pathlib import Path
 
 import pytest
@@ -21,35 +20,16 @@ from cartoload.config import (
     TargetConfig,
     TargetLayerEntry,
 )
-from cartoload.downloader.wmts.download import WMTSDownloader
+from cartoload.source.wmts.download import WmtsDownloader
 from cartoload.pipeline import _compute_tile_coords
-from cartoload.processor.unified_pipeline import build_target
+from cartoload.processor.pipeline import build_target
+
+from helpers import write_tile_with_world_file as _write_tile_with_world_file
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _make_jpeg(width: int = 256, height: int = 256) -> bytes:
-    """Create a minimal JPEG image."""
-    from PIL import Image
-
-    img = Image.new("RGB", (width, height), color=(128, 128, 128))
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=85)
-    return buf.getvalue()
-
-
-def _write_tile_with_world_file(
-    tile_path: Path, top_left_x: float = 7.0, top_left_y: float = 47.0
-) -> Path:
-    """Write a JPEG tile + world file to the given path."""
-    tile_path.parent.mkdir(parents=True, exist_ok=True)
-    tile_path.write_bytes(_make_jpeg())
-    wf = tile_path.with_suffix(".jgw")
-    wf.write_text(f"0.01\n0.0\n0.0\n-0.01\n{top_left_x}\n{top_left_y}\n")
-    return tile_path
 
 
 def _cache_tiles_for_bounds(
@@ -64,7 +44,7 @@ def _cache_tiles_for_bounds(
         zoom_levels=[zoom],
         bounds=bounds,
     )
-    dl = WMTSDownloader(
+    dl = WmtsDownloader(
         source_id=source_id,
         url_template="https://example.com/{z}/{x}/{y}.jpeg",
         cache_dir=cache_dir,

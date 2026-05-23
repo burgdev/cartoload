@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from cartoload.processor.vector_rasterizer import (
+from cartoload.processor.gpkg.vector_rasterizer import (
     draw_line,
     geo_to_tile_pixel,
     geometry_to_pixel_lines,
@@ -191,7 +191,7 @@ class TestVectorRasterizerIntegration:
         return path
 
     def test_read_features_with_reprojection(self, network_gpkg):
-        from cartoload.processor.vector_rasterizer import read_features
+        from cartoload.processor.gpkg.vector_rasterizer import read_features
 
         # bbox in EPSG:4326 around Davos
         bbox = (9.7, 46.75, 9.9, 46.85)
@@ -207,7 +207,7 @@ class TestVectorRasterizerIntegration:
     def test_render_tile(self, network_gpkg, network_qml):
         from cartoload.style import StyleEngine
         from cartoload.style.qml_parser import parse_qml
-        from cartoload.processor.vector_rasterizer import VectorRasterizer
+        from cartoload.processor.gpkg.vector_rasterizer import VectorRasterizer
 
         rules = parse_qml(network_qml)
         engine = StyleEngine(rules=rules)
@@ -231,7 +231,7 @@ class TestVectorRasterizerIntegration:
     def test_render_tiles_output(self, network_gpkg, network_qml, tmp_path):
         from cartoload.style import StyleEngine
         from cartoload.style.qml_parser import parse_qml
-        from cartoload.processor.vector_rasterizer import VectorRasterizer
+        from cartoload.processor.gpkg.vector_rasterizer import VectorRasterizer
 
         rules = parse_qml(network_qml)
         engine = StyleEngine(rules=rules)

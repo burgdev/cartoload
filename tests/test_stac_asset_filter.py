@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from cartoload.downloader.stac import STACDownloader, _find_geotiff_asset
+from cartoload.source.stac.downloader import STACDownloader, _find_geotiff_asset
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +157,7 @@ class TestQueryWithAssetFilter:
             ],
         }
 
-    @patch("cartoload.downloader.stac.requests.get")
+    @patch("cartoload.source.stac.downloader.requests.get")
     def test_query_with_filter_skips_non_matching_items(self, mock_get):
         """Items whose assets don't match the filter are skipped."""
         response_data = self._make_stac_response(
@@ -196,7 +196,7 @@ class TestQueryWithAssetFilter:
         assert results[0][0] == "item1"
         assert results[0][1] == "https://example.com/komb.tif"
 
-    @patch("cartoload.downloader.stac.requests.get")
+    @patch("cartoload.source.stac.downloader.requests.get")
     def test_query_with_filter_all_skipped(self, mock_get):
         """When no items match, returns empty list and logs warnings."""
         response_data = self._make_stac_response(
@@ -228,7 +228,7 @@ class TestQueryWithAssetFilter:
 
         assert results == []
 
-    @patch("cartoload.downloader.stac.requests.get")
+    @patch("cartoload.source.stac.downloader.requests.get")
     def test_query_without_filter_single_asset(self, mock_get):
         """Without filter and a single asset, returns that asset."""
         response_data = self._make_stac_response(
@@ -260,7 +260,7 @@ class TestQueryWithAssetFilter:
         assert len(results) == 1
         assert results[0][1] == "https://example.com/kgrs.tif"
 
-    @patch("cartoload.downloader.stac.requests.get")
+    @patch("cartoload.source.stac.downloader.requests.get")
     def test_query_without_filter_multiple_assets_raises(self, mock_get):
         """Without filter and multiple assets, raises ValueError."""
         response_data = self._make_stac_response(

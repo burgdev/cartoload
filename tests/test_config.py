@@ -25,7 +25,7 @@ from cartoload.config import (
     resolve_settings,
     resolve_target_layer_refs,
 )
-from cartoload.downloader.base import BaseDownloader
+from cartoload.source._base_downloader import BaseDownloader
 
 
 # ---------------------------------------------------------------------------

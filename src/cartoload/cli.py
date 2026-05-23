@@ -5,7 +5,6 @@ import math
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import click
@@ -19,8 +18,14 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
-from .cli_analyze import analyze
-from .config import load_config, resolve_settings, TargetConfig, TargetLayerEntry
+from .analysis.cli import analyze
+from .config import (
+    load_config,
+    resolve_settings,
+    LayerConfig,
+    TargetConfig,
+    TargetLayerEntry,
+)
 from .pipeline import (
     DownloadError,
     ExportError,
@@ -28,15 +33,16 @@ from .pipeline import (
     ProcessingError,
     build_target,
     get_downloader,
-    resolve_source,
+    resolve_source_config,
 )
+from .utils import human_size as _human_size
 from .processor.checkpoint import delete_checkpoint
-from .processor.build_summary import (
+from .processor.summary import (
     compute_build_summary,
     format_build_summary,
 )
-from .downloader.stac import STACDownloader
-from .downloader.wmts import WMTSDownloader
+from .source.stac.downloader import STACDownloader
+from .source.wmts import WmtsDownloader
 
 FOUR_GB = 4_294_967_296
 
@@ -133,18 +139,6 @@ def _parse_zoom(value: str | None) -> list[int] | None:
         raise click.BadParameter(f"Zoom levels must be integers, got '{value}'")
 
 
-def _human_size(size: int) -> str:
-    """Format a byte count as a human-readable string."""
-    value = float(size)
-    for unit in ("B", "KB", "MB", "GB"):
-        if value < 1024:
-            formatted = f"{value:.2f}".rstrip("0").rstrip(".")
-            return f"{formatted} {unit}"
-        value /= 1024
-    formatted = f"{value:.2f}".rstrip("0").rstrip(".")
-    return f"{formatted} TB"
-
-
 def _handle_pipeline_error(error: PipelineError, *, verbose: bool = False) -> None:
     """Convert a PipelineError to a Click exception."""
     msg = str(error)
@@ -191,7 +185,6 @@ main.add_command(analyze)
     help="Config file(s) (repeatable)",
 )
 @click.option("-l", "--layer", help="Layer ID to build (required)")
-@click.option("-e", "--exporter", help="Override exporter: garmin-img")
 @click.option(
     "-b", "--bbox", nargs=4, type=float, help="Override bounding box: W S E N"
 )
@@ -277,7 +270,6 @@ main.add_command(analyze)
 def build(
     config_files: tuple[str, ...],
     layer: str | None,
-    exporter: str | None,
     bbox: tuple[float, ...] | None,
     lng: float | None,
     lat: float | None,
@@ -380,7 +372,7 @@ def build(
         # Compute and display build summary (best-effort)
         if layer_config is not None:
             try:
-                source = resolve_source(layer_config, config.sources)
+                source = resolve_source_config(layer_config, config.sources)
                 dl = get_downloader(source, cache, source_args=layer_config.source_args)
                 summary = compute_build_summary(
                     layer_config, dl, quality=effective_quality
@@ -525,9 +517,9 @@ def build(
             try:
                 from .processor.preview import generate_previews
 
-                source = resolve_source(layer_config, config.sources)
+                source = resolve_source_config(layer_config, config.sources)
                 dl = get_downloader(source, cache, source_args=layer_config.source_args)
-                if isinstance(dl, WMTSDownloader):
+                if isinstance(dl, WmtsDownloader):
                     preview_paths = generate_previews(
                         layer_config,
                         dl,
@@ -615,64 +607,97 @@ def download(
         resolved = resolve_settings(config.settings)
         effective_cache_dir = cache_dir or resolved.get("cache_dir", "./cache")
 
-        # Resolve layer (for download, we use layer definitions directly)
-        if layer not in config.layers:
-            available = ", ".join(sorted(config.layers.keys())) or "(none)"
-            raise click.ClickException(
-                f"Layer '{layer}' not found. Available layers: {available}"
-            )
-        layer_config = config.layers[layer]
+        # Resolve -l against targets and layers (matching build behavior)
+        layers_to_download: list[tuple[str, object]] = []  # (layer_id, LayerConfig)
 
-        # Resolve source
-        source = resolve_source(layer_config, config.sources)
+        if layer in config.targets:
+            # Download all layers referenced by this target
+            target = config.targets[layer]
+            for entry in target.layers:
+                if entry.ref and entry.ref in config.layers:
+                    layers_to_download.append((entry.ref, config.layers[entry.ref]))
+                elif entry.source:
+                    # Inline entry — create LayerConfig
+                    lc = LayerConfig(
+                        id=entry.name or entry.source,
+                        name=entry.name or entry.source,
+                        source=entry.source,
+                        format=entry.format,
+                        zoom_levels=entry.zoom_levels or target.zoom_levels,
+                        bounds=target.bounds,
+                        source_args=entry.source_args,
+                    )
+                    layers_to_download.append((lc.id, lc))
+        elif layer in config.layers:
+            layers_to_download.append((layer, config.layers[layer]))
+        else:
+            available_targets = ", ".join(sorted(config.targets.keys())) or "(none)"
+            available_layers = ", ".join(sorted(config.layers.keys())) or "(none)"
+            raise click.ClickException(
+                f"'{layer}' not found in targets or layers.\n"
+                f"  Available targets: {available_targets}\n"
+                f"  Available layers: {available_layers}"
+            )
 
         # Resolve extent override
         extent = _resolve_extent(bbox, lng, lat, width, height)
-        if extent is not None:
-            _validate_extent_within_layer(extent, layer_config.bounds)
-
         zoom_list = _parse_zoom(zoom)
-        import dataclasses
-
-        if extent:
-            layer_config = dataclasses.replace(layer_config, bounds=extent)
-        if zoom_list:
-            layer_config = dataclasses.replace(layer_config, zoom_levels=zoom_list)
 
         cache = Path(effective_cache_dir)
         cache.mkdir(parents=True, exist_ok=True)
 
-        click.echo("Downloading tiles...")
+        import dataclasses
 
-        downloader = get_downloader(source, cache, source_args=layer_config.source_args)
-        if isinstance(downloader, STACDownloader):
-            downloaded = downloader.run(source, layer_config)
-        elif isinstance(downloader, WMTSDownloader):
-            bounds: dict[str, float] | None = layer_config.bounds
-            if not bounds:
-                raise click.ClickException("WMTS download requires bounds on the layer")
-            bbox = (
-                bounds["west"],
-                bounds["south"],
-                bounds["east"],
-                bounds["north"],
-            )
-            downloaded: list[Path] = []
-            for zoom_level in layer_config.zoom_levels:
-                paths = downloader.download_grid(bbox, zoom_level)
-                downloaded.extend(paths)
-        else:
-            downloaded = asyncio.run(
-                downloader.download(
-                    layer_config.zoom_levels,
-                    layer_config.bounds or {},
+        total_downloaded: list[Path] = []
+
+        for layer_id, layer_config in layers_to_download:
+            if extent is not None:
+                _validate_extent_within_layer(extent, layer_config.bounds)
+
+            lc = layer_config
+            if extent:
+                lc = dataclasses.replace(lc, bounds=extent)
+            if zoom_list:
+                lc = dataclasses.replace(lc, zoom_levels=zoom_list)
+
+            click.echo(f"Downloading tiles for '{layer_id}'...")
+
+            source = resolve_source_config(lc, config.sources)
+            downloader = get_downloader(source, cache, source_args=lc.source_args)
+            if isinstance(downloader, STACDownloader):
+                downloaded = downloader.run(source, lc)
+            elif isinstance(downloader, WmtsDownloader):
+                bounds: dict[str, float] | None = lc.bounds
+                if not bounds:
+                    raise click.ClickException(
+                        "WMTS download requires bounds on the layer"
+                    )
+                dl_bbox = (
+                    bounds["west"],
+                    bounds["south"],
+                    bounds["east"],
+                    bounds["north"],
                 )
-            )
+                downloaded: list[Path] = []
+                for zoom_level in lc.zoom_levels:
+                    paths = downloader.download_grid(dl_bbox, zoom_level)
+                    downloaded.extend(paths)
+            else:
+                downloaded = asyncio.run(
+                    downloader.download(
+                        lc.zoom_levels,
+                        lc.bounds or {},
+                    )
+                )
+
+            total_downloaded.extend(downloaded)
 
         # Summary
-        total_size = sum(f.stat().st_size for f in downloaded) if downloaded else 0
+        total_size = (
+            sum(f.stat().st_size for f in total_downloaded) if total_downloaded else 0
+        )
         click.echo(
-            f"Downloaded {len(downloaded)} file(s), "
+            f"Downloaded {len(total_downloaded)} file(s), "
             f"total cache size: {_human_size(total_size)}"
         )
 
@@ -753,15 +778,9 @@ def list_layers(
 ) -> None:
     """List all layers from the provided config files."""
     if not config_files:
-        click.echo(
-            "No config files provided.",
-            err=True,
+        raise click.ClickException(
+            "No config files provided. Usage: cartoload list -c path/to/config.yaml"
         )
-        click.echo(
-            "Usage: cartoload list -c path/to/config.yaml",
-            err=True,
-        )
-        sys.exit(1)
 
     try:
         config = load_config(list(config_files))
@@ -913,8 +932,6 @@ def cache_clean(ctx: click.Context, source: str | None, force: bool) -> None:
             return
 
     # Remove
-    import shutil
-
     for d in dirs_to_remove:
         shutil.rmtree(d)
         click.echo(f"Removed: {d.name}")

@@ -57,9 +57,7 @@ from .garmin_img_model import (
     SubfileType,
     TileMetadata,
 )
-
-# Type alias for processed tile result from warp operations
-ProcessedTile = tuple[bytes, tuple[float, float, float, float]]
+from cartoload.tile_math import ProcessedTile
 
 if TYPE_CHECKING:
     pass
@@ -175,7 +173,7 @@ _warp_func: Callable | None = None
 def _init_worker() -> None:
     """Pre-load heavy libraries (rasterio, numpy) once per worker process."""
     global _warp_func
-    from cartoload.processor.rasterio_warp import warp_tile_to_jpeg
+    from cartoload.processor.warp import warp_tile_to_jpeg
 
     _warp_func = warp_tile_to_jpeg
 
@@ -205,7 +203,7 @@ def _warp_tile_worker(
     warp_fn = _warp_func
     if warp_fn is None:
         # Fallback: import on first call if initializer wasn't used
-        from ..processor.rasterio_warp import warp_tile_to_jpeg
+        from ..processor.warp import warp_tile_to_jpeg
 
         warp_fn = warp_tile_to_jpeg
 
@@ -3295,47 +3293,30 @@ class TileExtractor:
         Returns a list of (x, y, lon_min, lat_max, lon_max, lat_min) tuples,
         one per tile cell covering the bounds at the given zoom.
         """
-        n = 2**zoom
+        from cartoload.tile_math import (
+            lon_to_tile_x,
+            lat_to_tile_y,
+            tile_x_to_lon,
+            tile_y_to_lat,
+        )
+
         west = bounds["west"]
         east = bounds["east"]
         north = bounds["north"]
         south = bounds["south"]
 
-        def lon_to_tile_x(lon: float) -> int:
-            return max(0, min(int((lon + 180.0) / 360.0 * n), n - 1))
-
-        def lat_to_tile_y(lat: float) -> int:
-            lat_rad = math.radians(lat)
-            return max(
-                0,
-                min(
-                    int(
-                        (
-                            1.0
-                            - math.log(math.tan(lat_rad) + 1.0 / math.cos(lat_rad))
-                            / math.pi
-                        )
-                        / 2.0
-                        * n
-                    ),
-                    n - 1,
-                ),
-            )
-
-        x_min = lon_to_tile_x(west)
-        x_max = lon_to_tile_x(east)
-        y_min = lat_to_tile_y(north)
-        y_max = lat_to_tile_y(south)
-
-        tile_size_deg = 360.0 / n  # tile width in degrees
+        x_min = lon_to_tile_x(west, zoom)
+        x_max = lon_to_tile_x(east, zoom)
+        y_min = lat_to_tile_y(north, zoom)
+        y_max = lat_to_tile_y(south, zoom)
 
         cells = []
         for x in range(x_min, x_max + 1):
             for y in range(y_min, y_max + 1):
-                cell_lon_min = x * tile_size_deg - 180.0
-                cell_lat_max = _tile_y_to_lat(y, n)
-                cell_lon_max = cell_lon_min + tile_size_deg
-                cell_lat_min = _tile_y_to_lat(y + 1, n)
+                cell_lon_min = tile_x_to_lon(x, zoom)
+                cell_lat_max = tile_y_to_lat(y, zoom)
+                cell_lon_max = tile_x_to_lon(x + 1, zoom)
+                cell_lat_min = tile_y_to_lat(y + 1, zoom)
                 cells.append(
                     (x, y, cell_lon_min, cell_lat_max, cell_lon_max, cell_lat_min)
                 )
@@ -3464,12 +3445,6 @@ class TileExtractor:
         total = sum(len(t) for t in tiles_by_zoom.values())
         logger.info(f"Extracted {total} tiles across {len(zoom_levels)} zoom levels")
         return tiles_by_zoom
-
-
-def _tile_y_to_lat(y: int, n: int) -> float:
-    """Convert Web Mercator tile Y index to latitude in degrees."""
-    lat_rad = math.atan(math.sinh(math.pi * (1 - 2 * y / n)))
-    return math.degrees(lat_rad)
 
 
 class TileEncoder:

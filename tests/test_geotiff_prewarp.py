@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from cartoload.processor.geotiff_prewarp import (
+from cartoload.processor.geotiff.prewarp import (
     cleanup_after_warp,
     merge_prewarped_geotiffs,
     prewarp_geotiff,
@@ -106,7 +106,7 @@ def _create_4326_geotiff(
 class TestRunGdalwarp:
     """Tests for the _run_gdalwarp helper."""
 
-    @patch("cartoload.processor.geotiff_prewarp.subprocess.run")
+    @patch("cartoload.processor.geotiff.prewarp.subprocess.run")
     def test_basic_invocation(self, mock_run):
         """_run_gdalwarp calls gdalwarp with correct flags."""
         mock_run.return_value = MagicMock(returncode=0)
@@ -125,7 +125,7 @@ class TestRunGdalwarp:
         assert str(src) in args
         assert str(dst) in args
 
-    @patch("cartoload.processor.geotiff_prewarp.subprocess.run")
+    @patch("cartoload.processor.geotiff.prewarp.subprocess.run")
     def test_no_expand_flag(self, mock_run):
         """gdalwarp is not called with -expand (it's a gdal_translate option)."""
         mock_run.return_value = MagicMock(returncode=0)
@@ -135,7 +135,7 @@ class TestRunGdalwarp:
         args = mock_run.call_args[0][0]
         assert "-expand" not in args
 
-    @patch("cartoload.processor.geotiff_prewarp.subprocess.run")
+    @patch("cartoload.processor.geotiff.prewarp.subprocess.run")
     def test_failure_raises_runtime_error(self, mock_run):
         """Non-zero exit code raises RuntimeError with stderr."""
         mock_run.return_value = MagicMock(returncode=1, stderr="something went wrong")
@@ -152,7 +152,7 @@ class TestRunGdalwarp:
 class TestRunGdalbuildvrt:
     """Tests for the _run_gdalbuildvrt helper."""
 
-    @patch("cartoload.processor.geotiff_prewarp.subprocess.run")
+    @patch("cartoload.processor.geotiff.prewarp.subprocess.run")
     def test_basic_invocation(self, mock_run):
         """_run_gdalbuildvrt calls gdalbuildvrt with correct args."""
         mock_run.return_value = MagicMock(returncode=0)
@@ -166,7 +166,7 @@ class TestRunGdalbuildvrt:
         assert str(sources[0]) in args
         assert str(sources[1]) in args
 
-    @patch("cartoload.processor.geotiff_prewarp.subprocess.run")
+    @patch("cartoload.processor.geotiff.prewarp.subprocess.run")
     def test_failure_raises_runtime_error(self, mock_run):
         """Non-zero exit code raises RuntimeError."""
         mock_run.return_value = MagicMock(returncode=1, stderr="build failed")
@@ -191,7 +191,7 @@ class TestPrewarpGeotiff:
         result = prewarp_geotiff(src)
         assert result == src
 
-    @patch("cartoload.processor.geotiff_prewarp._run_gdalwarp")
+    @patch("cartoload.processor.geotiff.prewarp._run_gdalwarp")
     def test_warp_creates_cache(self, mock_warp, tmp_path):
         """Non-4326 file triggers gdalwarp and returns cache path."""
         src = tmp_path / "test.tif"
@@ -207,7 +207,7 @@ class TestPrewarpGeotiff:
         assert result == tmp_path / "test_4326.tif"
         mock_warp.assert_called_once()
 
-    @patch("cartoload.processor.geotiff_prewarp._run_gdalwarp")
+    @patch("cartoload.processor.geotiff.prewarp._run_gdalwarp")
     def test_cached_skip(self, mock_warp, tmp_path):
         """Existing fresh cache with completion marker skips warp."""
         src = tmp_path / "test.tif"
@@ -221,8 +221,8 @@ class TestPrewarpGeotiff:
         assert result == cache
         mock_warp.assert_not_called()
 
-    @patch("cartoload.processor.geotiff_prewarp._run_gdalwarp")
-    @patch("cartoload.processor.geotiff_prewarp._run_gdal_translate_expand")
+    @patch("cartoload.processor.geotiff.prewarp._run_gdalwarp")
+    @patch("cartoload.processor.geotiff.prewarp._run_gdal_translate_expand")
     def test_paletted_uses_translate_then_warp(
         self, mock_translate, mock_warp, tmp_path
     ):
@@ -356,7 +356,7 @@ class TestCleanupAfterWarp:
 class TestMergePrewarpedGeotiffs:
     """Tests for merge_prewarped_geotiffs with VRT output."""
 
-    @patch("cartoload.processor.geotiff_prewarp._run_gdalbuildvrt")
+    @patch("cartoload.processor.geotiff.prewarp._run_gdalbuildvrt")
     def test_creates_vrt(self, mock_build_vrt, tmp_path):
         """Calls gdalbuildvrt and returns VRT path."""
         sources = [tmp_path / "a_4326.tif", tmp_path / "b_4326.tif"]
@@ -368,7 +368,7 @@ class TestMergePrewarpedGeotiffs:
         assert result == tmp_path / "mosaic.vrt"
         mock_build_vrt.assert_called_once_with(tmp_path / "mosaic.vrt", sources)
 
-    @patch("cartoload.processor.geotiff_prewarp._run_gdalbuildvrt")
+    @patch("cartoload.processor.geotiff.prewarp._run_gdalbuildvrt")
     def test_cached_vrt_skip(self, mock_build_vrt, tmp_path):
         """Existing fresh VRT skips rebuild."""
         sources = [tmp_path / "a_4326.tif"]
