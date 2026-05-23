@@ -2,7 +2,7 @@
 
 Tests the full pipeline from config resolution through export for:
 - Single-layer targets (WMTS format, the only format that works without
-  external dependencies like GDAL/fiona)
+  external dependencies like GDAL/OGR)
 - Multi-layer composite targets (multiple WMTS layers)
 - TargetConfig resolution (zoom_levels, bounds inheritance)
 """

@@ -10,7 +10,7 @@ cartoload — convert geodata into GPS device maps.
 :   Analyze geodata files.
 
 `build`
-:   Build one or more targets into output files.
+:   Build one or more layers into output files.
 
 `download`
 :   Download source data only (no build).
@@ -19,10 +19,49 @@ cartoload — convert geodata into GPS device maps.
 :   Split an oversized .img into region files.
 
 `list`
-:   List all layers and targets from the provided config files.
+:   List all layers from the provided config files.
 
 `cache`
 :   Inspect and manage the tile cache.
+
+`watermark`
+:   Read and write forensic watermarks in Garmin IMG files.
+
+---
+
+## `cartoload-docker`
+
+Run cartoload inside Docker with automatic volume mounts. The current working directory is mounted at `/work` inside the container.
+
+Uses pre-built images from `ghcr.io/burgdev/cartoload` by default.
+
+**Usage:** `cartoload-docker [OPTIONS] [--] COMMAND [ARGS...]`
+
+**Options:**
+
+`--mkgmap`
+:   Use the mkgmap image variant (includes Java + mkgmap)
+
+`--tag IMAGE`
+:   Use a specific Docker image (default: `ghcr.io/burgdev/cartoload:latest-base`)
+
+`-h, --help`
+:   Show help
+
+Everything after `--` (or the first cartoload subcommand) is forwarded to cartoload.
+
+**Examples:**
+
+```bash
+# Build a layer
+cartoload-docker build -c config.yaml -l my_layer
+
+# Show cartoload help
+cartoload-docker -- --help
+
+# Use mkgmap variant
+cartoload-docker --mkgmap build -c config.yaml -l my_layer
+```
 
 ---
 
@@ -172,20 +211,17 @@ Export IMG raster tiles to GeoTIFF format.
 
 ### `cartoload build`
 
-Build one or more targets into output files.
+Build one or more layers into output files.
 
 **Usage:** `cartoload build [OPTIONS]`
 
 **Options:**
 
-`-c, --config PATH`
-:   Config file(s), repeatable. Each file uses the unified format with `sources`, `layers`, `targets`, and `includes` sections.
+`-c, --config PATH ...`
+:   Config file(s) (repeatable)
 
 `-l, --layer TEXT`
-:   Target ID to build (required). Selects a target from the `targets:` section of the config files.
-
-`-e, --exporter TEXT`
-:   Override exporter: garmin-img
+:   Layer ID to build (required)
 
 `-b, --bbox FLOAT`
 :   Override bounding box: W S E N
@@ -208,11 +244,20 @@ Build one or more targets into output files.
 `-o, --output-dir TEXT`
 :   Default: ./output
 
-`-c, --cache-dir TEXT`
+`-C, --cache-dir TEXT`
 :   Default: ./cache
 
 `--no-download`
 :   Use existing cache only
+
+`--offline`
+:   Skip freshness checks, use cached files as-is
+
+`--update`
+:   Check cache freshness via HTTP HEAD
+
+`--ago INTEGER`
+:   Only update if cached file is older than N days
 
 `-f, --force`
 :   Overwrite existing output files
@@ -251,11 +296,11 @@ Download source data only (no build).
 
 **Options:**
 
-`-c, --config PATH`
-:   Config file(s), repeatable.
+`-c, --config PATH ...`
+:   Config file(s) (repeatable)
 
 `-l, --layer TEXT`
-:   Target ID to download (required). Selects a target from the `targets:` section.
+:   Layer ID to download (required)
 
 `-b, --bbox FLOAT`
 :   Override bounding box: W S E N
@@ -264,7 +309,7 @@ Download source data only (no build).
 :   Center longitude for extent (use with --lat/--width/--height)
 
 `-y, --lat FLOAT`
-:   Center latitude for extent (use with --lng/--lat/--height)
+:   Center latitude for extent (use with --lng/--width/--height)
 
 `-W, --width FLOAT`
 :   Extent width in km (use with --lng/--lat/--height)
@@ -275,7 +320,7 @@ Download source data only (no build).
 `-z, --zoom TEXT`
 :   Override zoom levels: 10,12,14
 
-`-c, --cache-dir TEXT`
+`-C, --cache-dir TEXT`
 :   Default: ./cache
 
 ---
@@ -301,14 +346,14 @@ Split an oversized .img into region files.
 
 ### `cartoload list`
 
-List all layers and targets from the provided config files.
+List all layers from the provided config files.
 
 **Usage:** `cartoload list [OPTIONS]`
 
 **Options:**
 
-`-c, --config PATH`
-:   Config file(s), repeatable.
+`-c, --config PATH ...`
+:   Config file(s) (repeatable)
 
 ---
 
@@ -320,7 +365,7 @@ Inspect and manage the tile cache.
 
 **Options:**
 
-`-c, --cache-dir TEXT`
+`-C, --cache-dir TEXT`
 :   Default: ./cache
 
 
@@ -350,3 +395,62 @@ Remove cached tiles.
 
 `-f, --force`
 :   Skip confirmation prompt
+
+---
+
+### `cartoload watermark`
+
+Read and write forensic watermarks in Garmin IMG files.
+
+**Usage:** `cartoload watermark COMMAND [ARGS]`
+
+**Subcommands:**
+
+`write`
+:   Write a watermark string into a Garmin IMG file.
+
+`read`
+:   Read and print the watermark from a Garmin IMG file.
+
+### `cartoload watermark write`
+
+Write a watermark string into a Garmin IMG file.
+
+**Usage:** `cartoload watermark write [OPTIONS] IMG_FILE PAYLOAD`
+
+**Arguments:**
+
+`IMG_FILE`
+:   Path
+
+`PAYLOAD`
+:   Text
+
+
+**Options:**
+
+`--key TEXT`
+:   Encryption key
+
+`--key-file PATH`
+:   Read key from file
+
+### `cartoload watermark read`
+
+Read and print the watermark from a Garmin IMG file.
+
+**Usage:** `cartoload watermark read [OPTIONS] IMG_FILE`
+
+**Arguments:**
+
+`IMG_FILE`
+:   Path
+
+
+**Options:**
+
+`--key TEXT`
+:   Encryption key
+
+`--key-file PATH`
+:   Read key from file

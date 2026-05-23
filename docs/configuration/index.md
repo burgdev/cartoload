@@ -1,6 +1,6 @@
 # Configuration
 
-cartoload uses two config files that work together: a **source** config that defines where to get geodata, and a **layer** config that defines what to build from it.
+cartoload uses a unified YAML config format with three sections: **sources** (where to get geodata), **layers** (reusable data definitions), and **targets** (what to build). Configs can be split across files and composed with `includes`.
 
 ## How it works
 
@@ -11,11 +11,13 @@ graph LR
   B --> O["output.img"]
 ```
 
-1. **Source config** defines one or more geodata providers (e.g., a WMTS tile server, a STAC catalog for GeoTIFFs). Each source gets an ID.
+1. **Sources** define geodata providers (e.g., a WMTS tile server, a STAC catalog for GeoTIFFs). Each source gets an ID.
 
-2. **Layer config** defines the map area, zoom levels, and which source to use. Layers reference source IDs from the source config.
+2. **Layers** define reusable data source + processing config — what data to use, format, zoom levels, and bounds. They have no output file.
 
-3. **Build** combines both — cartoload downloads tiles from the source and exports them into a Garmin IMG file.
+3. **Targets** define what to produce — an output file, an exporter, and an ordered list of layer entries (references or inline). A single-layer target builds one layer; a composite target blends multiple layers.
+
+4. **Build** combines all three — cartoload downloads tiles from the source, processes them, and exports into a Garmin IMG file.
 
 ## Minimal example
 
@@ -25,11 +27,15 @@ graph LR
 sources:
   my_tiles:
     type: wmts
-    url_template: "https://example.com/{layer}/{z}/{x}/{y}.png"
+    urls:
+      - "https://example.com/${layer}/${z}/${x}/${y}.${extension}"
+    defaults:
+      layer: topo
+      extension: png
     attribution: "© Example"
 ```
 
-**Layer config** (`layers.yaml`):
+**Layer + target config** (`layers.yaml`):
 
 ```yaml
 bounds:
@@ -42,20 +48,26 @@ layers:
   my_map:
     name: "My Map"
     type: raster
-    source: my_tiles        # references the source ID above
-    wmts_layer: topo
+    format: wmts
+    source: my_tiles
     zoom_levels: [10, 12, 14]
-    exporter: garmin_img
+
+targets:
+  my_map:
     output: my_map.img
+    layers:
+      - ref: my_map
 ```
 
 **Build**:
 
 ```bash
-cartoload build -S sources.yaml -L layers.yaml -l my_map
+cartoload build -c layers.yaml -l my_map
 ```
+
+The `-l` flag selects a **target** (or layer) ID to build.
 
 ## Detail pages
 
 - [Sources](sources.md) — all source types and their options
-- [Layers](layers.md) — layer definition, bounds, zoom levels, exporters, composite layers
+- [Layers and Targets](layers.md) — layer definitions, build targets, composite layers, opacity, zoom level inheritance

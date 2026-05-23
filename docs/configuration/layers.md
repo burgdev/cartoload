@@ -205,10 +205,15 @@ Defines a layer directly in the target (no top-level layer definition needed):
 | `ref` | ref only | ID of a top-level layer definition |
 | `source` | inline only | Source ID or dict (same as layer `source`) |
 | `format` | inline only | Data format (`geotiff`, `gpkg`, `wmts`) |
+| `name` | no | Display name (inherited from ref layer if omitted) |
 | `zoom_levels` | no | Zoom levels this entry contributes to |
 | `opacity` | no | Uniform float (0.0–1.0, default 1.0) or per-zoom dict |
-| `extension` | no | Backward compat: maps to `source_args.extension` |
 | `source_args` | no | Template variable overrides |
+| `asset_filter` | no | Key-value filter for STAC asset selection |
+| `rules` | no | Inline style rules for vector/rasterized layers |
+| `style` | no | Path to QML style file |
+| `garmin_types` | no | Garmin type mapping for vector features |
+| `extension` | no | Backward compat: maps to `source_args.extension` |
 
 An entry must have either `ref` or `source`, but not both.
 

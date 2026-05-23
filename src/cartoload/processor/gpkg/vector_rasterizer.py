@@ -1,18 +1,19 @@
 """Vector rasterizer: render GeoPackage line features onto transparent PNG tiles.
 
-Reads vector features from GPKG via Fiona with spatial filtering, applies
+Reads vector features from GPKG via OGR with spatial filtering, applies
 style rules from the style engine, and draws lines using Pillow onto
 transparent RGBA tiles. Output tiles are compatible with the composite pipeline.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from pathlib import Path
 from typing import Any
 
-import fiona
+from osgeo import ogr, osr
 from PIL import Image, ImageDraw
 from pyproj import Transformer
 
@@ -48,58 +49,76 @@ def read_features(
     features: list[tuple[Any, dict[str, Any]]] = []
 
     try:
-        # Get source CRS to set up reprojection
-        layers = fiona.listlayers(str(gpkg_path))
-        layer_name = layer or (layers[0] if layers else None)
-        if not layer_name:
+        ds = ogr.Open(str(gpkg_path))
+        if ds is None:
             return features
 
-        # Open and read source CRS
-        with fiona.open(str(gpkg_path), layer=layer_name) as src:
-            source_crs = src.crs
+        # Select layer
+        if layer:
+            lyr = ds.GetLayerByName(layer)
+        else:
+            lyr = ds.GetLayerByIndex(0)
+        if lyr is None:
+            return features
 
-            # Set up coordinate transformer if CRS differs
-            need_reproject = False
-            transformer = None
-            forward_transformer = None  # for bbox reprojection
-            if source_crs and target_crs:
-                src_crs_str = CRS_to_string(source_crs)
-                if src_crs_str and src_crs_str != target_crs:
-                    need_reproject = True
-                    transformer = Transformer.from_crs(
-                        src_crs_str, target_crs, always_xy=True
-                    )
-                    # Forward transformer: target CRS → source CRS (for bbox filter)
-                    forward_transformer = Transformer.from_crs(
-                        target_crs, src_crs_str, always_xy=True
-                    )
+        # Get source CRS
+        src_srs = lyr.GetSpatialRef()
+        src_crs_str = _srs_to_string(src_srs) if src_srs else None
 
-            # Reproject bbox to source CRS for spatial filtering
-            query_bbox = bbox
-            if forward_transformer:
-                west_s, south_s = forward_transformer.transform(bbox[0], bbox[1])
-                east_s, north_s = forward_transformer.transform(bbox[2], bbox[3])
-                query_bbox = (west_s, south_s, east_s, north_s)
+        # Set up coordinate transformer if CRS differs
+        need_reproject = False
+        transformer = None
+        forward_transformer = None
+        if src_crs_str and src_crs_str != target_crs:
+            need_reproject = True
+            transformer = Transformer.from_crs(src_crs_str, target_crs, always_xy=True)
+            forward_transformer = Transformer.from_crs(
+                target_crs, src_crs_str, always_xy=True
+            )
 
-            # Read features with bbox filter (in source CRS)
-            try:
-                hits = list(src.items(bbox=query_bbox))
-            except Exception:
-                # Some drivers don't support bbox; fall back to manual filtering
-                hits = list(src.items())
+        # Reproject bbox to source CRS for spatial filtering
+        if forward_transformer:
+            west_s, south_s = forward_transformer.transform(bbox[0], bbox[1])
+            east_s, north_s = forward_transformer.transform(bbox[2], bbox[3])
+            ring = ogr.Geometry(ogr.wkbLinearRing)
+            ring.AddPoint(west_s, south_s)
+            ring.AddPoint(east_s, south_s)
+            ring.AddPoint(east_s, north_s)
+            ring.AddPoint(west_s, north_s)
+            ring.AddPoint(west_s, south_s)
+            poly = ogr.Geometry(ogr.wkbPolygon)
+            poly.AddGeometry(ring)
+            lyr.SetSpatialFilter(poly)
+        else:
+            ring = ogr.Geometry(ogr.wkbLinearRing)
+            ring.AddPoint(bbox[0], bbox[1])
+            ring.AddPoint(bbox[2], bbox[1])
+            ring.AddPoint(bbox[2], bbox[3])
+            ring.AddPoint(bbox[0], bbox[3])
+            ring.AddPoint(bbox[0], bbox[1])
+            poly = ogr.Geometry(ogr.wkbPolygon)
+            poly.AddGeometry(ring)
+            lyr.SetSpatialFilter(poly)
 
-            for _, feat in hits:
-                geom = feat.get("geometry")
-                if geom is None:
-                    continue
+        # Iterate features
+        feat = lyr.GetNextFeature()
+        while feat:
+            geom_ogr = feat.GetGeometryRef()
+            if geom_ogr is not None:
+                geom = json.loads(geom_ogr.ExportToJson())
 
-                props = feat.get("properties", {})
-                attrs = {k: v for k, v in props.items() if v is not None}
+                attrs: dict[str, Any] = {}
+                for i in range(feat.GetFieldCount()):
+                    val = feat.GetField(i)
+                    if val is not None:
+                        attrs[feat.GetFieldDefnRef(i).GetName()] = val
 
                 if need_reproject and transformer:
                     geom = _reproject_geometry(geom, transformer)
 
                 features.append((geom, attrs))
+
+            feat = lyr.GetNextFeature()
 
     except Exception as e:
         logger.warning("Failed to read features from %s: %s", gpkg_path, e)
@@ -107,29 +126,15 @@ def read_features(
     return features
 
 
-def CRS_to_string(crs: Any) -> str | None:
-    """Convert a Fiona CRS to a string like 'EPSG:4326'."""
-    if crs is None:
+def _srs_to_string(srs: osr.SpatialReference) -> str | None:
+    """Convert an OGR SpatialReference to a string like 'EPSG:4326'."""
+    if srs is None:
         return None
-    # Fiona CRS objects
-    if hasattr(crs, "to_wkt"):
-        try:
-            return crs.to_authority()[0] + ":" + crs.to_authority()[1]
-        except Exception:
-            pass
-    if hasattr(crs, "to_epsg"):
-        epsg = crs.to_epsg()
-        if epsg:
-            return f"EPSG:{epsg}"
-    # Dict-style CRS
-    if isinstance(crs, dict):
-        epsg = crs.get("epsg") or crs.get("EPSG")
-        if epsg:
-            return f"EPSG:{epsg}"
-        init = crs.get("init", "")
-        if init:
-            return init.upper()
-    return str(crs) if crs else None
+    srs.AutoIdentifyEPSG()
+    code = srs.GetAuthorityCode(None)
+    if code:
+        return f"EPSG:{code}"
+    return None
 
 
 def _reproject_geometry(geom: dict, transformer: Transformer) -> dict:

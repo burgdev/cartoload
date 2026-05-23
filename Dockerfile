@@ -1,37 +1,61 @@
-FROM python:3.12-slim-bookworm
+# ---- Builder stage: download tools + install Python deps ----
+FROM ghcr.io/osgeo/gdal:ubuntu-small-3.13.0 AS builder
 
-# System deps: GDAL, Java (mkgmap Phase 2), osmium (Phase 2)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gdal-bin \
-    python3-gdal \
-    libgdal-dev \
-    default-jre-headless \
-    osmium-tool \
-    wget \
-    unzip \
-    ca-certificates \
-  && rm -rf /var/lib/apt/lists/*
+# Install uv in builder only
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# gmt (GMapTool) — for .img merging/splitting
-# Pin version 0.8.220; check https://www.gmaptool.eu for updates
-RUN wget -q https://www.gmaptool.eu/sites/default/files/lgmt08220.zip \
+# gmt (GMapTool) 0.8.220 — for .img merging/splitting
+# https://www.gmaptool.eu
+RUN python3 -c "import urllib.request; urllib.request.urlretrieve('https://www.gmaptool.eu/sites/default/files/lgmt08220.zip', 'lgmt08220.zip')" \
   && unzip lgmt08220.zip \
   && mv gmt /usr/local/bin/gmt \
   && chmod +x /usr/local/bin/gmt \
   && rm lgmt08220.zip
 
-# mkgmap — for Phase 2 vector .img generation
-RUN wget -q https://www.mkgmap.org.uk/download/mkgmap-latest.tar.gz \
-  && tar -xzf mkgmap-latest.tar.gz \
-  && mv mkgmap-*/mkgmap.jar /opt/mkgmap.jar \
-  && rm -rf mkgmap-* mkgmap-latest.tar.gz
+# mkgmap r4924 — optional, for vector .img generation
+# https://www.mkgmap.org.uk
+# Build with --build-arg INSTALL_MKGMAP=1 to include
+ARG INSTALL_MKGMAP=0
+RUN if [ "$INSTALL_MKGMAP" = "1" ]; then \
+  python3 -c "import urllib.request; urllib.request.urlretrieve('https://www.mkgmap.org.uk/download/mkgmap-r4924.zip', 'mkgmap-r4924.zip')" \
+  && unzip mkgmap-r4924.zip \
+  && mv mkgmap-r4924/mkgmap.jar /opt/mkgmap.jar \
+  && rm -rf mkgmap-r4924 mkgmap-r4924.zip; \
+  else \
+  touch /opt/mkgmap.jar; \
+  fi
 
-# uv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-
+# Install Python deps into a venv
 WORKDIR /app
-COPY pyproject.toml .
+COPY pyproject.toml README.md .
 COPY src/ src/
-RUN uv sync --no-dev
+RUN uv venv /app/.venv --system-site-packages && uv sync --no-dev \
+  && uv cache clean
 
-ENTRYPOINT ["uv", "run", "cartoload"]
+# ---- Runtime stage ----
+FROM ghcr.io/osgeo/gdal:ubuntu-small-3.13.0
+
+# System deps: osmium (OSM processing), optionally Java (mkgmap)
+ARG INSTALL_MKGMAP=0
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  osmium-tool \
+  $([ "$INSTALL_MKGMAP" = "1" ] && echo "default-jre-headless") \
+  && rm -rf /var/lib/apt/lists/*
+
+# Strip docs (after apt so Java postinst can create man symlinks)
+RUN rm -rf /usr/share/doc /usr/share/man
+
+# Copy tools from builder
+COPY --from=builder /usr/local/bin/gmt /usr/local/bin/gmt
+COPY --from=builder /opt/mkgmap.jar /opt/mkgmap.jar
+
+# Remove mkgmap placeholder if it wasn't built with INSTALL_MKGMAP=1
+RUN if [ "$INSTALL_MKGMAP" != "1" ]; then rm -f /opt/mkgmap.jar; fi
+
+# Copy app with pre-built venv (no uv needed at runtime)
+COPY --from=builder /app /app
+
+# Use venv python directly — no uv at runtime
+ENV PATH="/app/.venv/bin:$PATH"
+WORKDIR /app
+ENTRYPOINT ["cartoload"]

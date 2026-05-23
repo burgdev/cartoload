@@ -9,6 +9,7 @@ Source type (`type`) determines the **fetch method** — how data is downloaded 
 | Type | Description | Data formats |
 |------|-------------|-------------|
 | `wmts` | Web Map Tile Service — downloads individual map tiles | `wmts` |
+| `xyz` | XYZ/TMS tile service — alias for `wmts` | `wmts` |
 | `stac` | STAC API — queries collection endpoints, downloads assets | `geotiff`, `gpkg` |
 | `path` | Local file path — reads files from disk | `geotiff`, `gpkg` |
 
@@ -34,6 +35,35 @@ sources:
 ```
 
 Multiple URLs are used as fallback/rotation endpoints (load balancing). All URLs must use the same template.
+
+### WMTS Capabilities mode
+
+Instead of manually constructing URL templates, you can use a WMTS Capabilities endpoint to auto-discover the URL template, tile grid, and CRS:
+
+```yaml
+sources:
+  swisstopo_caps:
+    type: wmts
+    capabilities_url: "https://wmts.geo.admin.ch/EPSG/3857/1.0.0/WMTSCapabilities.xml"
+    layer: ch.swisstopo.pixelkarte-farbe
+    tile_matrix_set: 3857
+    attribution: "© swisstopo"
+```
+
+When `capabilities_url` is set, cartoload fetches the Capabilities XML and resolves the URL template, CRS, and tile grid from it. The `layer` and `tile_matrix_set` fields select the specific WMTS layer and TileMatrixSet within the Capabilities document. No `urls` field is needed in this mode.
+
+### XYZ
+
+The `xyz` type is an alias for `wmts` — it uses the same URL template syntax and download mechanism:
+
+```yaml
+sources:
+  my_xyz:
+    type: xyz
+    urls:
+      - "https://tile.example.com/${z}/${x}/${y}.png"
+    attribution: "© Example"
+```
 
 ### STAC
 
@@ -100,14 +130,17 @@ sources:
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `type` | no | Source type: `wmts`, `stac`, or `path` (auto-detected from URLs if omitted) |
-| `urls` | yes | List of URL templates or paths |
+| `type` | no | Source type: `wmts`, `xyz`, `stac`, or `path` (auto-detected from URLs if omitted) |
+| `urls` | yes* | List of URL templates or paths (*not required when using `capabilities_url`) |
 | `defaults` | no | Default variable values for template substitution |
 | `asset_filter` | no | Key-value filter for STAC asset selection |
 | `attribution` | no | Attribution string |
 | `rate_limit_ms` | no | Delay between requests in ms (default: 150) |
 | `max_threads` | no | Max download threads (default: 4) |
 | `crs` | no | Override source CRS (default: EPSG:3857 for WMTS, auto-detected for STAC/path) |
+| `capabilities_url` | no | WMTS GetCapabilities URL (auto-discovers URL template, CRS, tile grid) |
+| `layer` | no | WMTS layer identifier (used with `capabilities_url`) |
+| `tile_matrix_set` | no | TileMatrixSet identifier for WMTS Capabilities mode (e.g. `3857`) |
 
 ## Template variables
 

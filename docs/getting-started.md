@@ -12,6 +12,38 @@ Or using [uv](https://docs.astral.sh/uv/):
 uv tool install cartoload
 ```
 
+### Docker
+
+Pre-built images are available on GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/burgdev/cartoload:latest-base
+```
+
+| Variant | Tag suffix | Size | Includes |
+|---|---|---|---|
+| Base | `-base` | ~640 MB | GDAL, osmium, gmt |
+| With mkgmap | `-mkgmap` | ~900 MB | + Java, mkgmap |
+
+Tags follow the pattern `ghcr.io/burgdev/cartoload:<VERSION>-<VARIANT>`, e.g. `v1.2.0-base`.
+
+Use the wrapper script to run cartoload from a pre-built image:
+
+```bash
+./cartoload-docker build -c config.yaml -l my_layer
+./cartoload-docker -- --help
+./cartoload-docker --mkgmap build -c config.yaml -l my_layer
+```
+
+The wrapper mounts the current working directory at `/work` inside the container, so relative paths to configs, output, and cache work as expected.
+
+To build locally from the repository (requires [just](https://github.com/casey/just)):
+
+```bash
+just docker build              # slim
+just docker build mkgmap=yes   # with mkgmap
+```
+
 ## Quick Start
 
 1. Create or use example configuration files for your data source:
@@ -26,8 +58,8 @@ ls examples/configs/layers/
 
 ```bash
 cartoload build \
-    --layers examples/configs/layers/switzerland.yaml \
-    --layer ch_swisstopo_basemap
+    -c examples/configs/layers/switzerland.yaml \
+    -l ch_swisstopo_basemap
 ```
 
 The `--layer` (`-l`) flag selects a **target** to build from the `targets:` section of the config file.

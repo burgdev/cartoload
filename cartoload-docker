@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# cartoload-docker — run cartoload inside Docker with automatic volume mounts.
+#
+# Usage:
+#   cartoload-docker [OPTIONS] [--] COMMAND [ARGS...]
+#   cartoload-docker build -c config.yaml -l my_layer
+#   cartoload-docker --mkgmap build -c config.yaml -l my_layer
+#   cartoload-docker --tag myimage:latest build ...
+#
+# Everything before -- is a docker option (--mkgmap, --tag, etc.).
+# Everything after -- (or the first cartoload subcommand) is the cartoload
+# command. Paths are resolved relative to the current working directory,
+# which is mounted at /work inside the container.
+set -euo pipefail
+
+readonly SCRIPT_NAME="$(basename "$0")"
+readonly WORKDIR="/work"
+readonly GHCR_REPO="ghcr.io/burgdev/cartoload"
+IMAGE="${GHCR_REPO}:latest-base"
+
+# ---------------------------------------------------------------------------
+# Parse options: everything up to -- or first non-option word
+# ---------------------------------------------------------------------------
+cartoload_args=()
+seen_separator=0
+
+while [ $# -gt 0 ]; do
+  arg="$1"
+  if [ "$seen_separator" = "0" ]; then
+    case "$arg" in
+      --)
+        seen_separator=1
+        shift
+        continue
+        ;;
+      --mkgmap)
+        IMAGE="${GHCR_REPO}:latest-mkgmap"
+        shift
+        continue
+        ;;
+      --tag)
+        shift
+        IMAGE="${1:?--tag requires an image name}"
+        shift
+        continue
+        ;;
+      --tag=*)
+        IMAGE="${arg#--tag=}"
+        shift
+        continue
+        ;;
+      --help|-h)
+        cat <<EOF
+$SCRIPT_NAME — run cartoload inside Docker with automatic volume mounts.
+
+Usage:
+  $SCRIPT_NAME [OPTIONS] [--] COMMAND [ARGS...]
+
+Options:
+  --mkgmap          Use the mkgmap image variant (includes Java + mkgmap)
+  --tag IMAGE       Use a specific Docker image (default: $IMAGE)
+  -h, --help        Show this help
+
+Everything after -- (or the first cartoload subcommand) is forwarded
+to cartoload inside the container. The current working directory is
+mounted at $WORKDIR.
+
+Examples:
+  $SCRIPT_NAME build -c config.yaml -l my_layer
+  $SCRIPT_NAME --mkgmap build -c config.yaml -l my_layer
+  $SCRIPT_NAME -- --help
+  $SCRIPT_NAME analyze img info output/my_map.img
+EOF
+        exit 0
+        ;;
+      # First non-option argument = start of cartoload command
+      *)
+        seen_separator=1
+        ;;
+    esac
+  fi
+  cartoload_args+=("$arg")
+  shift
+done
+
+if [ "${#cartoload_args[@]}" -eq 0 ]; then
+  cartoload_args=("--help")
+fi
+
+# ---------------------------------------------------------------------------
+# Run — mount CWD at /work so relative paths work inside the container
+# ---------------------------------------------------------------------------
+exec docker run --rm \
+  -v "$(pwd):$WORKDIR" \
+  -w "$WORKDIR" \
+  "$IMAGE" \
+  "${cartoload_args[@]}"

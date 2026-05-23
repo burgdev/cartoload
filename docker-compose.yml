@@ -1,10 +1,15 @@
 services:
   cartoload:
-    build: .
+    build:
+      context: .
+      args:
+        INSTALL_MKGMAP: "0"
+    image: cartoload:base
     volumes:
-      - ./cache:/app/cache
-      - ./output:/app/output
-      - ./examples/configs:/app/configs
+      - ./cache:/work/cache
+      - ./output:/work/output
+      - ./examples/configs:/work/configs
     environment:
       WMTS_DELAY_MS: "150"
       WMTS_THREADS: "4"
+    working_dir: /work
