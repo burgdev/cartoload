@@ -29,6 +29,7 @@ from .garmin_img_writer import (
     StreamingIMGWriter,
     TileEncoder,
     TileExtractor,
+    _estimate_quality_ratio_from_metadata,
 )
 from ..utils import ExportProgressCallback
 
@@ -670,6 +671,8 @@ def _split_into_gmp_groups(
     tile_metadata: dict[int, list[TileMetadata]],
     img_file: IMGFile,
     bounds: dict[str, float],
+    *,
+    quality_ratio: float = 1.0,
 ) -> list[GMPGroup]:
     """Split tiles into GMP groups, handling both multi-zoom and within-zoom splits.
 
@@ -688,10 +691,12 @@ def _split_into_gmp_groups(
     """
     sorted_zooms = sorted(tile_metadata.keys())
 
-    # Calculate JPEG size per zoom level
+    # Calculate JPEG size per zoom level (quality-adjusted)
     zoom_jpeg_sizes: dict[int, int] = {}
     for z in sorted_zooms:
-        zoom_jpeg_sizes[z] = sum(t.jpeg_size for t in tile_metadata[z])
+        zoom_jpeg_sizes[z] = int(
+            sum(t.jpeg_size for t in tile_metadata[z]) * quality_ratio
+        )
 
     # Target per-group JPEG size: 85% of MAX_GMP_SIZE (leave room for headers)
     target_jpeg_per_group = int(MAX_GMP_SIZE * 0.85)
@@ -719,7 +724,9 @@ def _split_into_gmp_groups(
                 band_size = (len(tiles_sorted) + n_bands - 1) // n_bands
                 for i in range(n_bands):
                     band_tiles = tiles_sorted[i * band_size : (i + 1) * band_size]
-                    band_jpeg = sum(t.jpeg_size for t in band_tiles)
+                    band_jpeg = int(
+                        sum(t.jpeg_size for t in band_tiles) * quality_ratio
+                    )
                     raw_groups.append(([z], {z: band_tiles}, band_jpeg))
                 remaining_zooms.pop(0)
                 group_zooms = []  # signal we consumed this zoom already
@@ -1003,16 +1010,28 @@ class GarminImgExporter(BaseExporter):
         )
         sorted_zooms = sorted(tile_metadata.keys())
 
+        # Estimate quality ratio to get accurate split decisions
+        quality_ratio = _estimate_quality_ratio_from_metadata(
+            tile_metadata,
+            quality,
+            tile_processor=tile_processor,
+            source_crs=source_crs,
+        )
+        adjusted_jpeg_size = int(total_jpeg_size * quality_ratio)
+
         # Rough estimate: JPEG is ~85% of total GMP size (rest is headers/RGN2/LBL)
-        estimated_gmp_size = total_jpeg_size / 0.85 if total_jpeg_size > 0 else 0
+        estimated_gmp_size = adjusted_jpeg_size / 0.85 if adjusted_jpeg_size > 0 else 0
 
         if estimated_gmp_size > MAX_GMP_SIZE:
             # Split into multiple GMP groups by zoom level bands
-            gmp_groups = _split_into_gmp_groups(tile_metadata, img_file, bounds)
+            gmp_groups = _split_into_gmp_groups(
+                tile_metadata, img_file, bounds, quality_ratio=quality_ratio
+            )
             logger.info(
-                "Split %d tiles (%.1f GB) into %d GMP groups",
+                "Split %d tiles (%.1f GB original, %.1f GB adjusted) into %d GMP groups",
                 total_tiles,
                 total_jpeg_size / 1e9,
+                adjusted_jpeg_size / 1e9,
                 len(gmp_groups),
             )
         else:

@@ -104,9 +104,9 @@ TILE_INDEX_ENTRY_SIZE = 4  # Tile index: one uint32 per tile
 MPS_SUBFILE_SIZE = 98
 
 # Maximum size of a single GMP subfile in bytes.
-# Limited by uint32 section size fields (RGN2, LBL28, LBL29 offsets/sizes).
-# Keep conservative to leave room for headers and metadata.
-MAX_GMP_SIZE = 3_500_000_000  # ~3.5 GB per GMP
+# Kept conservative to ensure Garmin GPS device compatibility.
+# Proven safe limit: known-working maps had GMPs up to 577 MB.
+MAX_GMP_SIZE = 600_000_000  # ~600 MB per GMP
 
 
 def _compute_block_exp_e2(total_data_size: int) -> int:
@@ -3031,8 +3031,8 @@ def _reencode_jpeg(jpeg_bytes: bytes, quality: int) -> bytes:
     return buf.getvalue()
 
 
-def _estimate_quality_ratio(
-    subdivisions: list[Subdivision],
+def _estimate_quality_ratio_from_metadata(
+    tile_metadata: dict[int, list[TileMetadata]],
     jpeg_quality: int | None,
     max_samples: int = 5,
     tile_processor: Callable[[Path, int, int, int, str, int], ProcessedTile | None]
@@ -3041,9 +3041,8 @@ def _estimate_quality_ratio(
 ) -> float:
     """Estimate the JPEG size ratio when re-encoding at the target quality.
 
-    When a tile_processor is provided (e.g. warp_tile_to_jpeg), samples are
-    processed through the full pipeline (warp + re-encode) for an accurate
-    ratio. Otherwise, a simple re-encode is used.
+    Takes a tile_metadata dict (zoom -> list of TileMetadata) directly,
+    allowing estimation before subdivisions are created.
 
     Returns 1.0 if no samples can be taken or quality is None (passthrough).
     """
@@ -3051,20 +3050,15 @@ def _estimate_quality_ratio(
         return 1.0
 
     samples: list[float] = []
-    for sub in subdivisions:
-        for tile_entry in sub.tile_entries:
+    for z in sorted(tile_metadata.keys()):
+        for tile_entry in tile_metadata[z]:
             if len(samples) >= max_samples:
                 break
-            if (
-                isinstance(tile_entry, TileMetadata)
-                and tile_entry.source_path
-                and tile_entry.source_path.exists()
-            ):
+            if tile_entry.source_path and tile_entry.source_path.exists():
                 raw_size = tile_entry.source_path.stat().st_size
                 if raw_size == 0:
                     continue
                 if tile_processor is not None:
-                    # Full pipeline: warp + re-encode
                     result = tile_processor(
                         tile_entry.source_path,
                         tile_entry.x,
@@ -3076,7 +3070,6 @@ def _estimate_quality_ratio(
                     if result is not None:
                         samples.append(len(result[0]) / raw_size)
                 else:
-                    # Simple re-encode (no warp)
                     raw = tile_entry.source_path.read_bytes()
                     reencoded = _reencode_jpeg(raw, jpeg_quality)
                     if len(raw) > 0:
@@ -3092,6 +3085,32 @@ def _estimate_quality_ratio(
     ratio = samples[len(samples) // 2]  # median
     logger.info("Quality ratio estimate: %.3f (from %d samples)", ratio, len(samples))
     return ratio
+
+
+def _estimate_quality_ratio(
+    subdivisions: list[Subdivision],
+    jpeg_quality: int | None,
+    max_samples: int = 5,
+    tile_processor: Callable[[Path, int, int, int, str, int], ProcessedTile | None]
+    | None = None,
+    source_crs: str = "EPSG:3857",
+) -> float:
+    """Estimate the JPEG size ratio when re-encoding at the target quality.
+
+    Convenience wrapper that extracts TileMetadata entries from subdivisions
+    and delegates to _estimate_quality_ratio_from_metadata.
+
+    Returns 1.0 if no samples can be taken or quality is None (passthrough).
+    """
+    # Flatten TileMetadata entries from subdivisions into a dict
+    flat: dict[int, list[TileMetadata]] = {0: []}
+    for sub in subdivisions:
+        for tile_entry in sub.tile_entries:
+            if isinstance(tile_entry, TileMetadata):
+                flat[0].append(tile_entry)
+    return _estimate_quality_ratio_from_metadata(
+        flat, jpeg_quality, max_samples, tile_processor, source_crs
+    )
 
 
 def _process_tile_jpeg(
