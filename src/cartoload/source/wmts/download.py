@@ -474,6 +474,48 @@ class WmtsDownloader(BaseDownloader):
     # Grid download (implements BaseDownloader)
     # ------------------------------------------------------------------
 
+    def _scan_cached_tiles(self, zoom: int) -> set[tuple[int, int]]:
+        """Scan the cache directory to find all cached (x, y) tiles at *zoom*.
+
+        Returns a set of (x, y) pairs where both the tile file and its world
+        file exist.  This is much faster than stat-ing each file individually
+        because the OS can stream directory entries in bulk.
+        """
+        base = self._cache_dir / self._source_id
+        if self._cache_key:
+            base = base / self._cache_key
+        zoom_dir = base / str(zoom)
+        if not zoom_dir.is_dir():
+            return set()
+
+        world_suffix = self._world_file_suffix(self._tile_format)
+        tile_suffix = f".{self._tile_format}"
+        cached: set[tuple[int, int]] = set()
+
+        # Single pass per x-directory: collect world-file stems and
+        # tile-file stems in one iteration.
+        for x_dir in zoom_dir.iterdir():
+            if not x_dir.is_dir():
+                continue
+            try:
+                x = int(x_dir.name)
+            except ValueError:
+                continue
+            world_stems: set[str] = set()
+            tile_stems: set[str] = set()
+            for entry in x_dir.iterdir():
+                if entry.suffix == world_suffix:
+                    world_stems.add(entry.stem)
+                elif entry.suffix == tile_suffix:
+                    tile_stems.add(entry.stem)
+            for stem in tile_stems:
+                if stem in world_stems:
+                    try:
+                        cached.add((x, int(stem)))
+                    except ValueError:
+                        continue
+        return cached
+
     def download_grid(
         self, bbox: tuple[float, float, float, float], zoom: int
     ) -> list[Path]:
@@ -484,15 +526,36 @@ class WmtsDownloader(BaseDownloader):
         if total == 0:
             return []
 
-        # Separate cached vs uncached
+        # Fast cache check: scan the directory tree once instead of
+        # stat-ing each tile individually (avoids ~2 stat calls per tile).
+        logger.info("Checking cache for %d tiles at zoom %d...", total, zoom)
+
+        # Separate cached vs uncached using a directory scan + set lookup.
+        # We interleave the scan with progress updates so the user sees
+        # immediate feedback instead of a silent gap.
         cached_paths: list[Path] = []
         uncached: list[tuple[int, int]] = []
-        for x, y in tiles:
-            path = self._cache_path(x, y, zoom)
-            if self._is_cached(path):
-                cached_paths.append(path)
-            else:
-                uncached.append((x, y))
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[bold blue]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TextColumn("{task.completed}/{task.total}"),
+            TimeElapsedColumn(),
+        ) as progress:
+            task_id = progress.add_task(
+                f"Scanning cache z{zoom}",
+                total=total,
+            )
+            existing = self._scan_cached_tiles(zoom)
+            # Now partition tiles into cached / uncached with progress
+            progress.update(task_id, description=f"Checking cache z{zoom}")
+            for x, y in tiles:
+                if (x, y) in existing:
+                    cached_paths.append(self._cache_path(x, y, zoom))
+                else:
+                    uncached.append((x, y))
+                progress.update(task_id, advance=1)
 
         cached_count = len(cached_paths)
 

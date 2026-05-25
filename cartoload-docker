@@ -15,6 +15,7 @@ set -euo pipefail
 
 readonly SCRIPT_NAME="$(basename "$0")"
 readonly WORKDIR="/work"
+readonly LOCAL_IMAGE="cartoload"
 readonly GHCR_REPO="ghcr.io/burgdev/cartoload"
 IMAGE="${GHCR_REPO}:latest-base"
 
@@ -25,38 +26,53 @@ cartoload_args=()
 seen_separator=0
 
 while [ $# -gt 0 ]; do
-  arg="$1"
-  if [ "$seen_separator" = "0" ]; then
-    case "$arg" in
-      --)
-        seen_separator=1
-        shift
-        continue
-        ;;
-      --mkgmap)
-        IMAGE="${GHCR_REPO}:latest-mkgmap"
-        shift
-        continue
-        ;;
-      --tag)
-        shift
-        IMAGE="${1:?--tag requires an image name}"
-        shift
-        continue
-        ;;
-      --tag=*)
-        IMAGE="${arg#--tag=}"
-        shift
-        continue
-        ;;
-      --help|-h)
-        cat <<EOF
+	arg="$1"
+	if [ "$seen_separator" = "0" ]; then
+		case "$arg" in
+		--)
+			seen_separator=1
+			shift
+			continue
+			;;
+		--mkgmap)
+			if [ "${local:-0}" = "1" ]; then
+				IMAGE="${LOCAL_IMAGE}:mkgmap"
+			else
+				IMAGE="${GHCR_REPO}:latest-mkgmap"
+			fi
+			mkgmap=1
+			shift
+			continue
+			;;
+		--local)
+			IMAGE="${LOCAL_IMAGE}:base"
+			if [ "${mkgmap:-0}" = "1" ]; then
+				IMAGE="${LOCAL_IMAGE}:mkgmap"
+			fi
+			local=1
+			shift
+			continue
+			;;
+		--tag)
+			shift
+			IMAGE="${1:?--tag requires an image name}"
+			shift
+			continue
+			;;
+		--tag=*)
+			IMAGE="${arg#--tag=}"
+			shift
+			continue
+			;;
+		--help | -h)
+			cat <<EOF
 $SCRIPT_NAME — run cartoload inside Docker with automatic volume mounts.
 
 Usage:
   $SCRIPT_NAME [OPTIONS] [--] COMMAND [ARGS...]
 
 Options:
+  --local           Use locally built image instead of server image
   --mkgmap          Use the mkgmap image variant (includes Java + mkgmap)
   --tag IMAGE       Use a specific Docker image (default: $IMAGE)
   -h, --help        Show this help
@@ -71,27 +87,27 @@ Examples:
   $SCRIPT_NAME -- --help
   $SCRIPT_NAME analyze img info output/my_map.img
 EOF
-        exit 0
-        ;;
-      # First non-option argument = start of cartoload command
-      *)
-        seen_separator=1
-        ;;
-    esac
-  fi
-  cartoload_args+=("$arg")
-  shift
+			exit 0
+			;;
+		# First non-option argument = start of cartoload command
+		*)
+			seen_separator=1
+			;;
+		esac
+	fi
+	cartoload_args+=("$arg")
+	shift
 done
 
 if [ "${#cartoload_args[@]}" -eq 0 ]; then
-  cartoload_args=("--help")
+	cartoload_args=("--help")
 fi
 
 # ---------------------------------------------------------------------------
 # Run — mount CWD at /work so relative paths work inside the container
 # ---------------------------------------------------------------------------
 exec docker run --rm \
-  -v "$(pwd):$WORKDIR" \
-  -w "$WORKDIR" \
-  "$IMAGE" \
-  "${cartoload_args[@]}"
+	-v "$(pwd):$WORKDIR" \
+	-w "$WORKDIR" \
+	"$IMAGE" \
+	"${cartoload_args[@]}"

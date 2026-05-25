@@ -27,7 +27,7 @@ RUN if [ "$INSTALL_MKGMAP" = "1" ]; then \
 
 # Install Python deps into a venv
 WORKDIR /app
-COPY pyproject.toml README.md .
+COPY pyproject.toml README.md ./
 COPY src/ src/
 RUN uv venv /app/.venv --system-site-packages && uv sync --no-dev \
   && uv cache clean

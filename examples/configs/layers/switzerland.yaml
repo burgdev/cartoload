@@ -196,8 +196,10 @@ targets:
         zoom_levels: [14, 15, 16]
 
   ch_swisstopo_basemap:
+    name: "CH Topo Basemap"
+    description: "Swisstopo national map"
     output: ch_swisstopo_basemap.img
-    zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16]
+    zoom_levels: [10, 11, 12, 13, 14, 15, 16]
     layers:
       - ref: ch_swisstopo_basemap
 

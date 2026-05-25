@@ -44,6 +44,15 @@ uv sync --all-groups
 just test
 ```
 
+### Docker Build
+
+```bash
+just docker build [--mkgmap]
+./cartoload-docker build -c config.yaml -l my_layer          # server image
+./cartoload-docker --local build -c config.yaml -l my_layer   # local image
+./cartoload-docker --local --mkgmap build ...                  # local mkgmap image
+```
+
 ## License
 
-MIT
+`LGPL` - see [LICENSE](https://github.com/burgdev/cartoload/blob/main/LICENSE) file.

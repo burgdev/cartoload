@@ -2318,6 +2318,7 @@ class StreamingIMGWriter:
                     jpeg_quality,
                     progress_callback,
                     tiles_offset=tiles_offset,
+                    global_total_tiles=total_tiles,
                     sequential_only=sequential_only,
                 )
 
@@ -2429,6 +2430,7 @@ class StreamingIMGWriter:
         jpeg_quality: int | None,
         progress_callback: Callable[[str, int, int], None] | None = None,
         tiles_offset: int = 0,
+        global_total_tiles: int = 0,
         sequential_only: bool = False,
     ) -> int:
         """Write GMP subfile with streaming LBL29 section.
@@ -2812,7 +2814,7 @@ class StreamingIMGWriter:
                             progress_callback(
                                 "writing",
                                 tiles_offset + tiles_processed + batch_done,
-                                total_tiles,
+                                global_total_tiles or total_tiles,
                             )
                 else:
                     # Sequential processing
@@ -2864,7 +2866,9 @@ class StreamingIMGWriter:
                 # Overall progress after each batch
                 if progress_callback is not None:
                     progress_callback(
-                        "writing", tiles_offset + tiles_processed, total_tiles
+                        "writing",
+                        tiles_offset + tiles_processed,
+                        global_total_tiles or total_tiles,
                     )
 
                 if tiles_processed % 5000 == 0 or batch_start + batch_size >= len(
