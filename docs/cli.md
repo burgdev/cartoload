@@ -280,6 +280,9 @@ Build one or more layers into output files.
 `-q, --quality INTEGER RANGE`
 :   JPEG quality 1-100 (default: passthrough, no re-encoding)
 
+`--qtables {raster,default}`
+:   Custom quantization tables: 'raster' (map-optimized) or 'default' (standard)
+
 `--executor {process,thread}`
 :   Parallel executor mode: 'process' (default, fastest) or 'thread' (less memory)
 

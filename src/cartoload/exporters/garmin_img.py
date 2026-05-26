@@ -942,6 +942,7 @@ class GarminImgExporter(BaseExporter):
         *,
         source_crs: str = "EPSG:3857",
         quality: int | None = None,
+        qtables: tuple[list[int], list[int]] | None = None,
         progress_callback: ExportProgressCallback | None = None,
         tile_processor_override: Callable | None = None,
     ) -> list[Path]:
@@ -957,6 +958,7 @@ class GarminImgExporter(BaseExporter):
             output_path: Path to output .img file
             source_crs: Source CRS for tile processing (default EPSG:3857)
             quality: JPEG quality for warping (1-100), or None for passthrough
+            qtables: Custom quantization tables (luma, chroma) in zigzag order, or None
             progress_callback: Called with (stage, current, total) for progress
             tile_processor_override: Custom tile processor callable. When
                 provided, this replaces the default warp_tile_to_jpeg processor.
@@ -1016,6 +1018,7 @@ class GarminImgExporter(BaseExporter):
             quality,
             tile_processor=tile_processor,
             source_crs=source_crs,
+            qtables=qtables,
         )
         adjusted_jpeg_size = int(total_jpeg_size * quality_ratio)
 
@@ -1059,6 +1062,7 @@ class GarminImgExporter(BaseExporter):
             tile_processor=tile_processor,
             source_crs=source_crs,
             jpeg_quality=quality,
+            qtables=qtables,
             progress_callback=progress_callback,
             sequential_only=tile_processor_override is not None,
         )

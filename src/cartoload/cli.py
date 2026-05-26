@@ -255,6 +255,13 @@ main.add_command(analyze)
     help="JPEG quality 1-100 (default: passthrough, no re-encoding)",
 )
 @click.option(
+    "--qtables",
+    "qtables_preset",
+    default=None,
+    type=click.Choice(["raster", "default"], case_sensitive=False),
+    help="Custom quantization tables: 'raster' (map-optimized) or 'default' (standard)",
+)
+@click.option(
     "--executor",
     "executor_mode",
     default=None,
@@ -289,6 +296,7 @@ def build(
     preview_tiles: int,
     preview_center: tuple[float, ...] | None,
     quality: int | None,
+    qtables_preset: str | None,
     executor_mode: str | None,
     verbose: bool,
 ) -> None:
@@ -310,6 +318,22 @@ def build(
         effective_cache_dir = cache_dir or resolved.get("cache_dir", "./cache")
         effective_quality = quality or resolved.get("quality")
         effective_executor = executor_mode or resolved.get("executor")
+
+        # Resolve custom quantization tables from preset name + quality
+        # CLI --qtables takes precedence over config jpeg_qtables
+        effective_qtables_preset = qtables_preset or resolved.get("jpeg_qtables")
+        effective_qtables = None
+        if effective_qtables_preset and effective_qtables_preset != "default":
+            from cartoload.exporters.garmin_img_writer import get_qtables
+
+            if effective_quality is None:
+                raise click.ClickException(
+                    "--qtables requires --quality to be set (quality determines "
+                    "the compression level of the custom tables)"
+                )
+            effective_qtables = get_qtables(
+                str(effective_qtables_preset), int(effective_quality)
+            )
         if effective_executor is not None:
             os.environ["CARTOLOAD_EXECUTOR"] = effective_executor
 
@@ -494,6 +518,7 @@ def build(
                     bounds_override=extent,
                     zoom_override=zoom_list,
                     quality=effective_quality,
+                    qtables=effective_qtables,
                     progress_callback=on_progress,
                     export_progress_callback=on_export_progress,
                     warmup_only=cache_warmup,

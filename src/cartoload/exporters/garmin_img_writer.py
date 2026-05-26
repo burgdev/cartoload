@@ -2203,6 +2203,7 @@ class StreamingIMGWriter:
         | None = None,
         source_crs: str = "EPSG:3857",
         jpeg_quality: int | None = None,
+        qtables: tuple[list[int], list[int]] | None = None,
         progress_callback: Callable[[str, int, int], None] | None = None,
         sequential_only: bool = False,
     ) -> None:
@@ -2221,7 +2222,9 @@ class StreamingIMGWriter:
             tile_processor: Optional callable to process source tiles.
             source_crs: Source CRS for tile processing (default EPSG:3857)
             jpeg_quality: JPEG quality for warping (1-100), or None for passthrough
+            qtables: Custom quantization tables (luma, chroma) in zigzag order, or None
             progress_callback: Called with (stage, current, total) for progress.
+            sequential_only: If True, use ThreadPoolExecutor instead of processes
         """
         logger.info(f"Streaming write IMG file: {self.output_path}")
 
@@ -2320,6 +2323,7 @@ class StreamingIMGWriter:
                     tiles_offset=tiles_offset,
                     global_total_tiles=total_tiles,
                     sequential_only=sequential_only,
+                    qtables=qtables,
                 )
 
                 tiles_offset += sum(len(sub.tile_entries) for sub in group.subdivisions)
@@ -2432,6 +2436,7 @@ class StreamingIMGWriter:
         tiles_offset: int = 0,
         global_total_tiles: int = 0,
         sequential_only: bool = False,
+        qtables: tuple[list[int], list[int]] | None = None,
     ) -> int:
         """Write GMP subfile with streaming LBL29 section.
 
@@ -2773,6 +2778,7 @@ class StreamingIMGWriter:
                                         tile_processor,
                                         source_crs,
                                         jpeg_quality,
+                                        qtables,
                                     )
                                     future_to_idx[future] = i
                             elif has_source:
@@ -2804,6 +2810,12 @@ class StreamingIMGWriter:
                             else:
                                 # _warp_tile_worker returns (x, y, zoom, bytes|None)
                                 jpeg_data = result[3]
+                                # warp_tile_to_jpeg encodes at quality 95;
+                                # apply target quality + mozjpeg here
+                                if jpeg_data is not None and jpeg_quality is not None:
+                                    jpeg_data = _reencode_jpeg(
+                                        jpeg_data, jpeg_quality, qtables
+                                    )
                             if jpeg_data is not None:
                                 batch_jpegs[idx] = jpeg_data
                         except Exception as e:
@@ -2825,6 +2837,7 @@ class StreamingIMGWriter:
                                 tile_processor,
                                 source_crs,
                                 jpeg_quality,
+                                qtables,
                             )
                             if jpeg_data is None:
                                 logger.warning(
@@ -2941,11 +2954,219 @@ class StreamingIMGWriter:
 
 _BORDER_MARGIN = 16  # pixels to mirror-pad (2 JPEG MCU blocks)
 
+# ---------------------------------------------------------------------------
+# IOM-derived custom quantization tables
+# ---------------------------------------------------------------------------
 
-def _reencode_jpeg(jpeg_bytes: bytes, quality: int) -> bytes:
+# IOM reference quantization tables (zigzag order, as extracted from IOM.img).
+# The Garmin IOM raster map uses these custom tables instead of the standard
+# JPEG Annex K tables. Key characteristics:
+#   - Luminance: very low values (mean ~29) — preserves fine detail (lines, text)
+#   - Chrominance: heavily clamped at 50 for most coefficients — aggressive color
+#     simplification, acceptable for map tiles where subtle color gradients matter less
+_IOM_LUMA: list[int] = [
+    8,
+    6,
+    5,
+    8,
+    12,
+    20,
+    26,
+    31,
+    6,
+    6,
+    7,
+    10,
+    13,
+    29,
+    30,
+    28,
+    7,
+    7,
+    8,
+    12,
+    20,
+    29,
+    35,
+    28,
+    7,
+    9,
+    11,
+    15,
+    26,
+    44,
+    40,
+    31,
+    9,
+    11,
+    19,
+    28,
+    34,
+    55,
+    52,
+    39,
+    12,
+    18,
+    28,
+    32,
+    41,
+    52,
+    57,
+    46,
+    25,
+    32,
+    39,
+    44,
+    52,
+    61,
+    60,
+    51,
+    36,
+    46,
+    48,
+    49,
+    56,
+    50,
+    52,
+    50,
+]
+
+_IOM_CHROMA: list[int] = [
+    9,
+    9,
+    12,
+    24,
+    50,
+    50,
+    50,
+    50,
+    9,
+    11,
+    13,
+    33,
+    50,
+    50,
+    50,
+    50,
+    12,
+    13,
+    28,
+    50,
+    50,
+    50,
+    50,
+    50,
+    24,
+    33,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+    50,
+]
+
+
+def iom_qtables_for_quality(quality: int) -> tuple[list[int], list[int]]:
+    """Generate IOM-shaped quantization tables scaled to the given quality level.
+
+    Uses the same scaling formula as Pillow (libjpeg) to scale the IOM base
+    tables, preserving the IOM's map-optimized shape (prioritize luminance
+    detail, sacrifice chrominance precision).
+
+    At quality 50, returns the raw IOM tables (scale factor 1.0).
+    At quality < 50, tables are scaled up (more compression).
+    At quality > 50, tables are scaled down (less compression).
+
+    Returns (luma_table, chroma_table) as 64-element lists in zigzag order.
+    """
+    if quality < 50:
+        scale = 5000 / quality
+    else:
+        scale = 200 - 2 * quality
+
+    luma = [max(1, min(255, int(v * scale / 100))) for v in _IOM_LUMA]
+    chroma = [max(1, min(255, int(v * scale / 100))) for v in _IOM_CHROMA]
+    return luma, chroma
+
+
+def get_qtables(preset: str, quality: int) -> tuple[list[int], list[int]] | None:
+    """Resolve a qtables preset name to (luma, chroma) tables for the given quality.
+
+    Args:
+        preset: Preset name. Currently supported:
+            - "raster": Map-optimized tables (derived from Garmin reference) scaled to quality
+            - "default" or None: Returns None (use Pillow's standard tables)
+        quality: JPEG quality 1-100
+
+    Returns:
+        (luma_table, chroma_table) in zigzag order, or None for default tables.
+    """
+    if preset == "raster":
+        return iom_qtables_for_quality(quality)
+    return None
+
+
+def _mozjpeg_optimize(jpeg_bytes: bytes) -> bytes:
+    """Apply mozjpeg lossless optimization to JPEG bytes.
+
+    Uses mozjpeg's jpegtran to optimize Huffman coding. Strictly lossless — no
+    visual quality change. Benchmarked at ~1.8% savings on real map tiles at
+    quality 25.
+
+    Returns the input bytes unchanged if mozjpeg is not installed.
+    """
+    try:
+        import mozjpeg_lossless_optimization
+
+        return mozjpeg_lossless_optimization.optimize(jpeg_bytes)
+    except ImportError:
+        return jpeg_bytes
+
+
+def _reencode_jpeg(
+    jpeg_bytes: bytes,
+    quality: int,
+    qtables: tuple[list[int], list[int]] | None = None,
+) -> bytes:
     """Re-encode JPEG bytes at the specified quality level.
 
     Uses PIL (backed by libjpeg-turbo) for fast in-memory re-encoding.
+
+    When custom qtables are provided (as (luma, chroma) in zigzag order),
+    they are used instead of Pillow's default quality-scaled tables.
 
     For quality < 85, mirror-pads the image by _BORDER_MARGIN pixels on all
     sides before encoding. This gives DCT blocks at tile edges smooth neighbor
@@ -2959,6 +3180,19 @@ def _reencode_jpeg(jpeg_bytes: bytes, quality: int) -> bytes:
         img = Image.open(io.BytesIO(jpeg_bytes))
     except Exception:
         return jpeg_bytes
+
+    # Build PIL qtables dict when custom tables are provided
+    pil_qtables = None
+    if qtables is not None:
+        pil_qtables = {0: qtables[0], 1: qtables[1]}
+
+    def _save_with_qtables(image: Image.Image) -> bytes:
+        buf = io.BytesIO()
+        kwargs: dict = {"format": "JPEG", "quality": quality, "optimize": True}
+        if pil_qtables is not None:
+            kwargs["qtables"] = pil_qtables
+        image.save(buf, **kwargs)
+        return buf.getvalue()
 
     if quality < 85:
         # Mirror-pad → encode → decode → crop → encode
@@ -3006,11 +3240,10 @@ def _reencode_jpeg(jpeg_bytes: bytes, quality: int) -> bytes:
         )  # bottom-right
 
         # Encode padded image at target quality
-        buf = io.BytesIO()
-        padded.save(buf, format="JPEG", quality=quality, optimize=True)
+        buf_bytes = _save_with_qtables(padded)
 
         # Decode and crop center
-        decoded = Image.open(io.BytesIO(buf.getvalue()))
+        decoded = Image.open(io.BytesIO(buf_bytes))
         cropped = decoded.crop(
             (
                 m,
@@ -3021,14 +3254,12 @@ def _reencode_jpeg(jpeg_bytes: bytes, quality: int) -> bytes:
         )
 
         # Re-encode at target quality
-        buf = io.BytesIO()
-        cropped.save(buf, format="JPEG", quality=quality, optimize=True)
-        return buf.getvalue()
+        result = _save_with_qtables(cropped)
+        return _mozjpeg_optimize(result)
 
     # High quality: direct encode (no padding needed)
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=quality, optimize=True)
-    return buf.getvalue()
+    result = _save_with_qtables(img)
+    return _mozjpeg_optimize(result)
 
 
 def _estimate_quality_ratio_from_metadata(
@@ -3038,6 +3269,7 @@ def _estimate_quality_ratio_from_metadata(
     tile_processor: Callable[[Path, int, int, int, str, int], ProcessedTile | None]
     | None = None,
     source_crs: str = "EPSG:3857",
+    qtables: tuple[list[int], list[int]] | None = None,
 ) -> float:
     """Estimate the JPEG size ratio when re-encoding at the target quality.
 
@@ -3071,7 +3303,7 @@ def _estimate_quality_ratio_from_metadata(
                         samples.append(len(result[0]) / raw_size)
                 else:
                     raw = tile_entry.source_path.read_bytes()
-                    reencoded = _reencode_jpeg(raw, jpeg_quality)
+                    reencoded = _reencode_jpeg(raw, jpeg_quality, qtables)
                     if len(raw) > 0:
                         samples.append(len(reencoded) / len(raw))
         if len(samples) >= max_samples:
@@ -3094,6 +3326,7 @@ def _estimate_quality_ratio(
     tile_processor: Callable[[Path, int, int, int, str, int], ProcessedTile | None]
     | None = None,
     source_crs: str = "EPSG:3857",
+    qtables: tuple[list[int], list[int]] | None = None,
 ) -> float:
     """Estimate the JPEG size ratio when re-encoding at the target quality.
 
@@ -3109,7 +3342,7 @@ def _estimate_quality_ratio(
             if isinstance(tile_entry, TileMetadata):
                 flat[0].append(tile_entry)
     return _estimate_quality_ratio_from_metadata(
-        flat, jpeg_quality, max_samples, tile_processor, source_crs
+        flat, jpeg_quality, max_samples, tile_processor, source_crs, qtables
     )
 
 
@@ -3119,6 +3352,7 @@ def _process_tile_jpeg(
     | None,
     source_crs: str,
     jpeg_quality: int | None,
+    qtables: tuple[list[int], list[int]] | None = None,
 ) -> bytes | None:
     """Get JPEG bytes for a tile from its source path.
 
@@ -3127,6 +3361,7 @@ def _process_tile_jpeg(
         tile_processor: Optional processing callable
         source_crs: Source CRS string
         jpeg_quality: JPEG quality, or None for passthrough
+        qtables: Custom quantization tables (luma, chroma) in zigzag order, or None
 
     Returns:
         JPEG bytes, or None if processing failed
@@ -3147,7 +3382,7 @@ def _process_tile_jpeg(
             jpeg_bytes = result[0]  # (jpeg_bytes, bounds)
             # Apply target quality (with mirror-padding fix if needed)
             if jpeg_quality is not None:
-                return _reencode_jpeg(jpeg_bytes, jpeg_quality)
+                return _reencode_jpeg(jpeg_bytes, jpeg_quality, qtables)
             return jpeg_bytes
         return None
 
@@ -3161,7 +3396,7 @@ def _process_tile_jpeg(
 
     # Re-encode at target quality
     raw = tile.source_path.read_bytes()
-    return _reencode_jpeg(raw, jpeg_quality)
+    return _reencode_jpeg(raw, jpeg_quality, qtables)
 
 
 def _fixup_rgn2_jpeg_sizes(

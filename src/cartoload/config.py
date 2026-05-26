@@ -133,6 +133,7 @@ class SettingsConfig:
     output_dir: str | None = None
     executor: str | None = None
     quality: int | None = None
+    jpeg_qtables: str | None = None
     rate_limit_ms: int | None = None
 
 
@@ -162,7 +163,14 @@ SOURCE_TYPE_REQUIRED_FIELDS: dict[str, list[str]] = {
 
 # Supported settings keys and their env var names
 SETTINGS_ENV_PREFIX = "CARTOLOAD_"
-SETTINGS_KEYS = {"cache_dir", "output_dir", "executor", "quality", "rate_limit_ms"}
+SETTINGS_KEYS = {
+    "cache_dir",
+    "output_dir",
+    "executor",
+    "quality",
+    "jpeg_qtables",
+    "rate_limit_ms",
+}
 
 logger = logging.getLogger(__name__)
 

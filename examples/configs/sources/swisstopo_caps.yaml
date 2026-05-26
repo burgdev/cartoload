@@ -1,0 +1,26 @@
+# swisstopo WMTS Capabilities source
+# Uses GetCapabilities auto-discovery instead of URL templates.
+# The layer, TileMatrixSet, CRS, and URL template are resolved from the
+# Capabilities XML — no need to manually construct URL templates.
+
+sources:
+  swisstopo_caps:
+    type: wmts
+    capabilities_url: "https://wmts.geo.admin.ch/EPSG/3857/1.0.0/WMTSCapabilities.xml"
+    layer: ch.swisstopo.pixelkarte-farbe
+    tile_matrix_set: 3857
+    attribution: "© swisstopo"
+    rate_limit_ms: 150
+    max_threads: 4
+
+  # XYZ alias example — same as type: wmts with URL template
+  swisstopo_xyz:
+    type: xyz
+    defaults:
+      layer: ch.swisstopo.pixelkarte-farbe
+      extension: jpeg
+    urls:
+      - "https://wmts0.geo.admin.ch/1.0.0/${layer}/default/current/3857/${z}/${x}/${y}.${extension:-jpeg}"
+    attribution: "© swisstopo"
+    rate_limit_ms: 150
+    max_threads: 4

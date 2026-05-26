@@ -359,6 +359,7 @@ async def build_target(
     bounds_override: dict[str, float] | None = None,
     zoom_override: list[int] | None = None,
     quality: int | None = None,
+    qtables: tuple[list[int], list[int]] | None = None,
     progress_callback: ProgressCallback | None = None,
     export_progress_callback: ExportProgressCallback | None = None,
     checkpoint: bool = True,
@@ -386,6 +387,7 @@ async def build_target(
         bounds_override: Override the target bounds
         zoom_override: Override the target zoom levels
         quality: JPEG quality for tile encoding
+        qtables: Custom quantization tables (luma, chroma) in zigzag order, or None
         progress_callback: Called with (stage_id, description) at each stage
         export_progress_callback: Called with (stage, current, total) for export progress
         checkpoint: If True, write checkpoint after each zoom level
@@ -614,7 +616,9 @@ async def build_target(
         tile_processor = _make_composite_processor(providers)
 
     # Refine jpeg_size estimates by sampling a few tiles
-    _refine_jpeg_sizes(tile_metadata, tile_processor, quality=quality or 85)
+    _refine_jpeg_sizes(
+        tile_metadata, tile_processor, quality=quality or 85, qtables=qtables
+    )
 
     # Report tile count and estimated output size
     estimated_jpeg_total = sum(
@@ -657,6 +661,7 @@ async def build_target(
             output_file,
             source_crs=source_crs,
             quality=quality,
+            qtables=qtables,
             progress_callback=export_progress_callback,
             tile_processor_override=tile_processor,
         )
@@ -748,6 +753,7 @@ def _refine_jpeg_sizes(
     max_samples_per_zoom: int = 20,
     *,
     quality: int = 85,
+    qtables: tuple[list[int], list[int]] | None = None,
 ) -> None:
     """Sample tiles through the processor and update jpeg_size estimates.
 
@@ -790,7 +796,7 @@ def _refine_jpeg_sizes(
             if result is not None:
                 jpeg_bytes = result[0]
                 if needs_reencode:
-                    jpeg_bytes = _reencode_jpeg(jpeg_bytes, quality)
+                    jpeg_bytes = _reencode_jpeg(jpeg_bytes, quality, qtables)
                 samples.append(len(jpeg_bytes))
 
         if not samples:

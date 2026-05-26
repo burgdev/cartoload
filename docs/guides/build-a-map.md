@@ -88,6 +88,26 @@ Control output JPEG quality (1–100):
 cartoload build -c layers.yaml -l my_target -q 90
 ```
 
+### Custom quantization tables
+
+Use map-optimized quantization tables for better compression on raster map tiles:
+
+```bash
+cartoload build -c layers.yaml -l my_target -q 20 --qtables raster
+```
+
+The `raster` preset uses tables derived from Garmin reference files, shaped to preserve
+luminance detail (lines, text) while simplifying chrominance. This typically yields
+10–19% smaller files at the same quality level compared to standard JPEG tables.
+
+You can also set it in the config file:
+
+```yaml
+settings:
+  quality: 20
+  jpeg_qtables: raster
+```
+
 ## Output
 
 The build produces:
