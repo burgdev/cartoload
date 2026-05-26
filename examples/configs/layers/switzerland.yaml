@@ -4,11 +4,12 @@ includes:
   - ../sources/swisstopo.yaml
 
 # Default bounding box for all layers/targets in this file
+# https://bboxfinder.com
 bounds:
-  west: 5.96
-  east: 10.49
-  south: 45.82
-  north: 47.81
+  west: 7.31
+  south: 46.34
+  east: 8.88
+  north: 47.06
 
 # Layer definitions: reusable data source + processing config (no output)
 layers:
@@ -19,19 +20,8 @@ layers:
     type: raster
     format: wmts
     source:
-      ref: swisstopo_wmts
+      ref: swisstopo_xyz
       layer: ch.swisstopo.pixelkarte-farbe
-    zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16]
-
-  ch_swisstopo_basemap_pk10:
-    name: "Switzerland 1:10'000"
-    description: "Swisstopo national map 1:10'000"
-    type: raster
-    format: wmts
-    source:
-      ref: swisstopo_wmts
-      layer: ch.swisstopo.landeskarte-farbe-10
-    zoom_levels: [16]
 
   ch_swisstopo_basemap_pk25:
     name: "Switzerland 1:25'000"
@@ -39,9 +29,8 @@ layers:
     type: raster
     format: wmts
     source:
-      ref: swisstopo_wmts
+      ref: swisstopo_xyz
       layer: ch.swisstopo.pixelkarte-farbe-pk25.noscale
-    zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16]
 
   ch_swisstopo_basemap_pk50:
     name: "Switzerland 1:50'000"
@@ -49,81 +38,17 @@ layers:
     type: raster
     format: wmts
     source:
-      ref: swisstopo_wmts
+      ref: swisstopo_xyz
       layer: ch.swisstopo.pixelkarte-farbe-pk50.noscale
-    zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16]
-
-  ch_swisstopo_basemap_pk1000:
-    name: "Switzerland 1:1 Million"
-    description: "Swisstopo national map 1:1 Million"
-    type: raster
-    format: wmts
-    source:
-      ref: swisstopo_wmts
-      layer: ch.swisstopo.pixelkarte-farbe-pk1000.noscale
-    zoom_levels: [8, 9, 11]
 
   ch_swisstopo_hiking:
     name: "Switzerland Hiking Trails"
     description: "Swisstopo hiking trails"
     format: wmts
     source:
-      ref: swisstopo_wmts
+      ref: swisstopo_xyz
       layer: ch.swisstopo.swisstlm3d-wanderwege
       extension: png
-    zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16]
-
-  ch_swisstopo_skitouring:
-    name: "Switzerland Skiroutes"
-    description: "Swisstopo skiroutes"
-    format: wmts
-    source:
-      ref: swisstopo_wmts
-      layer: ch.swisstopo-karto.skitouren
-      extension: png
-    zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16]
-
-  ch_swisstopo_snowshoes:
-    name: "Switzerland Snowshoes"
-    description: "Swisstopo snowshoes"
-    format: wmts
-    source:
-      ref: swisstopo_wmts
-      layer: ch.swisstopo-karto.schneeschuhrouten
-      extension: png
-    zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16]
-
-  ch_swisstopo_cableways_winter:
-    name: "Switzerland Cableways/Skilifts Winter"
-    description: ""
-    format: wmts
-    source:
-      ref: swisstopo_wmts
-      layer: ch.swisstopo.bahnen-winter
-      extension: png
-    zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16]
-
-  ch_swisstopo_skitouring_vector:
-    name: "Switzerland Skiroutes (Vector)"
-    description: "Swisstopo skiroutes rasterized from vector GeoPackage"
-    format: gpkg
-    source:
-      ref: swisstopo_stac
-      layer: ch.swisstopo-karto.skitouren
-      asset_filter: {}
-    style: ../styles/ski_network_2056.qml
-    zoom_levels: [11, 12, 13, 14, 15, 16]
-
-  ch_swisstopo_steepness:
-    name: "Switzerland steepness"
-    description: "Terrain steepness shading overlay"
-    type: raster_overlay
-    format: wmts
-    source:
-      ref: swisstopo_wmts
-      layer: ch.swisstopo.hangneigung-ueber_30
-      extension: png
-    zoom_levels: [15, 16]
 
   ch_swisstopo_designated_wildlife_areas:
     name: "Switzerland Designated Wildlife Areas"
@@ -131,10 +56,9 @@ layers:
     type: raster_overlay
     format: wmts
     source:
-      ref: swisstopo_wmts
+      ref: swisstopo_xyz
       layer: ch.bafu.wrz-wildruhezonen_portal
       extension: png
-    zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16]
 
   ch_swisstopo_wildlife_reserves:
     name: "Switzerland Wildlife Reserves"
@@ -142,10 +66,9 @@ layers:
     type: raster_overlay
     format: wmts
     source:
-      ref: swisstopo_wmts
+      ref: swisstopo_xyz
       layer: ch.bafu.wrz-jagdbanngebiete_select
       extension: png
-    zoom_levels: [14, 15, 16]
 
   ch_swisstopo_stac_pk25:
     name: "Switzerland STAC PK25"
@@ -155,68 +78,31 @@ layers:
     source:
       ref: swisstopo_stac
       layer: ch.swisstopo.pixelkarte-farbe-pk25.noscale
-    zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16]
 
 # Build targets: what to produce (with output files)
 targets:
-  ch_swisstopo_outdoor_winter:
-    name: "CH Outdoor Winter"
-    description: "Swisstopo national map with skitouring and hiking overlays"
-    output: ch_outdoor_winter.img
-    zoom_levels: [10, 11, 12, 13, 14, 15, 16]
+  ch_swisstopo_outdoor:
+    name: "CH Outdoor Summer"
+    description: "Swisstopo national map with hiking overlays"
+    output: ch_outdoor_summer.img
+    zoom_levels: [10, 11, 12, 13, 14, 15]
     layers:
-      - ref: ch_swisstopo_basemap_pk1000
-        zoom_levels: [9, 10]
       - ref: ch_swisstopo_basemap
-        zoom_levels: [11, 12, 13, 14, 15, 16]
-      - ref: ch_swisstopo_steepness
-        opacity: { 14: 0.2, 15: 0.2, 16: 0.3, 17: 0.2 }
-        zoom_levels: [14, 15, 16]
+        zoom_levels: [10, 11, 12, 13, 14, 15]
       - ref: ch_swisstopo_designated_wildlife_areas
-        #opacity: { 12: 0.3, 13: 0.3, 14: 0.3, 15: 0.2, 16: 0.1 }
-        opacity: { 12: 0.6, 13: 0.7, 14: 0.7, 15: 0.6, 16: 0.4 }
-        #opacity: 0.7
-        zoom_levels: [12, 13, 14, 15, 16]
+        opacity: { 12: 0.8, 13: 0.8, 14: 0.9, 15: 0.9 }
+        zoom_levels: [12, 13, 14, 15]
       - ref: ch_swisstopo_wildlife_reserves
-        #opacity: 0.7
-        opacity: { 12: 0.6, 13: 0.7, 14: 0.7, 15: 0.6, 16: 0.4 }
-        zoom_levels: [12, 13, 14, 15, 16]
+        opacity: 0.7
+        zoom_levels: [12, 13, 14, 15]
       - ref: ch_swisstopo_hiking
-        opacity: { 14: 0.3, 15: 0.4, 16: 0.5, 17: 0.4 }
-        zoom_levels: [14, 15, 16]
-      - ref: ch_swisstopo_skitouring
-        opacity: { 14: 0.8, 15: 0.6, 16: 0.5, 17: 0.4 }
-        #opacity: { 16: 0.4, 17: 0.4 }
-        zoom_levels: [14, 15, 16]
-      - ref: ch_swisstopo_snowshoes
-        opacity: { 14: 0.8, 15: 0.5, 16: 0.4, 17: 0.4 }
-        zoom_levels: [14, 15, 16]
-      - ref: ch_swisstopo_cableways_winter
-        opacity: { 14: 0.4, 15: 0.6, 16: 0.5, 17: 0.4 }
-        zoom_levels: [14, 15, 16]
+        opacity: { 14: 0.5, 15: 0.9 }
+        zoom_levels: [14, 15]
 
   ch_swisstopo_basemap:
     name: "CH Topo Basemap"
     description: "Swisstopo national map"
     output: ch_swisstopo_basemap.img
-    zoom_levels: [10, 11, 12, 13, 14, 15, 16]
+    zoom_levels: [10, 11, 12, 13, 14, 15]
     layers:
       - ref: ch_swisstopo_basemap
-
-  ch_swisstopo_hiking:
-    output: ch_swisstopo_hiking.img
-    zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16]
-    layers:
-      - ref: ch_swisstopo_hiking
-
-  ch_swisstopo_skitouring:
-    output: ch_swisstopo_skitouring.img
-    zoom_levels: [8, 9, 11, 12, 13, 14, 15, 16]
-    layers:
-      - ref: ch_swisstopo_skitouring
-
-  ch_swisstopo_steepness:
-    output: ch_swisstopo_steepness.img
-    zoom_levels: [15, 16]
-    layers:
-      - ref: ch_swisstopo_steepness

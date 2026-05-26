@@ -4,6 +4,15 @@
 sources:
   swisstopo_wmts:
     type: wmts
+    capabilities_url: "https://wmts.geo.admin.ch/EPSG/3857/1.0.0/WMTSCapabilities.xml"
+    layer: ch.swisstopo.pixelkarte-farbe
+    tile_matrix_set: 3857
+    attribution: "© swisstopo"
+    rate_limit_ms: 150
+    max_threads: 4
+
+  swisstopo_xyz:
+    type: xyz
     # ${layer} and ${extension} are config-level variables resolved from
     # defaults or layer source_args at pipeline time.
     # ${x}, ${y}, ${z} are per-tile variables resolved at download time.
@@ -13,14 +22,6 @@ sources:
     urls:
       - "https://wmts0.geo.admin.ch/1.0.0/${layer}/default/current/3857/${z}/${x}/${y}.${extension:-jpeg}"
       - "https://wmts1.geo.admin.ch/1.0.0/${layer}/default/current/3857/${z}/${x}/${y}.${extension:-jpeg}"
-      - "https://wmts2.geo.admin.ch/1.0.0/${layer}/default/current/3857/${z}/${x}/${y}.${extension:-jpeg}"
-      - "https://wmts3.geo.admin.ch/1.0.0/${layer}/default/current/3857/${z}/${x}/${y}.${extension:-jpeg}"
-      - "https://wmts4.geo.admin.ch/1.0.0/${layer}/default/current/3857/${z}/${x}/${y}.${extension:-jpeg}"
-      - "https://wmts5.geo.admin.ch/1.0.0/${layer}/default/current/3857/${z}/${x}/${y}.${extension:-jpeg}"
-      - "https://wmts6.geo.admin.ch/1.0.0/${layer}/default/current/3857/${z}/${x}/${y}.${extension:-jpeg}"
-      - "https://wmts7.geo.admin.ch/1.0.0/${layer}/default/current/3857/${z}/${x}/${y}.${extension:-jpeg}"
-      - "https://wmts8.geo.admin.ch/1.0.0/${layer}/default/current/3857/${z}/${x}/${y}.${extension:-jpeg}"
-      - "https://wmts9.geo.admin.ch/1.0.0/${layer}/default/current/3857/${z}/${x}/${y}.${extension:-jpeg}"
     attribution: "© swisstopo"
     rate_limit_ms: 150
     max_threads: 4
