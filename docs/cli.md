@@ -29,42 +29,6 @@ cartoload — convert geodata into GPS device maps.
 
 ---
 
-## `cartoload-docker`
-
-Run cartoload inside Docker with automatic volume mounts. The current working directory is mounted at `/work` inside the container.
-
-Uses pre-built images from `ghcr.io/burgdev/cartoload` by default.
-
-**Usage:** `cartoload-docker [OPTIONS] [--] COMMAND [ARGS...]`
-
-**Options:**
-
-`--mkgmap`
-:   Use the mkgmap image variant (includes Java + mkgmap)
-
-`--tag IMAGE`
-:   Use a specific Docker image (default: `ghcr.io/burgdev/cartoload:latest-base`)
-
-`-h, --help`
-:   Show help
-
-Everything after `--` (or the first cartoload subcommand) is forwarded to cartoload.
-
-**Examples:**
-
-```bash
-# Build a layer
-cartoload-docker build -c config.yaml -l my_layer
-
-# Show cartoload help
-cartoload-docker -- --help
-
-# Use mkgmap variant
-cartoload-docker --mkgmap build -c config.yaml -l my_layer
-```
-
----
-
 ### `cartoload analyze`
 
 Analyze geodata files.

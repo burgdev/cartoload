@@ -9,30 +9,30 @@ site_dir = "site"
 extra_css = ["stylesheets/extra.css"]
 
 nav = [
-    { title = "Home", path = "index.md" },
-    { title = "Getting started", path = "getting-started.md" },
-    { title = "Guides", children = [
-        { title = "Build a map", path = "guides/build-a-map.md" },
-        { title = "Analyze IMG files", path = "guides/analyze-img.md" },
-        { title = "Split large maps", path = "guides/split-maps.md" },
+    { "Home" = "index.md" },
+    { "Getting started" = "getting-started.md" },
+    { "Guides" = [
+        { "Build a map" = "guides/build-a-map.md" },
+        { "Analyze IMG files" = "guides/analyze-img.md" },
+        { "Split large maps" = "guides/split-maps.md" },
     ]},
-    { title = "Configuration", children = [
-        { title = "Overview", path = "configuration/index.md" },
-        { title = "Sources", path = "configuration/sources.md" },
-        { title = "Layers", path = "configuration/layers.md" },
+    { "Configuration" = [
+        { "Overview" = "configuration/index.md" },
+        { "Sources" = "configuration/sources.md" },
+        { "Layers" = "configuration/layers.md" },
     ]},
-    { title = "Reference", children = [
-        { title = "Overview", path = "reference.md" },
-        { title = "CLI", path = "cli.md" },
-        { title = "API", path = "api-reference.md" },
-        { title = "IMG Format", children = [
-            { title = "Overview", path = "img-format/overview.md" },
-            { title = "Header & FAT", path = "img-format/header-fat.md" },
-            { title = "GMP Container", path = "img-format/gmp-container.md" },
-            { title = "Tile Storage", path = "img-format/tile-storage.md" },
-            { title = "TRE Sections", path = "img-format/tre-sections.md" },
-            { title = "Vector Reference", path = "img-format/vector-reference.md" },
-            { title = "Tools & resources", path = "img-format/tools-resources.md" },
+    { "Reference" = [
+        { "Overview" = "reference.md" },
+        { "CLI" = "cli.md" },
+        { "API" = "api-reference.md" },
+        { "IMG Format" = [
+            { "Overview" = "img-format/overview.md" },
+            { "Header & FAT" = "img-format/header-fat.md" },
+            { "GMP Container" = "img-format/gmp-container.md" },
+            { "Tile Storage" = "img-format/tile-storage.md" },
+            { "TRE Sections" = "img-format/tre-sections.md" },
+            { "Vector Reference" = "img-format/vector-reference.md" },
+            { "Tools & resources" = "img-format/tools-resources.md" },
         ]},
     ]},
 ]
