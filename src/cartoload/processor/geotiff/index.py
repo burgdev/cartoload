@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import rasterio
-from rasterio.crs import CRS
+from rasterio.crs import CRS  # ty: ignore
 from rasterio.warp import transform_bounds
 
 logger = logging.getLogger(__name__)

@@ -159,7 +159,7 @@ class BatchTileProcessor:
         if not path_coords:
             return []
 
-        results: list[ProcessedTile] = [None] * len(path_coords)  # type: ignore[list-item]
+        results: list[ProcessedTile] = [None] * len(path_coords)  # ty: ignore
 
         # Use ProcessPoolExecutor for true parallelism (rasterio holds the GIL)
         source_crs = self._source_crs or "EPSG:3857"

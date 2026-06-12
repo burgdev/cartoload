@@ -882,7 +882,7 @@ class IMGParser:
           - subdivision_deltas: lon/lat delta consistency in RGN2 records
           - tile_details: per-tile decoded coordinates
         """
-        results = {
+        results: dict[str, list[object] | str] = {
             "garmin_32bit": [],
             "map_units_24bit": [],
             "tile_bounds": [],

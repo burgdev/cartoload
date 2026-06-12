@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from PIL import Image
 
     from cartoload.config import LayerConfig, SourceConfig
+    from cartoload.processor.gpkg.vector_rasterizer import VectorRasterizer
     from cartoload.source.base import Source
 
 logger = logging.getLogger(__name__)
@@ -39,7 +40,7 @@ class GpkgProcessor(LayerProcessor):
     ):
         super().__init__(source, source_config, layer_config, cache_dir)
         self._downloaded_paths: list[Path] = []
-        self._rasterizer: object | None = None  # VectorRasterizer
+        self._rasterizer: VectorRasterizer | None = None
 
     @property
     def supported_extensions(self) -> list[str]:
@@ -73,9 +74,9 @@ class GpkgProcessor(LayerProcessor):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _build_style_engine(self) -> "StyleEngine":  # noqa: F821
+    def _build_style_engine(self) -> "StyleEngine":  # noqa: F821  # ty: ignore[unresolved-reference]
         """Build a StyleEngine from the layer config's style rules."""
-        from cartoload.style.engine import StyleEngine
+        from cartoload.style.engine import StyleEngine  # ty: ignore
 
         # Priority: inline rules > QML file > default
         if self.layer_config.rules:

@@ -17,7 +17,7 @@ offset/substring, nounset mode, file handle input.
 from __future__ import annotations
 
 import re
-from typing import Mapping
+from typing import Mapping, cast
 
 __all__ = ["expand", "check_unresolved", "resolve_templates"]
 
@@ -43,7 +43,7 @@ class _PeekableIterator:
     def __next__(self) -> str:
         if self._next is self.NOTHING:
             return next(self._iter)
-        nxt: str = self._next  # type: ignore[assignment]
+        nxt = cast(str, self._next)
         self._next = self.NOTHING
         return nxt
 

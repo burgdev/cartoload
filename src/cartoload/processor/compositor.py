@@ -194,7 +194,7 @@ def find_fallback_tile(
 
         # Upscale to standard tile size (256x256)
         target_size = 256
-        upscaled = cropped.resize((target_size, target_size), Image.BILINEAR)
+        upscaled = cropped.resize((target_size, target_size), Image.Resampling.BILINEAR)
 
         logger.debug(
             "Fallback tile for (%d, %d, z=%d): using z=%d tile (%d, %d)",

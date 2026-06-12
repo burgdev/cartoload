@@ -10,10 +10,15 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .config import LayerConfig, SourceConfig, TargetConfig, TargetLayerEntry
 from .template import check_unresolved, resolve_templates
 from .utils import ExportProgressCallback, ProgressCallback
+
+if TYPE_CHECKING:
+    from .exporters.garmin_img import GarminImgExporter
+    from .source.wmts import WmtsDownloader
 
 logger = logging.getLogger(__name__)
 

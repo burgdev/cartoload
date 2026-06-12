@@ -1206,7 +1206,7 @@ class GarminImgExporter(BaseExporter):
         layer_config: LayerConfig,
         *,
         progress_callback: ExportProgressCallback | None = None,
-    ) -> dict[int, list[tuple[bytes, tuple[float, float, float, float]]]]:
+    ) -> CompressedTiles:
         """Extract and compress tiles from the raster at each zoom level.
 
         Returns:
@@ -1231,9 +1231,7 @@ class GarminImgExporter(BaseExporter):
         if progress_callback:
             progress_callback("encoding", 0, total_tiles)
 
-        compressed: dict[
-            int, list[tuple[bytes, tuple[float, float, float, float]]]
-        ] = {}
+        compressed: CompressedTiles = {}
         encoded_count = 0
         for zoom, tiles in raw_tiles.items():
             if tiles:

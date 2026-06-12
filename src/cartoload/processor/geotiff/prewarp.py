@@ -21,7 +21,7 @@ from pathlib import Path
 
 import rasterio
 from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
-from rasterio.crs import CRS
+from rasterio.crs import CRS  # ty: ignore
 from rasterio.enums import ColorInterp
 
 logger = logging.getLogger(__name__)

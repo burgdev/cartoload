@@ -276,7 +276,7 @@ def _make_composite_processor(
 
             # Normalize to 256x256
             if rgba.size != (256, 256):
-                rgba = rgba.resize((256, 256), Image.BILINEAR)
+                rgba = rgba.resize((256, 256), Image.Resampling.BILINEAR)
 
             opacity = resolve_opacity(entry, zoom)
             images.append((rgba, opacity))
@@ -335,7 +335,7 @@ def _find_fallback_tile(
                         quadrant_y + quad_size,
                     )
                 )
-                return cropped.resize((256, 256), Image.BILINEAR)
+                return cropped.resize((256, 256), Image.Resampling.BILINEAR)
     return None
 
 

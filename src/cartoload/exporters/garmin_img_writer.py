@@ -985,8 +985,10 @@ class GMPWriter:
         # Determine subdivision mode
         use_subdivisions = subdivisions is not None and len(subdivisions) > 0
         if use_subdivisions:
+            assert subdivisions is not None  # for type narrowing
             n_subdivisions = len(subdivisions)
         else:
+            subdivisions = []  # normalize so later code type-checks
             n_subdivisions = n_zoom
         # IOM reference: rec_size=4 (uint32 offset only, no flag byte)
         tre7_rec_size = 4
@@ -3237,7 +3239,11 @@ def _encode_cjpeg(
     except (subprocess.TimeoutExpired, OSError):
         # Fall back to Pillow on any subprocess error
         buf = io.BytesIO()
-        kwargs = {"format": "JPEG", "quality": quality, "optimize": True}
+        kwargs: dict[str, object] = {
+            "format": "JPEG",
+            "quality": quality,
+            "optimize": True,
+        }
         if qtables is not None:
             kwargs["qtables"] = {0: qtables[0], 1: qtables[1]}
         rgb.save(buf, **kwargs)
@@ -3252,7 +3258,11 @@ def _encode_cjpeg(
     if result.returncode != 0:
         # Fall back to Pillow on cjpeg error
         buf = io.BytesIO()
-        kwargs = {"format": "JPEG", "quality": quality, "optimize": True}
+        kwargs: dict[str, object] = {
+            "format": "JPEG",
+            "quality": quality,
+            "optimize": True,
+        }
         if qtables is not None:
             kwargs["qtables"] = {0: qtables[0], 1: qtables[1]}
         rgb.save(buf, **kwargs)
@@ -3563,12 +3573,12 @@ def _process_tile_jpeg(
         # regardless of jpeg_quality and source_path. The processor
         # reads from its own data sources (e.g. sub-layer caches).
         result = tile_processor(
-            tile.source_path,
+            tile.source_path,  # ty: ignore[invalid-argument-type]
             tile.x,
             tile.y,
             tile.zoom,
             source_crs,
-            jpeg_quality,
+            jpeg_quality,  # ty: ignore[invalid-argument-type]
         )
         if result is not None:
             jpeg_bytes = result[0]  # (jpeg_bytes, bounds)

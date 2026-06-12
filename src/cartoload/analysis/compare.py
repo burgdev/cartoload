@@ -243,6 +243,7 @@ def compare_structure(
                 f"    Level[{i}]: File1 only (zoom={l1['zoom_code']}, lvl={l1['level_number']})"
             )
         else:
+            assert l2 is not None
             echo(
                 f"    Level[{i}]: File2 only (zoom={l2['zoom_code']}, lvl={l2['level_number']})"
             )

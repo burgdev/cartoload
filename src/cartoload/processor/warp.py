@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import rasterio
 from PIL import Image
-from rasterio.crs import CRS
+from rasterio.crs import CRS  # ty: ignore
 from rasterio.errors import NotGeoreferencedWarning
 from rasterio.transform import Affine
 from rasterio.warp import calculate_default_transform, reproject, Resampling

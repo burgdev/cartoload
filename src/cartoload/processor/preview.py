@@ -257,11 +257,14 @@ def generate_previews(
 
     for zoom in layer.zoom_levels:
         # Scan for cached tiles at this zoom to guide selection
+        bounds = layer.bounds
+        if bounds is None:
+            continue
         all_coords = bounds_to_tile_coords(
-            layer.bounds["west"],
-            layer.bounds["south"],
-            layer.bounds["east"],
-            layer.bounds["north"],
+            bounds["west"],
+            bounds["south"],
+            bounds["east"],
+            bounds["north"],
             zoom,
         )
         cached_at_zoom: set[tuple[int, int]] = set()

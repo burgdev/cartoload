@@ -1199,7 +1199,7 @@ def export(
             parts = [float(x.strip()) for x in bbox.split(",")]
             if len(parts) != 4:
                 raise ValueError("bbox must have exactly 4 values")
-            bbox_tuple = tuple(parts)
+            bbox_tuple: tuple[float, float, float, float] | None = tuple(parts)  # ty: ignore
         except Exception as e:
             click.echo(f"Error: Invalid bbox format: {e}", err=True)
             raise click.Abort()

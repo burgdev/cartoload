@@ -13,7 +13,7 @@ import math
 from pathlib import Path
 from typing import Any
 
-from osgeo import ogr, osr
+from osgeo import ogr, osr  # ty: ignore
 from PIL import Image, ImageDraw
 from pyproj import Transformer
 

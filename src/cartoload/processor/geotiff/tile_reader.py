@@ -25,16 +25,17 @@ from pathlib import Path
 
 import numpy as np
 import rasterio
+import rasterio.windows
 import warnings
 from PIL import Image
-from rasterio.crs import CRS
+from rasterio.crs import CRS  # ty: ignore
 from rasterio.enums import ColorInterp
 from rasterio.errors import NotGeoreferencedWarning
 from rasterio.transform import rowcol
 from rasterio.warp import reproject, Resampling
 
 from cartoload.tile_math import ProcessedTile, compute_bounds_4326
-from ..utils import encode_jpeg
+from ..utils import encode_jpeg  # ty: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -186,7 +187,7 @@ def read_tile_from_geotiff(
             return None
 
         # Read the window
-        window = rasterio.windows.Window(col_off, row_off, width, height)
+        window = rasterio.windows.Window(col_off, row_off, width, height)  # ty: ignore
         src_data = src.read(window=window)
 
         if src_data.size == 0:
@@ -312,7 +313,7 @@ def read_tile_from_warped_geotiff(
             return None
 
         # Read the source window at native resolution.
-        window = rasterio.windows.Window(col_off, row_off, width, height)
+        window = rasterio.windows.Window(col_off, row_off, width, height)  # ty: ignore
         src_data = src.read(window=window)
 
         if src_data.size == 0:

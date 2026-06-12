@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from typing import cast
 
 import click
 from rich.logging import RichHandler
@@ -13,6 +14,7 @@ from rich.progress import (
     BarColumn,
     Progress,
     SpinnerColumn,
+    TaskID,
     TextColumn,
     TimeElapsedColumn,
     TimeRemainingColumn,
@@ -321,10 +323,18 @@ def build(
 
         # Resolve settings: env vars override config, CLI flags override env vars
         resolved = resolve_settings(config.settings)
-        effective_output_dir = output_dir or resolved.get("output_dir", "./output")
-        effective_cache_dir = cache_dir or resolved.get("cache_dir", "./cache")
-        effective_quality = quality or resolved.get("quality")
-        effective_executor = executor_mode or resolved.get("executor")
+        effective_output_dir = output_dir or cast(
+            str, resolved.get("output_dir", "./output")
+        )
+        effective_cache_dir = cache_dir or cast(
+            str, resolved.get("cache_dir", "./cache")
+        )
+        effective_quality: int | None = quality or cast(
+            int | None, resolved.get("quality")
+        )
+        effective_executor: str | None = executor_mode or cast(
+            str | None, resolved.get("executor")
+        )
 
         # Resolve custom quantization tables from preset name + quality
         # CLI --qtables takes precedence over config jpeg_qtables
@@ -472,6 +482,8 @@ def build(
             extract_task = None
             encode_task = None
 
+            _progress_tasks: dict[str, TaskID] = {}
+
             def on_export_progress(stage: str, current: int, total: int) -> None:
                 nonlocal extract_task, encode_task
                 if stage == "extracting":
@@ -488,26 +500,20 @@ def build(
                     parts = stage.split(":", 1)
                     zoom_label = f" (zoom {parts[1]})" if len(parts) > 1 else ""
                     task_key = f"process_{parts[1] if len(parts) > 1 else 'default'}"
-                    if not hasattr(on_export_progress, "_tasks"):
-                        on_export_progress._tasks = {}  # type: ignore[attr-defined]
-                    tasks_dict = on_export_progress._tasks  # type: ignore[attr-defined]
-                    if task_key not in tasks_dict:
-                        tasks_dict[task_key] = progress.add_task(
+                    if task_key not in _progress_tasks:
+                        _progress_tasks[task_key] = progress.add_task(
                             f"Processing tiles{zoom_label}", total=total
                         )
-                    progress.update(tasks_dict[task_key], completed=current)
+                    progress.update(_progress_tasks[task_key], completed=current)
                 elif stage.startswith("writing"):
                     parts = stage.split(":", 1)
                     zoom_label = f" (zoom {parts[1]})" if len(parts) > 1 else ""
                     task_key = f"write_{parts[1] if len(parts) > 1 else 'default'}"
-                    if not hasattr(on_export_progress, "_tasks"):
-                        on_export_progress._tasks = {}  # type: ignore[attr-defined]
-                    tasks_dict = on_export_progress._tasks  # type: ignore[attr-defined]
-                    if task_key not in tasks_dict:
-                        tasks_dict[task_key] = progress.add_task(
+                    if task_key not in _progress_tasks:
+                        _progress_tasks[task_key] = progress.add_task(
                             f"Writing tiles{zoom_label}", total=total
                         )
-                    progress.update(tasks_dict[task_key], completed=current)
+                    progress.update(_progress_tasks[task_key], completed=current)
 
             # Run the unified pipeline
             output_paths = asyncio.run(
@@ -638,10 +644,12 @@ def download(
 
         # Resolve settings
         resolved = resolve_settings(config.settings)
-        effective_cache_dir = cache_dir or resolved.get("cache_dir", "./cache")
+        effective_cache_dir = cache_dir or cast(
+            str, resolved.get("cache_dir", "./cache")
+        )
 
         # Resolve -l against targets and layers (matching build behavior)
-        layers_to_download: list[tuple[str, object]] = []  # (layer_id, LayerConfig)
+        layers_to_download: list[tuple[str, LayerConfig]] = []
 
         if layer in config.targets:
             # Download all layers referenced by this target
@@ -698,7 +706,14 @@ def download(
             source = resolve_source_config(lc, config.sources)
             downloader = get_downloader(source, cache, source_args=lc.source_args)
             if isinstance(downloader, STACDownloader):
-                downloaded = downloader.run(source, lc)
+                from cartoload.template import expand
+
+                resolved_url = expand(
+                    source.urls[0] if source.urls else "",
+                    {**source.defaults, **lc.source_args},
+                )
+                collection_id = lc.source_args.get("layer", "")
+                downloaded = downloader.run(source, lc, resolved_url, collection_id)
             elif isinstance(downloader, WmtsDownloader):
                 bounds: dict[str, float] | None = lc.bounds
                 if not bounds:
