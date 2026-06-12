@@ -2202,8 +2202,7 @@ class StreamingIMGWriter:
         self,
         img_file: IMGFile,
         gmp_groups: list[GMPGroup],
-        tile_processor: Callable[[Path, int, int, int, str, int], ProcessedTile | None]
-        | None = None,
+        tile_processor: Callable[..., ProcessedTile | None] | None = None,
         source_crs: str = "EPSG:3857",
         jpeg_quality: int | None = None,
         qtables: tuple[list[int], list[int]] | None = None,
@@ -3458,8 +3457,7 @@ def _estimate_quality_ratio_from_metadata(
     tile_metadata: dict[int, list[TileMetadata]],
     jpeg_quality: int | None,
     max_samples: int = 5,
-    tile_processor: Callable[[Path, int, int, int, str, int], ProcessedTile | None]
-    | None = None,
+    tile_processor: Callable[..., ProcessedTile | None] | None = None,
     source_crs: str = "EPSG:3857",
     qtables: tuple[list[int], list[int]] | None = None,
     fast: bool = False,

@@ -359,7 +359,7 @@ def _parse_layer(layer_el: ET.Element) -> WmtsLayer | None:
         dim_id_el = dim_el.find(f"{NS_OWS}Identifier")
         default_el = dim_el.find(f"{NS_WMTS}Default")
         if dim_id_el is not None and dim_id_el.text:
-            default_val = default_el.text if default_el is not None else ""
+            default_val = (default_el.text if default_el is not None else "") or ""
             dimensions[dim_id_el.text] = default_val
 
     return WmtsLayer(

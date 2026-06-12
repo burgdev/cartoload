@@ -69,8 +69,8 @@ class _ThreadLocalDatasetCache:
     def _get_cache(self) -> OrderedDict[Path, rasterio.DatasetReader]:
         """Get the thread-local cache OrderedDict."""
         if not hasattr(self._local, "cache"):
-            self._local.cache: OrderedDict[Path, rasterio.DatasetReader] = OrderedDict()
-        return self._local.cache
+            self._local.cache = OrderedDict()  # type: ignore[attr-defined]
+        return self._local.cache  # type: ignore[attr-defined]
 
     def get(self, path: Path) -> rasterio.DatasetReader:
         """Get an open dataset for the given path (opens if not cached).
