@@ -9,32 +9,31 @@ site_dir = "site"
 extra_css = ["stylesheets/extra.css"]
 
 nav = [
-    { "Home" = "index.md" },
-    { "Getting started" = "getting-started.md" },
-    { "Guides" = [
-        { "Build a map" = "guides/build-a-map.md" },
-        { "Analyze IMG files" = "guides/analyze-img.md" },
-        { "Split large maps" = "guides/split-maps.md" },
-    ]},
-    { "Configuration" = [
-        { "Overview" = "configuration/index.md" },
-        { "Sources" = "configuration/sources.md" },
-        { "Layers" = "configuration/layers.md" },
-    ]},
-    { "Reference" = [
-        { "Overview" = "reference.md" },
-        { "CLI" = "cli.md" },
-        { "API" = "api-reference.md" },
-        { "IMG Format" = [
-            { "Overview" = "img-format/overview.md" },
-            { "Header & FAT" = "img-format/header-fat.md" },
-            { "GMP Container" = "img-format/gmp-container.md" },
-            { "Tile Storage" = "img-format/tile-storage.md" },
-            { "TRE Sections" = "img-format/tre-sections.md" },
-            { "Vector Reference" = "img-format/vector-reference.md" },
-            { "Tools & resources" = "img-format/tools-resources.md" },
-        ]},
-    ]},
+  { "Home" = "index.md" },
+  { "Getting started" = "getting-started.md" },
+  { "Guides" = [
+    { "Build a map" = "guides/build-a-map.md" },
+    { "Analyze IMG files" = "guides/analyze-img.md" },
+  ] },
+  { "Configuration" = [
+    { "Overview" = "configuration/index.md" },
+    { "Sources" = "configuration/sources.md" },
+    { "Layers" = "configuration/layers.md" },
+  ] },
+  { "Reference" = [
+    { "Overview" = "reference.md" },
+    { "CLI" = "cli.md" },
+    { "API" = "api-reference.md" },
+    { "IMG Format" = [
+      { "Overview" = "img-format/overview.md" },
+      { "Header & FAT" = "img-format/header-fat.md" },
+      { "GMP Container" = "img-format/gmp-container.md" },
+      { "Tile Storage" = "img-format/tile-storage.md" },
+      { "TRE Sections" = "img-format/tre-sections.md" },
+      { "Vector Reference" = "img-format/vector-reference.md" },
+      { "Tools & resources" = "img-format/tools-resources.md" },
+    ] },
+  ] },
 ]
 
 [[project.extra.social]]

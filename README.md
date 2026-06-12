@@ -1,13 +1,19 @@
 # cartoload
 
-Convert official geodata into GPS device maps.
+Convert raster geodata into Garmin GPS raster maps (`*.img`).
 
-cartoload is an open-source CLI tool and Python library that converts geodata from any WMTS, GeoTIFF, or vector source into maps for GPS devices. It is the pipeline engine behind the Cartoload service, but is fully usable standalone.
+`cartoload` is an open-source CLI tool and Python library that converts geodata from WMTS or GeoTIFF source into raster maps for Garmin GPS devices. It is the pipeline engine behind the [Cartoload](https://cartoload.com) service, but is fully usable standalone.
 
 ## Installation
 
 ```bash
 pip install cartoload
+```
+
+or just run it with `uvx`
+
+```bash
+uvx cartoload --help
 ```
 
 ## Quick Start

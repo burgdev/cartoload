@@ -250,6 +250,9 @@ Build one or more layers into output files.
 `--executor {process,thread}`
 :   Parallel executor mode: 'process' (default, fastest) or 'thread' (less memory)
 
+`--fast`
+:   Fast build: skip mirror-padding and cjpeg trellis optimization (larger output)
+
 `-v, --verbose`
 :   Show detailed tracebacks on errors
 
@@ -379,6 +382,9 @@ Read and write forensic watermarks in Garmin IMG files.
 `read`
 :   Read and print the watermark from a Garmin IMG file.
 
+`read-header`
+:   Read the cleartext header from a Garmin IMG file (no key required).
+
 ### `cartoload watermark write`
 
 Write a watermark string into a Garmin IMG file.
@@ -402,6 +408,9 @@ Write a watermark string into a Garmin IMG file.
 `--key-file PATH`
 :   Read key from file
 
+`--header TEXT`
+:   Cleartext header string (e.g. order=ID)
+
 ### `cartoload watermark read`
 
 Read and print the watermark from a Garmin IMG file.
@@ -421,3 +430,14 @@ Read and print the watermark from a Garmin IMG file.
 
 `--key-file PATH`
 :   Read key from file
+
+### `cartoload watermark read-header`
+
+Read the cleartext header from a Garmin IMG file (no key required).
+
+**Usage:** `cartoload watermark read-header IMG_FILE`
+
+**Arguments:**
+
+`IMG_FILE`
+:   Path

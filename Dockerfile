@@ -1,3 +1,21 @@
+# ---- mozjpeg stage: build cjpeg with trellis quantization ----
+FROM ghcr.io/osgeo/gdal:ubuntu-small-3.13.0 AS mozjpeg
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  cmake git build-essential libpng-dev nasm \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --depth 1 --branch v4.1.5 https://github.com/mozilla/mozjpeg.git /tmp/mozjpeg \
+  && cd /tmp/mozjpeg \
+  && mkdir build && cd build \
+  && cmake -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/opt/mozjpeg \
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+    .. \
+  && cmake --build . -j$(nproc) \
+  && cmake --install . \
+  && rm -rf /tmp/mozjpeg
+
 # ---- Builder stage: download tools + install Python deps ----
 FROM ghcr.io/osgeo/gdal:ubuntu-small-3.13.0 AS builder
 
@@ -48,6 +66,9 @@ RUN rm -rf /usr/share/doc /usr/share/man
 # Copy tools from builder
 COPY --from=builder /usr/local/bin/gmt /usr/local/bin/gmt
 COPY --from=builder /opt/mkgmap.jar /opt/mkgmap.jar
+
+# Copy mozjpeg cjpeg binary (trellis quantization for smaller JPEG tiles)
+COPY --from=mozjpeg /opt/mozjpeg/bin/cjpeg /usr/local/bin/cjpeg
 
 # Remove mkgmap placeholder if it wasn't built with INSTALL_MKGMAP=1
 RUN if [ "$INSTALL_MKGMAP" != "1" ]; then rm -f /opt/mkgmap.jar; fi

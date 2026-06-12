@@ -366,6 +366,7 @@ async def build_target(
     warmup_only: bool = False,
     preview: bool = False,
     preview_tiles: int = 9,
+    fast: bool = False,
 ) -> list[Path]:
     """Build a target: download → prepare → metadata → export.
 
@@ -617,7 +618,11 @@ async def build_target(
 
     # Refine jpeg_size estimates by sampling a few tiles
     _refine_jpeg_sizes(
-        tile_metadata, tile_processor, quality=quality or 85, qtables=qtables
+        tile_metadata,
+        tile_processor,
+        quality=quality or 85,
+        qtables=qtables,
+        fast=fast,
     )
 
     # Report tile count and estimated output size
@@ -664,6 +669,7 @@ async def build_target(
             qtables=qtables,
             progress_callback=export_progress_callback,
             tile_processor_override=tile_processor,
+            fast=fast,
         )
     except ExportError:
         raise
@@ -754,6 +760,7 @@ def _refine_jpeg_sizes(
     *,
     quality: int = 85,
     qtables: tuple[list[int], list[int]] | None = None,
+    fast: bool = False,
 ) -> None:
     """Sample tiles through the processor and update jpeg_size estimates.
 
@@ -796,7 +803,7 @@ def _refine_jpeg_sizes(
             if result is not None:
                 jpeg_bytes = result[0]
                 if needs_reencode:
-                    jpeg_bytes = _reencode_jpeg(jpeg_bytes, quality, qtables)
+                    jpeg_bytes = _reencode_jpeg(jpeg_bytes, quality, qtables, fast=fast)
                 samples.append(len(jpeg_bytes))
 
         if not samples:

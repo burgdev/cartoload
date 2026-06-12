@@ -10,18 +10,27 @@ import pytest
 from click.testing import CliRunner
 
 from cartoload.watermark import (
+    CLEARTEXT_HEADER_MAGIC,
+    CLEARTEXT_HEADER_SIZE,
+    MAX_CLEARTEXT_HEADER_BLOB,
+    MAX_CLEARTEXT_HEADER_DATA,
     MAX_PLAINTEXT_SIZE,
     NONCE_SIZE,
     WATERMARK_REGION_END,
     WATERMARK_REGION_START,
+    WatermarkResult,
+    _build_header_blob,
     _build_watermark_blob,
     _compute_watermark_offset,
     _decrypt_payload,
     _derive_key,
     _encrypt_payload,
     _extract_map_id,
+    _read_header_blob,
     extract_map_id_from_bytes,
     read_watermark,
+    read_watermark_header,
+    read_watermark_header_bytes,
     watermark_bytes,
     write_watermark,
 )
@@ -152,7 +161,12 @@ class TestComputeWatermarkOffset:
 
     def test_offset_within_region(self, test_key_derived: bytes):
         offset = _compute_watermark_offset(test_key_derived, 0x12345678)
-        assert WATERMARK_REGION_START <= offset < WATERMARK_REGION_END
+        # Offset must be after the cleartext header area and before region end
+        assert (
+            WATERMARK_REGION_START + MAX_CLEARTEXT_HEADER_BLOB
+            <= offset
+            < WATERMARK_REGION_END
+        )
 
     def test_different_keys_different_offsets(self):
         key1 = _derive_key(b"key-1")
@@ -171,7 +185,7 @@ class TestEncryptDecrypt:
     def test_round_trip(self, test_key_derived: bytes):
         plaintext = "2026-05-21|order-abc123"
         encrypted = _encrypt_payload(plaintext, test_key_derived)
-        assert encrypted[:NONCE_SIZE] != b"\x00" * NONCE_SIZE  # nonce is random
+        assert encrypted[:NONCE_SIZE] != b"\x00" * NONCE_SIZE  # nonce is nonzero
         decrypted = _decrypt_payload(encrypted, test_key_derived)
         assert decrypted == plaintext
 
@@ -199,6 +213,17 @@ class TestEncryptDecrypt:
         decrypted = _decrypt_payload(encrypted, test_key_derived)
         assert decrypted == plaintext
 
+    def test_deterministic_encryption(self, test_key_derived: bytes):
+        """Same key + plaintext always produces same encrypted output."""
+        encrypted1 = _encrypt_payload("deterministic-test", test_key_derived)
+        encrypted2 = _encrypt_payload("deterministic-test", test_key_derived)
+        assert encrypted1 == encrypted2
+
+    def test_different_plaintexts_differ(self, test_key_derived: bytes):
+        encrypted1 = _encrypt_payload("payload-a", test_key_derived)
+        encrypted2 = _encrypt_payload("payload-b", test_key_derived)
+        assert encrypted1 != encrypted2
+
 
 # ---------------------------------------------------------------------------
 # 4.3 Test write_watermark / read_watermark
@@ -210,7 +235,9 @@ class TestWriteReadWatermark:
         payload = "2026-05-21|order-abc123"
         write_watermark(img_file, payload, test_key)
         result = read_watermark(img_file, test_key)
-        assert result == payload
+        assert isinstance(result, WatermarkResult)
+        assert result.payload == payload
+        assert result.header is None
 
     def test_file_unchanged_outside_watermark(self, img_file: Path, test_key: bytes):
         original = img_file.read_bytes()
@@ -227,17 +254,17 @@ class TestWriteReadWatermark:
         write_watermark(img_file, "first-watermark", test_key)
         write_watermark(img_file, "second-watermark", test_key)
         result = read_watermark(img_file, test_key)
-        assert result == "second-watermark"
+        assert result.payload == "second-watermark"
 
-    def test_wrong_key_returns_none(self, img_file: Path, test_key: bytes):
+    def test_wrong_key_returns_none_payload(self, img_file: Path, test_key: bytes):
         write_watermark(img_file, "secret-payload", test_key)
         result = read_watermark(img_file, b"wrong-key")
-        assert result is None
+        assert result.payload is None
 
     def test_key_as_string(self, img_file: Path):
         write_watermark(img_file, "payload", "my-string-key")
         result = read_watermark(img_file, "my-string-key")
-        assert result == "payload"
+        assert result.payload == "payload"
 
     @skip_if_no_sample
     def test_round_trip_on_real_img(self, tmp_path: Path):
@@ -250,7 +277,7 @@ class TestWriteReadWatermark:
         payload = "2026-05-21|order-xyz789"
         write_watermark(img_copy, payload, key)
         result = read_watermark(img_copy, key)
-        assert result == payload
+        assert result.payload == payload
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +313,7 @@ class TestWatermarkBytes:
         img_file.write_bytes(reassembled)
 
         result = read_watermark(img_file, test_key)
-        assert result == "streamed-payload"
+        assert result.payload == "streamed-payload"
 
     def test_chunk_too_small_raises(self, test_key: bytes):
         with pytest.raises(ValueError, match="at least"):
@@ -304,21 +331,142 @@ class TestEdgeCases:
         with pytest.raises(ValueError, match="too large"):
             _build_watermark_blob(huge_payload, test_key_derived)
 
-    def test_no_watermark_returns_none(self, img_file: Path, test_key: bytes):
+    def test_no_watermark_returns_none_payload(self, img_file: Path, test_key: bytes):
         result = read_watermark(img_file, test_key)
-        assert result is None
+        assert isinstance(result, WatermarkResult)
+        assert result.payload is None
+        assert result.header is None
 
     def test_max_size_payload(self, img_file: Path, test_key: bytes):
         # Max payload that fits
         max_payload = "x" * MAX_PLAINTEXT_SIZE
         write_watermark(img_file, max_payload, test_key)
         result = read_watermark(img_file, test_key)
-        assert result == max_payload
+        assert result.payload == max_payload
 
     def test_empty_payload(self, img_file: Path, test_key: bytes):
         write_watermark(img_file, "", test_key)
         result = read_watermark(img_file, test_key)
+        assert result.payload == ""
+
+
+# ---------------------------------------------------------------------------
+# 5. Cleartext header tests
+# ---------------------------------------------------------------------------
+
+
+class TestCleartextHeaderBlob:
+    def test_build_header_blob_format(self):
+        """Verify binary layout: magic + total_length + flags + data."""
+        blob = _build_header_blob("order=abc123")
+        assert blob[:2] == CLEARTEXT_HEADER_MAGIC
+        total_length = struct.unpack("<H", blob[2:4])[0]
+        assert total_length == CLEARTEXT_HEADER_SIZE + len(b"order=abc123")
+        flags = struct.unpack("<H", blob[4:6])[0]
+        assert flags == 0x0001
+        assert blob[6:] == b"order=abc123"
+
+    def test_roundtrip(self):
+        """Build then read a cleartext header blob."""
+        header = "order=gGeN33ktcb8B42McBQbpwY"
+        blob = _build_header_blob(header)
+        result = _read_header_blob(blob)
+        assert result == header
+
+    def test_empty_header(self):
+        blob = _build_header_blob("")
+        assert blob[:2] == CLEARTEXT_HEADER_MAGIC
+        result = _read_header_blob(blob)
         assert result == ""
+
+    def test_max_size_header(self):
+        header = "x" * MAX_CLEARTEXT_HEADER_DATA
+        blob = _build_header_blob(header)
+        result = _read_header_blob(blob)
+        assert result == header
+
+    def test_oversized_header_raises(self):
+        with pytest.raises(ValueError, match="Cleartext header too large"):
+            _build_header_blob("x" * (MAX_CLEARTEXT_HEADER_DATA + 1))
+
+    def test_read_no_magic_returns_none(self):
+        assert _read_header_blob(b"\x00\x00" + b"\x00" * 20) is None
+
+    def test_read_truncated_data_returns_none(self):
+        # Blob claims length 20 but only 8 bytes available
+        blob = CLEARTEXT_HEADER_MAGIC + struct.pack("<H", 20) + b"\x00\x00" + b"ab"
+        assert _read_header_blob(blob) is None
+
+
+class TestCleartextHeaderWriteRead:
+    def test_write_with_header(self, img_file: Path, test_key: bytes):
+        write_watermark(img_file, "secret", test_key, header="order=abc123")
+        # Read header without key
+        header = read_watermark_header(img_file)
+        assert header == "order=abc123"
+        # Read everything with key
+        result = read_watermark(img_file, test_key)
+        assert result.header == "order=abc123"
+        assert result.payload == "secret"
+
+    def test_write_without_header_backward_compat(
+        self, img_file: Path, test_key: bytes
+    ):
+        write_watermark(img_file, "legacy-payload", test_key)
+        header = read_watermark_header(img_file)
+        assert header is None
+        result = read_watermark(img_file, test_key)
+        assert result.payload == "legacy-payload"
+        assert result.header is None
+
+    def test_read_header_legacy_file(self, img_file: Path, test_key: bytes):
+        """Legacy watermarked file (no header) returns None for header."""
+        write_watermark(img_file, "old-format", test_key)
+        assert read_watermark_header(img_file) is None
+
+    def test_watermark_bytes_with_header(self, test_key: bytes):
+        img_data = _build_minimal_img()
+        map_id = 0x12345678
+        first_chunk = img_data[:WATERMARK_REGION_END]
+        rest = img_data[WATERMARK_REGION_END:]
+
+        modified = watermark_bytes(
+            first_chunk, map_id, "streaming", test_key, header="order=stream123"
+        )
+        assert len(modified) == len(first_chunk)
+
+        # Verify header readable from bytes
+        header = read_watermark_header_bytes(modified)
+        assert header == "order=stream123"
+
+        # Verify full roundtrip via reassembled file
+        tmp = Path("/tmp/test_header_streaming.img")
+        tmp.write_bytes(modified + rest)
+        try:
+            result = read_watermark(tmp, test_key)
+            assert result.header == "order=stream123"
+            assert result.payload == "streaming"
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def test_watermark_header_bytes_chunk_too_small(self):
+        assert read_watermark_header_bytes(b"\x00" * 100) is None
+
+    def test_watermark_result_dataclass(self, img_file: Path, test_key: bytes):
+        write_watermark(img_file, "payload", test_key, header="order=DC")
+        result = read_watermark(img_file, test_key)
+        assert isinstance(result, WatermarkResult)
+        assert result.header == "order=DC"
+        assert result.payload == "payload"
+
+    def test_oversized_header_raises(self, img_file: Path, test_key: bytes):
+        with pytest.raises(ValueError, match="Cleartext header too large"):
+            write_watermark(
+                img_file,
+                "payload",
+                test_key,
+                header="x" * (MAX_CLEARTEXT_HEADER_DATA + 1),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -434,6 +582,94 @@ class TestCLI:
         )
         assert result.exit_code == 0
         assert "priority-test" in result.output
+
+    def test_write_and_read_with_header(self, img_file: Path):
+        from cartoload.cli import main
+
+        runner = CliRunner()
+        key = "cli-header-key"
+
+        result = runner.invoke(
+            main,
+            [
+                "watermark",
+                "write",
+                str(img_file),
+                "secret-payload",
+                "--key",
+                key,
+                "--header",
+                "order=abc123",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Watermark written" in result.output
+
+        result = runner.invoke(main, ["watermark", "read", str(img_file), "--key", key])
+        assert result.exit_code == 0, result.output
+        assert "Header:  order=abc123" in result.output
+        assert "Payload: secret-payload" in result.output
+
+    def test_read_header_subcommand(self, img_file: Path):
+        from cartoload.cli import main
+
+        runner = CliRunner()
+        key = "read-header-key"
+
+        # No header yet
+        result = runner.invoke(main, ["watermark", "read-header", str(img_file)])
+        assert result.exit_code == 0, result.output
+        assert "No cleartext header found" in result.output
+
+        # Write with header
+        runner.invoke(
+            main,
+            [
+                "watermark",
+                "write",
+                str(img_file),
+                "payload",
+                "--key",
+                key,
+                "--header",
+                "order=XYZ789",
+            ],
+        )
+
+        # Read header without key
+        result = runner.invoke(main, ["watermark", "read-header", str(img_file)])
+        assert result.exit_code == 0, result.output
+        assert "order=XYZ789" in result.output
+
+    def test_read_without_key_shows_header_only(self, img_file: Path):
+        from cartoload.cli import main
+
+        runner = CliRunner()
+
+        # Write with header
+        runner.invoke(
+            main,
+            [
+                "watermark",
+                "write",
+                str(img_file),
+                "encrypted-data",
+                "--key",
+                "test-key",
+                "--header",
+                "order=HEAD123",
+            ],
+        )
+
+        # Read without key
+        result = runner.invoke(
+            main,
+            ["watermark", "read", str(img_file)],
+            env={k: v for k, v in os.environ.items() if k != "CARTOLOAD_WATERMARK_KEY"},
+        )
+        assert result.exit_code == 0, result.output
+        assert "Header:  order=HEAD123" in result.output
+        assert "key required to decrypt" in result.output
 
 
 # ---------------------------------------------------------------------------

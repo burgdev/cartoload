@@ -69,6 +69,63 @@ The `includes` directive loads other config files (typically source definitions)
 
 A top-level `bounds` key sets default bounds for all layers and targets in the file. Individual layers and targets can override this.
 
+There are two formats for bounds:
+
+**Anonymous bounds** (file-level default, backward compatible):
+
+```yaml
+bounds:
+  west: 5.96
+  east: 10.49
+  south: 45.82
+  north: 47.81
+```
+
+**Named bounds** (reusable, slug-referenced):
+
+```yaml
+bounds:
+  switzerland:
+    west: 5.96
+    east: 10.49
+    south: 45.82
+    north: 47.81
+  bern:
+    west: 7.31
+    east: 7.57
+    south: 46.88
+    north: 47.06
+```
+
+The loader auto-detects the format: if all keys are in `{west, east, south, north}`, it's anonymous; otherwise it's named bounds.
+
+Layers and targets can reference named bounds by slug:
+
+```yaml
+layers:
+  my_layer:
+    name: "My Layer"
+    source: my_source
+    zoom_levels: [10, 12]
+    bounds: switzerland   # references the named bounds above
+```
+
+Or use inline coordinates:
+
+```yaml
+targets:
+  my_target:
+    output: out.img
+    layers: [...]
+    bounds:               # inline coordinates
+      west: 7.0
+      east: 8.0
+      south: 46.5
+      north: 47.0
+```
+
+Named bounds are merged across includes with last-file-wins semantics.
+
 ## Layer definitions
 
 Each entry under `layers:` is a named, reusable definition:
@@ -95,7 +152,7 @@ layers:
 | `source` | yes | Source ID (string) or dict with `ref` + args (see [Source reference](#source-reference)) |
 | `source_args` | no | Template variable overrides (merged with source `defaults`) |
 | `zoom_levels` | yes | List of zoom levels to include |
-| `bounds` | no | Geographic bounds (`west`, `east`, `south`, `north`), inherited from file-level if omitted |
+| `bounds` | no | Geographic bounds: inline (`west`, `east`, `south`, `north`), a slug referencing named bounds, or inherited from file-level if omitted |
 | `rules` | no | Inline style rules for vector/rasterized layers |
 | `style` | no | Path to QML style file for vector/rasterized layers |
 | `garmin_types` | no | Garmin type mapping for vector features |
@@ -158,7 +215,7 @@ targets:
 | `description` | no | Target description |
 | `exporter` | no | Export format (default: `garmin_img`) |
 | `zoom_levels` | no | List of zoom levels — inherited from referenced layers if omitted |
-| `bounds` | no | Geographic bounds — inherited from file-level or referenced layers if omitted |
+| `bounds` | no | Geographic bounds: inline, a slug referencing named bounds, or inherited from file-level/referenced layers if omitted |
 
 ### Zoom levels and bounds inheritance
 
@@ -234,6 +291,36 @@ opacity: {12: 0.3, 14: 0.8}    # per-zoom
 When a layer entry declares a zoom level but a specific tile is unavailable (404 from server), the system automatically falls back to the closest lower zoom level in the entry's `zoom_levels` list and upscales that tile. If no lower-zoom fallback exists, the entry is skipped for that tile position.
 
 Fallback only applies when the zoom level is *declared* but the tile is missing. Zoom levels intentionally omitted from `zoom_levels` are not subject to fallback.
+
+## Products
+
+A `products` section defines product catalogs for server-side use (e.g., pricing, download tokens). This section is optional and ignored by the CLI pipeline — it exists for the server to consume.
+
+```yaml
+products:
+  outdoor-summer:
+    name: "Outdoor Summer"
+    price: 25.0
+    currency: CHF
+    targets: [ch_outdoor_summer]
+    token_max_downloads: 10
+    token_expiry_days: 60
+    sort_order: 1
+```
+
+### Product fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | no | Display name (defaults to the product slug) |
+| `price` | no | Price (default: `0.0`) |
+| `currency` | no | Currency code (default: `CHF`) |
+| `targets` | no | List of target slugs this product includes (validated on load) |
+| `token_max_downloads` | no | Max downloads per token (default: `5`) |
+| `token_expiry_days` | no | Token validity in days (default: `30`) |
+| `sort_order` | no | Display sort order (default: `0`) |
+
+All product target references are validated — a product referencing a nonexistent target slug will raise an error at config load time. Products are merged across includes with last-file-wins semantics.
 
 ## Complete example
 

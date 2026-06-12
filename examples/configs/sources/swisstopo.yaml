@@ -4,7 +4,8 @@
 sources:
   swisstopo_wmts:
     type: wmts
-    capabilities_url: "https://wmts.geo.admin.ch/EPSG/3857/1.0.0/WMTSCapabilities.xml"
+    urls:
+      - "https://wmts.geo.admin.ch/EPSG/3857/1.0.0/WMTSCapabilities.xml"
     layer: ch.swisstopo.pixelkarte-farbe
     tile_matrix_set: 3857
     attribution: "© swisstopo"

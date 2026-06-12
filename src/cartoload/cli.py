@@ -269,6 +269,12 @@ main.add_command(analyze)
     help="Parallel executor mode: 'process' (default, fastest) or 'thread' (less memory)",
 )
 @click.option(
+    "--fast",
+    "fast_build",
+    is_flag=True,
+    help="Fast build: skip mirror-padding and cjpeg trellis optimization (larger output)",
+)
+@click.option(
     "-v",
     "--verbose",
     is_flag=True,
@@ -298,6 +304,7 @@ def build(
     quality: int | None,
     qtables_preset: str | None,
     executor_mode: str | None,
+    fast_build: bool,
     verbose: bool,
 ) -> None:
     """Build one or more layers into output files."""
@@ -524,6 +531,7 @@ def build(
                     warmup_only=cache_warmup,
                     preview=preview,
                     preview_tiles=preview_tiles,
+                    fast=fast_build,
                 )
             )
 
@@ -997,15 +1005,20 @@ def watermark() -> None:
 @click.option(
     "--key-file", default=None, type=click.Path(exists=True), help="Read key from file"
 )
+@click.option("--header", default=None, help="Cleartext header string (e.g. order=ID)")
 def watermark_write(
-    img_file: str, payload: str, key: str | None, key_file: str | None
+    img_file: str,
+    payload: str,
+    key: str | None,
+    key_file: str | None,
+    header: str | None,
 ) -> None:
     """Write a watermark string into a Garmin IMG file."""
     from cartoload.watermark import write_watermark
 
     resolved_key = _resolve_key(key, key_file)
     try:
-        write_watermark(img_file, payload, resolved_key)
+        write_watermark(img_file, payload, resolved_key, header=header)
         click.echo("Watermark written.")
     except ValueError as e:
         raise click.ClickException(str(e)) from e
@@ -1019,11 +1032,42 @@ def watermark_write(
 )
 def watermark_read(img_file: str, key: str | None, key_file: str | None) -> None:
     """Read and print the watermark from a Garmin IMG file."""
-    from cartoload.watermark import read_watermark
+    from cartoload.watermark import read_watermark, read_watermark_header
 
-    resolved_key = _resolve_key(key, key_file)
-    result = read_watermark(img_file, resolved_key)
-    if result is None:
-        click.echo("No watermark found.")
+    # Read cleartext header first (no key needed)
+    header = read_watermark_header(img_file)
+
+    # Try to resolve key for encrypted payload
+    has_key = key is not None or key_file is not None or os.environ.get(_ENV_KEY)
+    if has_key:
+        resolved_key = _resolve_key(key, key_file)
+        result = read_watermark(img_file, resolved_key)
+        if result.payload is None and header is None:
+            click.echo("No watermark found.")
+        else:
+            if header is not None:
+                click.echo(f"Header:  {header}")
+            if result.payload is not None:
+                click.echo(f"Payload: {result.payload}")
+            elif header is not None:
+                click.echo("Payload: (no encrypted watermark found)")
     else:
-        click.echo(result)
+        # No key — show header only
+        if header is not None:
+            click.echo(f"Header:  {header}")
+            click.echo("Payload: (key required to decrypt)")
+        else:
+            click.echo("No watermark found.")
+
+
+@watermark.command("read-header")
+@click.argument("img_file", type=click.Path(exists=True))
+def watermark_read_header(img_file: str) -> None:
+    """Read the cleartext header from a Garmin IMG file (no key required)."""
+    from cartoload.watermark import read_watermark_header
+
+    header = read_watermark_header(img_file)
+    if header is None:
+        click.echo("No cleartext header found.")
+    else:
+        click.echo(header)

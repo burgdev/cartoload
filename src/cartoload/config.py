@@ -41,6 +41,31 @@ class SourceConfig:
 
 
 @dataclass
+class BoundsConfig:
+    """Named geographic bounding box."""
+
+    id: str
+    west: float
+    east: float
+    south: float
+    north: float
+
+
+@dataclass
+class ProductConfig:
+    """Product definition for server-side product catalogs."""
+
+    id: str
+    name: str = ""
+    price: float = 0.0
+    currency: str = "CHF"
+    token_max_downloads: int = 5
+    token_expiry_days: int = 30
+    sort_order: int = 0
+    targets: list[str] = field(default_factory=list)
+
+
+@dataclass
 class TargetLayerEntry:
     """An entry in a target's layer stack — either a ref or inline definition.
 
@@ -144,7 +169,8 @@ class Config:
     sources: dict[str, SourceConfig]
     layers: dict[str, LayerConfig]
     targets: dict[str, TargetConfig] = field(default_factory=dict)
-    bounds: dict[str, float] | None = None
+    bounds: dict[str, BoundsConfig] = field(default_factory=dict)
+    products: dict[str, ProductConfig] = field(default_factory=dict)
     settings: SettingsConfig = field(default_factory=SettingsConfig)
 
 
@@ -357,6 +383,99 @@ def _parse_bounds(bounds_data: dict, path: str, context: str = "") -> dict[str, 
     return bounds_data
 
 
+_ANON_BOUND_KEYS = {"west", "east", "south", "north"}
+
+
+def _is_anonymous_bounds(bounds_data: dict) -> bool:
+    """Detect whether a bounds dict is anonymous (inline) or named (dict of dicts).
+
+    Anonymous: all keys are in {west, east, south, north}.
+    Named: contains at least one key NOT in that set.
+    """
+    return bool(bounds_data) and all(k in _ANON_BOUND_KEYS for k in bounds_data)
+
+
+def _parse_bounds_section(
+    data: dict, path: str
+) -> tuple[dict[str, BoundsConfig], dict[str, float] | None]:
+    """Parse the ``bounds:`` section, detecting anonymous vs named format.
+
+    Returns:
+        Tuple of (named_bounds_dict, anonymous_bounds_or_None).
+        - named_bounds_dict: empty if anonymous format used
+        - anonymous_bounds_or_None: the raw dict if anonymous, None if named or absent
+    """
+    if "bounds" not in data or data["bounds"] is None:
+        return ({}, None)
+
+    bounds_data = data["bounds"]
+    if not isinstance(bounds_data, dict):
+        raise ValueError(f"{path}: 'bounds' must be a dict")
+
+    # Anonymous format: {west, east, south, north}
+    if _is_anonymous_bounds(bounds_data):
+        validated = _parse_bounds(bounds_data, path)
+        return ({}, validated)
+
+    # Named format: {slug: {west, east, south, north}, ...}
+    named: dict[str, BoundsConfig] = {}
+    for slug, entry in bounds_data.items():
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"{path}: Named bounds '{slug}' must be a dict, got {type(entry).__name__}"
+            )
+        validated = _parse_bounds(entry, path, context=f"bounds '{slug}' ")
+        named[slug] = BoundsConfig(
+            id=slug,
+            west=validated["west"],
+            east=validated["east"],
+            south=validated["south"],
+            north=validated["north"],
+        )
+    return (named, None)
+
+
+def _parse_products_section(data: dict, path: str) -> dict[str, ProductConfig]:
+    """Parse the ``products:`` section.
+
+    Returns:
+        Dict of product slug to ProductConfig. Empty if no products section.
+    """
+    if "products" not in data or data["products"] is None:
+        return {}
+
+    products_data = data["products"]
+    if not isinstance(products_data, dict):
+        raise ValueError(
+            f"{path}: 'products' must be a dict, got {type(products_data).__name__}"
+        )
+
+    products: dict[str, ProductConfig] = {}
+    for slug, entry in products_data.items():
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"{path}: Product '{slug}' must be a dict, got {type(entry).__name__}"
+            )
+
+        targets_raw = entry.get("targets", [])
+        if isinstance(targets_raw, str):
+            targets_raw = [targets_raw]
+        if not isinstance(targets_raw, list):
+            raise ValueError(f"{path}: Product '{slug}' field 'targets' must be a list")
+
+        products[slug] = ProductConfig(
+            id=slug,
+            name=entry.get("name", slug),
+            price=float(entry.get("price", 0.0)),
+            currency=entry.get("currency", "CHF"),
+            token_max_downloads=int(entry.get("token_max_downloads", 5)),
+            token_expiry_days=int(entry.get("token_expiry_days", 30)),
+            sort_order=int(entry.get("sort_order", 0)),
+            targets=[str(t) for t in targets_raw],
+        )
+    return products
+
+
 def _parse_source_field(
     raw_source: str | dict,
 ) -> tuple[str, dict[str, str], dict[str, str] | None]:
@@ -562,22 +681,27 @@ def _parse_target_layers(
 
 def _parse_layers_section(
     data: dict, path: str
-) -> tuple[dict[str, LayerConfig], dict[str, float] | None]:
+) -> tuple[
+    dict[str, LayerConfig],
+    dict[str, BoundsConfig],
+    dict[str, float] | None,
+]:
     """Extract and validate `layers:` and `bounds:` from a unified YAML dict.
 
     Layers are definitions — they have source and format but no output/exporter.
+
+    Returns:
+        Tuple of (layers, named_bounds, anonymous_bounds).
     """
-    # Parse file-level bounds even when no layers section exists
-    bounds = None
-    if "bounds" in data and data["bounds"] is not None:
-        bounds = _parse_bounds(data["bounds"], path)
+    # Parse bounds section (anonymous or named)
+    named_bounds, anon_bounds = _parse_bounds_section(data, path)
 
     if "layers" not in data:
-        return ({}, bounds)
+        return ({}, named_bounds, anon_bounds)
 
     layers_data = data["layers"]
     if layers_data is None:
-        return ({}, bounds)
+        return ({}, named_bounds, anon_bounds)
     if not isinstance(layers_data, dict):
         raise ValueError(
             f"{path}: 'layers' must be a dict, got {type(layers_data).__name__}"
@@ -633,12 +757,17 @@ def _parse_layers_section(
         # Validate layer-level bounds if present
         layer_bounds = None
         if "bounds" in layer_dict and layer_dict["bounds"] is not None:
-            layer_bounds = _parse_bounds(
-                layer_dict["bounds"], path, context=f"Layer '{layer_id}' "
-            )
-        elif bounds is not None:
-            # Inherit file-level bounds if layer has none
-            layer_bounds = bounds
+            raw_bounds = layer_dict["bounds"]
+            if isinstance(raw_bounds, str):
+                # String reference to named bounds — resolved later by resolve_bounds_refs()
+                layer_bounds = raw_bounds  # type: ignore[assignment]
+            elif isinstance(raw_bounds, dict):
+                layer_bounds = _parse_bounds(
+                    raw_bounds, path, context=f"Layer '{layer_id}' "
+                )
+        elif anon_bounds is not None:
+            # Inherit file-level anonymous bounds if layer has none
+            layer_bounds = anon_bounds
 
         # Validate format if present
         fmt = layer_dict.get("format", "")
@@ -675,7 +804,7 @@ def _parse_layers_section(
             config_dir=str(Path(path).parent.resolve()),
         )
 
-    return (layers, bounds)
+    return (layers, named_bounds, anon_bounds)
 
 
 def _parse_targets_section(
@@ -728,9 +857,14 @@ def _parse_targets_section(
         # Validate bounds
         target_bounds = None
         if "bounds" in target_dict and target_dict["bounds"] is not None:
-            target_bounds = _parse_bounds(
-                target_dict["bounds"], path, context=f"Target '{target_id}' "
-            )
+            raw_bounds = target_dict["bounds"]
+            if isinstance(raw_bounds, str):
+                # String reference to named bounds — resolved later by resolve_bounds_refs()
+                target_bounds = raw_bounds  # type: ignore[assignment]
+            elif isinstance(raw_bounds, dict):
+                target_bounds = _parse_bounds(
+                    raw_bounds, path, context=f"Target '{target_id}' "
+                )
         elif file_bounds is not None:
             target_bounds = file_bounds
 
@@ -798,14 +932,47 @@ def merge_sources(*source_dicts: dict[str, SourceConfig]) -> dict[str, SourceCon
     return merged
 
 
-def merge_layers(
-    *layer_results: tuple[dict[str, LayerConfig], dict[str, float] | None],
-) -> tuple[dict[str, LayerConfig], dict[str, float] | None]:
-    """Merge multiple layer results with last-file-wins semantics."""
-    merged_layers = {}
-    merged_bounds = None
+def merge_bounds(
+    *bounds_dicts: dict[str, BoundsConfig],
+) -> dict[str, BoundsConfig]:
+    """Merge multiple named bounds dictionaries with last-file-wins semantics."""
+    merged: dict[str, BoundsConfig] = {}
+    for bounds_dict in bounds_dicts:
+        for slug, bounds_config in bounds_dict.items():
+            if slug in merged:
+                logger.warning(
+                    f"Bounds '{slug}' defined multiple times, using later definition"
+                )
+            merged[slug] = bounds_config
+    return merged
 
-    for layers_dict, bounds in layer_results:
+
+def merge_products(
+    *product_dicts: dict[str, ProductConfig],
+) -> dict[str, ProductConfig]:
+    """Merge multiple product dictionaries with last-file-wins semantics."""
+    merged: dict[str, ProductConfig] = {}
+    for product_dict in product_dicts:
+        for slug, product_config in product_dict.items():
+            if slug in merged:
+                logger.warning(
+                    f"Product '{slug}' defined multiple times, using later definition"
+                )
+            merged[slug] = product_config
+    return merged
+
+
+def merge_layers(
+    *layer_results: tuple[
+        dict[str, LayerConfig], dict[str, BoundsConfig], dict[str, float] | None
+    ],
+) -> tuple[dict[str, LayerConfig], dict[str, BoundsConfig], dict[str, float] | None]:
+    """Merge multiple layer results with last-file-wins semantics."""
+    merged_layers: dict[str, LayerConfig] = {}
+    merged_named_bounds: dict[str, BoundsConfig] = {}
+    merged_anon_bounds: dict[str, float] | None = None
+
+    for layers_dict, named_bounds, anon_bounds in layer_results:
         for layer_id, layer_config in layers_dict.items():
             if layer_id in merged_layers:
                 logger.warning(
@@ -813,14 +980,21 @@ def merge_layers(
                 )
             merged_layers[layer_id] = layer_config
 
-        if bounds is not None:
-            if merged_bounds is not None:
+        for slug, bounds_config in named_bounds.items():
+            if slug in merged_named_bounds:
+                logger.warning(
+                    f"Bounds '{slug}' defined multiple times, using later definition"
+                )
+            merged_named_bounds[slug] = bounds_config
+
+        if anon_bounds is not None:
+            if merged_anon_bounds is not None:
                 logger.warning(
                     "File-level bounds defined multiple times, using later definition"
                 )
-            merged_bounds = bounds
+            merged_anon_bounds = anon_bounds
 
-    return (merged_layers, merged_bounds)
+    return (merged_layers, merged_named_bounds, merged_anon_bounds)
 
 
 def merge_targets(
@@ -854,12 +1028,56 @@ def merge_settings(*settings_list: SettingsConfig) -> SettingsConfig:
 # ---------------------------------------------------------------------------
 
 
+def resolve_bounds_refs(
+    layers: dict[str, LayerConfig],
+    targets: dict[str, TargetConfig],
+    named_bounds: dict[str, BoundsConfig],
+) -> None:
+    """Resolve string bounds references on layers and targets to dict coordinates.
+
+    After resolution, every ``bounds`` field is either ``dict[str, float]`` or ``None``.
+    """
+    for layer_id, layer_config in layers.items():
+        if isinstance(layer_config.bounds, str):
+            slug = layer_config.bounds
+            if slug not in named_bounds:
+                raise ValueError(
+                    f"Layer '{layer_id}' references undefined bounds '{slug}'"
+                )
+            b = named_bounds[slug]
+            layer_config.bounds = {
+                "west": b.west,
+                "east": b.east,
+                "south": b.south,
+                "north": b.north,
+            }
+
+    for target_id, target_config in targets.items():
+        if isinstance(target_config.bounds, str):
+            slug = target_config.bounds
+            if slug not in named_bounds:
+                raise ValueError(
+                    f"Target '{target_id}' references undefined bounds '{slug}'"
+                )
+            b = named_bounds[slug]
+            target_config.bounds = {
+                "west": b.west,
+                "east": b.east,
+                "south": b.south,
+                "north": b.north,
+            }
+
+
 def resolve_references(
     layers: dict[str, LayerConfig],
     targets: dict[str, TargetConfig],
     sources: dict[str, SourceConfig],
+    products: dict[str, ProductConfig] | None = None,
 ) -> None:
-    """Validate that all layer and target source references point to loaded sources."""
+    """Validate that all layer and target source references point to loaded sources.
+
+    If ``products`` is provided, also validates that product target references exist.
+    """
     unresolved = []
 
     # Check layer definitions
@@ -884,6 +1102,16 @@ def resolve_references(
             + "\n".join(error_lines)
             + f"\n\nAvailable sources: {available_sources}"
         )
+
+    # Validate product target references
+    if products:
+        for product_id, product_config in products.items():
+            bad_refs = [t for t in product_config.targets if t not in targets]
+            if bad_refs:
+                raise ValueError(
+                    f"Product '{product_id}' references undefined target(s): "
+                    + ", ".join(f"'{t}'" for t in bad_refs)
+                )
 
 
 def resolve_target_layer_refs(
@@ -986,7 +1214,9 @@ def _load_unified_file(
     dict[str, SourceConfig],
     dict[str, LayerConfig],
     dict[str, TargetConfig],
+    dict[str, BoundsConfig],
     dict[str, float] | None,
+    dict[str, ProductConfig],
     SettingsConfig,
 ]:
     """Load a single unified config file, resolving includes recursively.
@@ -996,7 +1226,7 @@ def _load_unified_file(
         seen: Set of resolved file paths already loaded (for cycle detection)
 
     Returns:
-        Tuple of (sources, layers, targets, bounds, settings)
+        Tuple of (sources, layers, targets, named_bounds, anonymous_bounds, products, settings)
 
     Raises:
         FileNotFoundError: If the file does not exist
@@ -1025,7 +1255,9 @@ def _load_unified_file(
     merged_sources: dict[str, SourceConfig] = {}
     merged_layers: dict[str, LayerConfig] = {}
     merged_targets: dict[str, TargetConfig] = {}
-    merged_bounds: dict[str, float] | None = None
+    merged_named_bounds: dict[str, BoundsConfig] = {}
+    merged_anon_bounds: dict[str, float] | None = None
+    merged_products: dict[str, ProductConfig] = {}
     merged_settings = SettingsConfig()
 
     includes = data.get("includes")
@@ -1045,47 +1277,66 @@ def _load_unified_file(
                 inc_sources,
                 inc_layers,
                 inc_targets,
+                inc_named_bounds,
                 inc_bounds,
+                inc_products,
                 inc_settings,
             ) = _load_unified_file(str(resolved), seen | {file_path})
 
             # Merge included results
             merged_sources = merge_sources(merged_sources, inc_sources)
-            merged_layers_dict, merged_bounds = merge_layers(
-                (merged_layers, merged_bounds), (inc_layers, inc_bounds)
+            merged_layers_dict, merged_named_b, merged_anon_b = merge_layers(
+                (merged_layers, merged_named_bounds, merged_anon_bounds),
+                (inc_layers, inc_named_bounds, inc_bounds),
             )
             merged_layers = merged_layers_dict
+            merged_named_bounds = merged_named_b
+            merged_anon_bounds = merged_anon_b
             merged_targets = merge_targets(merged_targets, inc_targets)
+            merged_products = merge_products(merged_products, inc_products)
             merged_settings = merge_settings(merged_settings, inc_settings)
 
     # Parse current file's sections
     cur_sources = _parse_sources_section(data, path)
-    cur_layers, cur_bounds = _parse_layers_section(data, path)
-    cur_targets = _parse_targets_section(data, path, cur_bounds or merged_bounds)
+    cur_layers, cur_named_bounds, cur_anon_bounds = _parse_layers_section(data, path)
+    cur_products = _parse_products_section(data, path)
+    cur_targets = _parse_targets_section(
+        data, path, cur_anon_bounds or merged_anon_bounds
+    )
     cur_settings = _parse_settings_section(data, path)
 
     # Merge current file on top of includes
     final_sources = merge_sources(merged_sources, cur_sources)
-    final_layers, final_bounds = merge_layers(
-        (merged_layers, merged_bounds), (cur_layers, cur_bounds)
+    final_layers, final_named_bounds, final_anon_bounds = merge_layers(
+        (merged_layers, merged_named_bounds, merged_anon_bounds),
+        (cur_layers, cur_named_bounds, cur_anon_bounds),
     )
     final_targets = merge_targets(merged_targets, cur_targets)
+    final_products = merge_products(merged_products, cur_products)
     final_settings = merge_settings(merged_settings, cur_settings)
 
-    return (final_sources, final_layers, final_targets, final_bounds, final_settings)
+    return (
+        final_sources,
+        final_layers,
+        final_targets,
+        final_named_bounds,
+        final_anon_bounds,
+        final_products,
+        final_settings,
+    )
 
 
 def load_config(config_paths: list[str]) -> Config:
     """Load and merge config files into a single Config object.
 
     Each config file uses the unified format with optional sections:
-    includes, sources, layers, targets, bounds, settings.
+    includes, sources, layers, targets, bounds, products, settings.
 
     Args:
         config_paths: List of paths to YAML config files
 
     Returns:
-        Config object containing merged sources, layers, targets, bounds, and settings
+        Config object containing merged sources, layers, targets, bounds, products, and settings
 
     Raises:
         FileNotFoundError: If any config file does not exist
@@ -1094,18 +1345,28 @@ def load_config(config_paths: list[str]) -> Config:
     all_sources: dict[str, SourceConfig] = {}
     all_layers: dict[str, LayerConfig] = {}
     all_targets: dict[str, TargetConfig] = {}
-    all_bounds: dict[str, float] | None = None
+    all_named_bounds: dict[str, BoundsConfig] = {}
+    all_anon_bounds: dict[str, float] | None = None
+    all_products: dict[str, ProductConfig] = {}
     all_settings = SettingsConfig()
 
     for path in config_paths:
-        sources, layers, targets, bounds, settings = _load_unified_file(
-            path, seen=set()
-        )
+        (
+            sources,
+            layers,
+            targets,
+            named_bounds,
+            anon_bounds,
+            products,
+            settings,
+        ) = _load_unified_file(path, seen=set())
         all_sources = merge_sources(all_sources, sources)
-        all_layers, all_bounds = merge_layers(
-            (all_layers, all_bounds), (layers, bounds)
+        all_layers, all_named_bounds, all_anon_bounds = merge_layers(
+            (all_layers, all_named_bounds, all_anon_bounds),
+            (layers, named_bounds, anon_bounds),
         )
         all_targets = merge_targets(all_targets, targets)
+        all_products = merge_products(all_products, products)
         all_settings = merge_settings(all_settings, settings)
 
     # Resolve target layer refs (must happen before source validation)
@@ -1113,12 +1374,16 @@ def load_config(config_paths: list[str]) -> Config:
         resolve_target_layer_refs(all_targets, all_layers)
 
     # Resolve source references
-    resolve_references(all_layers, all_targets, all_sources)
+    resolve_references(all_layers, all_targets, all_sources, all_products)
+
+    # Resolve string bounds references
+    resolve_bounds_refs(all_layers, all_targets, all_named_bounds)
 
     return Config(
         sources=all_sources,
         layers=all_layers,
         targets=all_targets,
-        bounds=all_bounds,
+        bounds=all_named_bounds,
+        products=all_products,
         settings=all_settings,
     )

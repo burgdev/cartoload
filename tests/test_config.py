@@ -6,21 +6,29 @@ import pytest
 import yaml
 
 from cartoload.config import (
+    BoundsConfig,
     LayerConfig,
+    ProductConfig,
     SettingsConfig,
     SourceConfig,
     TargetConfig,
     TargetLayerEntry,
     _detect_source_type,
+    _is_anonymous_bounds,
+    _parse_bounds_section,
     _parse_layers_section,
+    _parse_products_section,
     _parse_settings_section,
     _parse_sources_section,
     _parse_targets_section,
     load_config,
+    merge_bounds,
     merge_layers,
+    merge_products,
     merge_settings,
     merge_sources,
     merge_targets,
+    resolve_bounds_refs,
     resolve_references,
     resolve_settings,
     resolve_target_layer_refs,
@@ -460,7 +468,7 @@ def test_parse_layers_section_valid():
             }
         },
     }
-    layers, bounds = _parse_layers_section(data, "test.yaml")
+    layers, named_bounds, bounds = _parse_layers_section(data, "test.yaml")
     assert len(layers) == 1
     assert "test_layer" in layers
     assert layers["test_layer"].name == "Test Layer"
@@ -469,13 +477,15 @@ def test_parse_layers_section_valid():
     assert bounds is not None
     assert bounds["west"] == 5.0
     assert bounds["north"] == 48.0
+    assert named_bounds == {}
 
 
 def test_parse_layers_section_missing():
     """When no layers key, returns empty."""
-    layers, bounds = _parse_layers_section({}, "test.yaml")
+    layers, named_bounds, bounds = _parse_layers_section({}, "test.yaml")
     assert layers == {}
     assert bounds is None
+    assert named_bounds == {}
 
 
 def test_parse_layers_section_missing_required_field():
@@ -565,7 +575,7 @@ def test_parse_layers_section_asset_filter_in_source_dict():
             }
         },
     }
-    layers, _ = _parse_layers_section(data, "test.yaml")
+    layers, _, _ = _parse_layers_section(data, "test.yaml")
     assert layers["test_layer"].asset_filter == {"geoadmin:variant": "krel"}
     assert "asset_filter" not in layers["test_layer"].source_args
 
@@ -586,7 +596,7 @@ def test_parse_layers_section_no_asset_filter():
             }
         },
     }
-    layers, _ = _parse_layers_section(data, "test.yaml")
+    layers, _, _ = _parse_layers_section(data, "test.yaml")
     assert layers["test_layer"].asset_filter is None
 
 
@@ -623,7 +633,7 @@ def test_parse_layers_section_inherits_file_bounds():
             }
         },
     }
-    layers, _ = _parse_layers_section(data, "test.yaml")
+    layers, _, _ = _parse_layers_section(data, "test.yaml")
     assert layers["test_layer"].bounds == {
         "west": 5.0,
         "east": 10.0,
@@ -644,7 +654,7 @@ def test_parse_layers_section_wmts_layer_backward_compat():
             }
         },
     }
-    layers, _ = _parse_layers_section(data, "test.yaml")
+    layers, _, _ = _parse_layers_section(data, "test.yaml")
     assert layers["test"].source_args["layer"] == "ch.swisstopo.pixelkarte-farbe"
 
 
@@ -993,14 +1003,18 @@ def test_merge_layers():
     layers1 = {
         "layer1": LayerConfig(id="layer1", name="Layer 1"),
     }
+    named_bounds1: dict[str, BoundsConfig] = {}
     bounds1 = {"west": 5.0, "east": 10.0, "south": 45.0, "north": 48.0}
 
     layers2 = {
         "layer2": LayerConfig(id="layer2", name="Layer 2"),
     }
+    named_bounds2: dict[str, BoundsConfig] = {}
     bounds2 = {"west": 6.0, "east": 11.0, "south": 46.0, "north": 49.0}
 
-    merged_layers, merged_bounds = merge_layers((layers1, bounds1), (layers2, bounds2))
+    merged_layers, merged_named, merged_bounds = merge_layers(
+        (layers1, named_bounds1, bounds1), (layers2, named_bounds2, bounds2)
+    )
 
     assert len(merged_layers) == 2
     assert "layer1" in merged_layers
@@ -1135,8 +1149,14 @@ def test_load_config_single_file(tmp_path):
     assert len(config.sources) == 1
     assert len(config.layers) == 1
     assert len(config.targets) == 1
-    assert config.bounds is not None
-    assert config.bounds["west"] == 5.0
+    # Anonymous bounds are inherited by layers/targets, not stored as named bounds
+    assert config.bounds == {}
+    assert config.layers["test_layer"].bounds == {
+        "west": 5.0,
+        "east": 10.0,
+        "south": 45.0,
+        "north": 48.0,
+    }
 
 
 def test_load_config_sources_only(tmp_path):
@@ -1157,7 +1177,7 @@ def test_load_config_sources_only(tmp_path):
     assert len(config.sources) == 1
     assert len(config.layers) == 0
     assert len(config.targets) == 0
-    assert config.bounds is None
+    assert config.bounds == {}
 
 
 def test_load_config_layers_only_no_sources(tmp_path):
@@ -1191,7 +1211,7 @@ def test_load_config_empty_file(tmp_path):
     assert len(config.sources) == 0
     assert len(config.layers) == 0
     assert len(config.targets) == 0
-    assert config.bounds is None
+    assert config.bounds == {}
 
 
 def test_load_config_no_files():
@@ -1199,7 +1219,7 @@ def test_load_config_no_files():
     assert len(config.sources) == 0
     assert len(config.layers) == 0
     assert len(config.targets) == 0
-    assert config.bounds is None
+    assert config.bounds == {}
 
 
 def test_load_config_nonexistent_file():
@@ -1567,7 +1587,17 @@ def test_load_config_duplicate_bounds(tmp_path):
     )
 
     config = load_config([str(main_cfg)])
-    assert config.bounds["west"] == 5.0
+    # Layer 'l' inherited bounds from base.yaml when parsed (first definition).
+    # main.yaml's anonymous bounds wins at file level but l already has bounds.
+    assert config.layers["l"].bounds == {
+        "west": 1.0,
+        "east": 2.0,
+        "south": 3.0,
+        "north": 4.0,
+    }
+    # The file-level bounds for any NEW layers would be the main.yaml ones.
+    # Named bounds are empty since both files used anonymous format.
+    assert config.bounds == {}
 
 
 # ---------------------------------------------------------------------------
@@ -1726,3 +1756,615 @@ def test_read_cache_crs_corrupt(tmp_path):
     (source_dir / "metadata.json").write_text("not valid json{{{")
 
     assert BaseDownloader.read_cache_crs(tmp_path, "broken_source") is None
+
+
+# ---------------------------------------------------------------------------
+# _is_anonymous_bounds tests
+# ---------------------------------------------------------------------------
+
+
+def test_is_anonymous_bounds_true():
+    assert _is_anonymous_bounds({"west": 1.0, "east": 2.0, "south": 3.0, "north": 4.0})
+
+
+def test_is_anonymous_bounds_false_named():
+    assert not _is_anonymous_bounds(
+        {"switzerland": {"west": 5.96, "east": 10.49, "south": 45.82, "north": 47.81}}
+    )
+
+
+def test_is_anonymous_bounds_false_mixed():
+    # Even if it has west/east/south/north, an extra key means it's named
+    assert not _is_anonymous_bounds(
+        {"west": 1.0, "east": 2.0, "south": 3.0, "north": 4.0, "extra": 5.0}
+    )
+
+
+def test_is_anonymous_bounds_empty():
+    assert not _is_anonymous_bounds({})
+
+
+# ---------------------------------------------------------------------------
+# _parse_bounds_section tests
+# ---------------------------------------------------------------------------
+
+
+def test_parse_bounds_section_anonymous():
+    data = {
+        "bounds": {"west": 5.0, "east": 10.0, "south": 45.0, "north": 48.0},
+    }
+    named, anon = _parse_bounds_section(data, "test.yaml")
+    assert named == {}
+    assert anon is not None
+    assert anon["west"] == 5.0
+
+
+def test_parse_bounds_section_named():
+    data = {
+        "bounds": {
+            "switzerland": {
+                "west": 5.96,
+                "east": 10.49,
+                "south": 45.82,
+                "north": 47.81,
+            },
+            "bern": {"west": 7.31, "east": 7.57, "south": 46.88, "north": 47.06},
+        },
+    }
+    named, anon = _parse_bounds_section(data, "test.yaml")
+    assert anon is None
+    assert len(named) == 2
+    assert "switzerland" in named
+    assert named["switzerland"].id == "switzerland"
+    assert named["switzerland"].west == 5.96
+    assert named["bern"].north == 47.06
+
+
+def test_parse_bounds_section_absent():
+    named, anon = _parse_bounds_section({}, "test.yaml")
+    assert named == {}
+    assert anon is None
+
+
+def test_parse_bounds_section_null():
+    named, anon = _parse_bounds_section({"bounds": None}, "test.yaml")
+    assert named == {}
+    assert anon is None
+
+
+def test_parse_bounds_section_named_invalid():
+    with pytest.raises(ValueError, match="'bounds' invalid.*west.*>=.*east"):
+        _parse_bounds_section(
+            {
+                "bounds": {
+                    "bad": {"west": 10.0, "east": 5.0, "south": 45.0, "north": 48.0},
+                },
+            },
+            "test.yaml",
+        )
+
+
+def test_parse_bounds_section_named_missing_field():
+    with pytest.raises(ValueError, match="missing required field"):
+        _parse_bounds_section(
+            {"bounds": {"bad": {"west": 5.0, "east": 10.0}}},
+            "test.yaml",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Named bounds via load_config integration
+# ---------------------------------------------------------------------------
+
+
+def test_load_config_named_bounds(tmp_path):
+    """Named bounds section parsed and available on config.bounds."""
+    cfg = _write_yaml(
+        tmp_path,
+        "config.yaml",
+        {
+            "sources": {
+                "s": {"type": "wmts", "urls": ["https://example.com/{z}/{x}/{y}.png"]},
+            },
+            "bounds": {
+                "switzerland": {
+                    "west": 5.96,
+                    "east": 10.49,
+                    "south": 45.82,
+                    "north": 47.81,
+                },
+            },
+            "layers": {
+                "l1": {
+                    "name": "L1",
+                    "source": "s",
+                    "zoom_levels": [10],
+                    "bounds": "switzerland",
+                },
+            },
+            "targets": {
+                "t1": {
+                    "output": "out.img",
+                    "layers": [{"ref": "l1"}],
+                    "bounds": "switzerland",
+                },
+            },
+        },
+    )
+    config = load_config([str(cfg)])
+    assert "switzerland" in config.bounds
+    assert config.bounds["switzerland"].west == 5.96
+
+    # After resolution, bounds on layer/target should be dict coordinates
+    assert config.layers["l1"].bounds == {
+        "west": 5.96,
+        "east": 10.49,
+        "south": 45.82,
+        "north": 47.81,
+    }
+    assert config.targets["t1"].bounds == {
+        "west": 5.96,
+        "east": 10.49,
+        "south": 45.82,
+        "north": 47.81,
+    }
+
+
+def test_load_config_named_bounds_unresolved_ref(tmp_path):
+    """Referencing a nonexistent named bounds slug raises ValueError."""
+    cfg = _write_yaml(
+        tmp_path,
+        "config.yaml",
+        {
+            "sources": {
+                "s": {"type": "wmts", "urls": ["https://example.com"]},
+            },
+            "layers": {
+                "l1": {
+                    "name": "L1",
+                    "source": "s",
+                    "zoom_levels": [10],
+                    "bounds": "nonexistent",
+                },
+            },
+        },
+    )
+    with pytest.raises(ValueError, match="references undefined bounds 'nonexistent'"):
+        load_config([str(cfg)])
+
+
+def test_load_config_named_bounds_merge(tmp_path):
+    """Named bounds from includes merge together."""
+    _write_yaml(
+        tmp_path,
+        "base.yaml",
+        {
+            "bounds": {
+                "a": {"west": 1.0, "east": 2.0, "south": 3.0, "north": 4.0},
+            },
+        },
+    )
+    cfg = _write_yaml(
+        tmp_path,
+        "main.yaml",
+        {
+            "includes": ["base.yaml"],
+            "bounds": {
+                "b": {"west": 5.0, "east": 6.0, "south": 7.0, "north": 8.0},
+            },
+        },
+    )
+    config = load_config([str(cfg)])
+    assert "a" in config.bounds
+    assert "b" in config.bounds
+
+
+def test_load_config_named_bounds_duplicate(tmp_path):
+    """Duplicate named bounds slug — last definition wins."""
+    _write_yaml(
+        tmp_path,
+        "base.yaml",
+        {
+            "bounds": {
+                "shared": {"west": 1.0, "east": 2.0, "south": 3.0, "north": 4.0},
+            },
+        },
+    )
+    cfg = _write_yaml(
+        tmp_path,
+        "main.yaml",
+        {
+            "includes": ["base.yaml"],
+            "bounds": {
+                "shared": {"west": 5.0, "east": 6.0, "south": 7.0, "north": 8.0},
+            },
+        },
+    )
+    config = load_config([str(cfg)])
+    assert config.bounds["shared"].west == 5.0
+
+
+def test_load_config_target_inline_bounds_still_works(tmp_path):
+    """Inline bounds on target still parse correctly."""
+    cfg = _write_yaml(
+        tmp_path,
+        "config.yaml",
+        {
+            "sources": {
+                "s": {"type": "wmts", "urls": ["https://example.com"]},
+            },
+            "layers": {
+                "l1": {
+                    "name": "L1",
+                    "source": "s",
+                    "zoom_levels": [10],
+                },
+            },
+            "targets": {
+                "t1": {
+                    "output": "out.img",
+                    "layers": [{"ref": "l1"}],
+                    "bounds": {"west": 1.0, "east": 2.0, "south": 3.0, "north": 4.0},
+                },
+            },
+        },
+    )
+    config = load_config([str(cfg)])
+    assert config.targets["t1"].bounds == {
+        "west": 1.0,
+        "east": 2.0,
+        "south": 3.0,
+        "north": 4.0,
+    }
+
+
+def test_load_config_layer_inline_bounds_still_works(tmp_path):
+    """Inline bounds on layer still parse correctly."""
+    cfg = _write_yaml(
+        tmp_path,
+        "config.yaml",
+        {
+            "sources": {
+                "s": {"type": "wmts", "urls": ["https://example.com"]},
+            },
+            "layers": {
+                "l1": {
+                    "name": "L1",
+                    "source": "s",
+                    "zoom_levels": [10],
+                    "bounds": {"west": 1.0, "east": 2.0, "south": 3.0, "north": 4.0},
+                },
+            },
+        },
+    )
+    config = load_config([str(cfg)])
+    assert config.layers["l1"].bounds == {
+        "west": 1.0,
+        "east": 2.0,
+        "south": 3.0,
+        "north": 4.0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# resolve_bounds_refs tests
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_bounds_refs_string_to_dict():
+    named = {
+        "ch": BoundsConfig(id="ch", west=5.96, east=10.49, south=45.82, north=47.81),
+    }
+    layers = {
+        "l1": LayerConfig(
+            id="l1", name="L1", source="s", zoom_levels=[10], bounds="ch"
+        ),
+    }
+    targets = {
+        "t1": TargetConfig(id="t1", output="out.img", bounds="ch"),
+    }
+    resolve_bounds_refs(layers, targets, named)
+    assert layers["l1"].bounds == {
+        "west": 5.96,
+        "east": 10.49,
+        "south": 45.82,
+        "north": 47.81,
+    }
+    assert targets["t1"].bounds == {
+        "west": 5.96,
+        "east": 10.49,
+        "south": 45.82,
+        "north": 47.81,
+    }
+
+
+def test_resolve_bounds_refs_already_dict():
+    """Bounds already a dict should remain unchanged."""
+    named = {}
+    layers = {
+        "l1": LayerConfig(
+            id="l1",
+            name="L1",
+            source="s",
+            zoom_levels=[10],
+            bounds={"west": 1.0, "east": 2.0, "south": 3.0, "north": 4.0},
+        ),
+    }
+    targets = {}
+    resolve_bounds_refs(layers, targets, named)
+    assert layers["l1"].bounds == {"west": 1.0, "east": 2.0, "south": 3.0, "north": 4.0}
+
+
+def test_resolve_bounds_refs_none():
+    """Bounds that is None should remain None."""
+    named = {}
+    layers = {
+        "l1": LayerConfig(id="l1", name="L1", source="s", zoom_levels=[10]),
+    }
+    targets = {}
+    resolve_bounds_refs(layers, targets, named)
+    assert layers["l1"].bounds is None
+
+
+def test_resolve_bounds_refs_undefined_slug():
+    named = {}
+    layers = {
+        "l1": LayerConfig(
+            id="l1", name="L1", source="s", zoom_levels=[10], bounds="missing"
+        ),
+    }
+    targets = {}
+    with pytest.raises(ValueError, match="references undefined bounds 'missing'"):
+        resolve_bounds_refs(layers, targets, named)
+
+
+# ---------------------------------------------------------------------------
+# merge_bounds tests
+# ---------------------------------------------------------------------------
+
+
+def test_merge_bounds():
+    b1 = {
+        "a": BoundsConfig(id="a", west=1.0, east=2.0, south=3.0, north=4.0),
+    }
+    b2 = {
+        "b": BoundsConfig(id="b", west=5.0, east=6.0, south=7.0, north=8.0),
+    }
+    merged = merge_bounds(b1, b2)
+    assert len(merged) == 2
+    assert "a" in merged
+    assert "b" in merged
+
+
+def test_merge_bounds_duplicate():
+    b1 = {
+        "shared": BoundsConfig(id="shared", west=1.0, east=2.0, south=3.0, north=4.0),
+    }
+    b2 = {
+        "shared": BoundsConfig(id="shared", west=5.0, east=6.0, south=7.0, north=8.0),
+    }
+    merged = merge_bounds(b1, b2)
+    assert len(merged) == 1
+    assert merged["shared"].west == 5.0
+
+
+# ---------------------------------------------------------------------------
+# _parse_products_section tests
+# ---------------------------------------------------------------------------
+
+
+def test_parse_products_section_valid():
+    data = {
+        "products": {
+            "outdoor": {
+                "name": "Outdoor Map",
+                "price": 25.0,
+                "currency": "CHF",
+                "targets": ["t1", "t2"],
+                "token_max_downloads": 10,
+                "token_expiry_days": 60,
+                "sort_order": 1,
+            },
+        },
+    }
+    products = _parse_products_section(data, "test.yaml")
+    assert len(products) == 1
+    assert "outdoor" in products
+    p = products["outdoor"]
+    assert p.id == "outdoor"
+    assert p.name == "Outdoor Map"
+    assert p.price == 25.0
+    assert p.currency == "CHF"
+    assert p.targets == ["t1", "t2"]
+    assert p.token_max_downloads == 10
+    assert p.token_expiry_days == 60
+    assert p.sort_order == 1
+
+
+def test_parse_products_section_defaults():
+    data = {
+        "products": {
+            "minimal": {
+                "targets": ["t1"],
+            },
+        },
+    }
+    products = _parse_products_section(data, "test.yaml")
+    p = products["minimal"]
+    assert p.id == "minimal"
+    assert p.name == "minimal"  # defaults to slug
+    assert p.price == 0.0
+    assert p.currency == "CHF"
+    assert p.token_max_downloads == 5
+    assert p.token_expiry_days == 30
+    assert p.sort_order == 0
+    assert p.targets == ["t1"]
+
+
+def test_parse_products_section_absent():
+    products = _parse_products_section({}, "test.yaml")
+    assert products == {}
+
+
+def test_parse_products_section_null():
+    products = _parse_products_section({"products": None}, "test.yaml")
+    assert products == {}
+
+
+def test_parse_products_section_invalid_type():
+    with pytest.raises(ValueError, match="'products' must be a dict"):
+        _parse_products_section({"products": "bad"}, "test.yaml")
+
+
+def test_parse_products_section_entry_not_dict():
+    with pytest.raises(ValueError, match="must be a dict"):
+        _parse_products_section({"products": {"bad": "not_a_dict"}}, "test.yaml")
+
+
+def test_parse_products_section_targets_string():
+    """targets as a single string is auto-wrapped in a list."""
+    data = {
+        "products": {
+            "p1": {"targets": "t1"},
+        },
+    }
+    products = _parse_products_section(data, "test.yaml")
+    assert products["p1"].targets == ["t1"]
+
+
+def test_parse_products_section_targets_invalid():
+    with pytest.raises(ValueError, match="field 'targets' must be a list"):
+        _parse_products_section(
+            {"products": {"p1": {"targets": 123}}},
+            "test.yaml",
+        )
+
+
+# ---------------------------------------------------------------------------
+# merge_products tests
+# ---------------------------------------------------------------------------
+
+
+def test_merge_products():
+    p1 = {
+        "a": ProductConfig(id="a", targets=["t1"]),
+    }
+    p2 = {
+        "b": ProductConfig(id="b", targets=["t2"]),
+    }
+    merged = merge_products(p1, p2)
+    assert len(merged) == 2
+    assert "a" in merged
+    assert "b" in merged
+
+
+def test_merge_products_duplicate():
+    p1 = {
+        "shared": ProductConfig(id="shared", name="First", targets=["t1"]),
+    }
+    p2 = {
+        "shared": ProductConfig(id="shared", name="Second", targets=["t2"]),
+    }
+    merged = merge_products(p1, p2)
+    assert len(merged) == 1
+    assert merged["shared"].name == "Second"
+
+
+# ---------------------------------------------------------------------------
+# Products integration via load_config
+# ---------------------------------------------------------------------------
+
+
+def test_load_config_with_products(tmp_path):
+    """Products section parsed and validated via load_config."""
+    cfg = _write_yaml(
+        tmp_path,
+        "config.yaml",
+        {
+            "sources": {
+                "s": {"type": "wmts", "urls": ["https://example.com"]},
+            },
+            "layers": {
+                "l1": {
+                    "name": "L1",
+                    "source": "s",
+                    "zoom_levels": [10],
+                },
+            },
+            "targets": {
+                "t1": {
+                    "output": "out.img",
+                    "layers": [{"ref": "l1"}],
+                },
+            },
+            "products": {
+                "outdoor": {
+                    "name": "Outdoor",
+                    "price": 25.0,
+                    "targets": ["t1"],
+                },
+            },
+        },
+    )
+    config = load_config([str(cfg)])
+    assert "outdoor" in config.products
+    assert config.products["outdoor"].targets == ["t1"]
+
+
+def test_load_config_products_invalid_target_ref(tmp_path):
+    """Product referencing nonexistent target raises ValueError."""
+    cfg = _write_yaml(
+        tmp_path,
+        "config.yaml",
+        {
+            "sources": {
+                "s": {"type": "wmts", "urls": ["https://example.com"]},
+            },
+            "layers": {
+                "l1": {
+                    "name": "L1",
+                    "source": "s",
+                    "zoom_levels": [10],
+                },
+            },
+            "targets": {
+                "t1": {
+                    "output": "out.img",
+                    "layers": [{"ref": "l1"}],
+                },
+            },
+            "products": {
+                "bad_product": {
+                    "targets": ["nonexistent_target"],
+                },
+            },
+        },
+    )
+    with pytest.raises(ValueError, match="references undefined target"):
+        load_config([str(cfg)])
+
+
+def test_load_config_products_merge_across_includes(tmp_path):
+    """Products merged from included files."""
+    _write_yaml(
+        tmp_path,
+        "base.yaml",
+        {
+            "products": {
+                "p1": {"targets": []},
+            },
+        },
+    )
+    cfg = _write_yaml(
+        tmp_path,
+        "main.yaml",
+        {
+            "includes": ["base.yaml"],
+            "products": {
+                "p2": {"targets": []},
+            },
+        },
+    )
+    config = load_config([str(cfg)])
+    assert "p1" in config.products
+    assert "p2" in config.products

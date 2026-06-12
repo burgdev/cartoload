@@ -945,6 +945,7 @@ class GarminImgExporter(BaseExporter):
         qtables: tuple[list[int], list[int]] | None = None,
         progress_callback: ExportProgressCallback | None = None,
         tile_processor_override: Callable | None = None,
+        fast: bool = False,
     ) -> list[Path]:
         """Export tiles to Garmin IMG using streaming writer from metadata.
 
@@ -1019,6 +1020,7 @@ class GarminImgExporter(BaseExporter):
             tile_processor=tile_processor,
             source_crs=source_crs,
             qtables=qtables,
+            fast=fast,
         )
         adjusted_jpeg_size = int(total_jpeg_size * quality_ratio)
 
@@ -1065,6 +1067,7 @@ class GarminImgExporter(BaseExporter):
             qtables=qtables,
             progress_callback=progress_callback,
             sequential_only=tile_processor_override is not None,
+            fast=fast,
         )
 
         output_files = [output_path]

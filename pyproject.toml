@@ -1,31 +1,31 @@
 [project]
 name = "cartoload"
 version = "0.1.1"
-description = "Convert official geodata into GPS device maps"
+description = "Convert raster geodata into GPS raser device maps"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "LGPL-3.0-or-later" }
 classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Intended Audience :: Developers",
-    "Intended Audience :: End Users/Desktop",
-    "License :: OSI Approved :: GNU Lesser General Public License v3 or later (LGPLv3+)",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Topic :: Scientific/Engineering :: GIS",
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: End Users/Desktop",
+  "License :: OSI Approved :: GNU Lesser General Public License v3 or later (LGPLv3+)",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: GIS",
 ]
 dependencies = [
-    "click>=8.0",
-    "PyYAML>=6.0",
-    "requests>=2.28",
-    "pystac-client>=0.6",
-    "numpy>=1.24",
-    "Pillow>=10.0",
-    "mozjpeg-lossless-optimization>=1.0",
-    "rich>=13.0",
-    "rasterio>=1.4.4",
-    "pyproj>=3.7.2",
-    "cryptography>=48.0.0",
+  "click>=8.0",
+  "PyYAML>=6.0",
+  "requests>=2.28",
+  "pystac-client>=0.6",
+  "numpy>=1.24",
+  "Pillow>=10.0",
+  "mozjpeg-lossless-optimization>=1.0",
+  "rich>=13.0",
+  "rasterio>=1.4.4",
+  "pyproj>=3.7.2",
+  "cryptography>=48.0.0",
 ]
 
 [project.scripts]
@@ -39,27 +39,21 @@ Releases = "https://github.com/burgdev/cartoload/releases"
 
 [dependency-groups]
 dev = [
-    "bump2version>=1.0.1",
-    "deptry>=0.21",
-    "git-cliff>=2.7",
-    "pre-commit>=4.0",
-    "ruff>=0.8",
-    "ty>=0.0.1a23",
+  "bump2version>=1.0.1",
+  "deptry>=0.21",
+  "git-cliff>=2.7",
+  "pre-commit>=4.0",
+  "ruff>=0.8",
+  "ty>=0.0.1a23",
 ]
-docs = [
-    "zensical>=0.0.33",
-]
-test = [
-    "pytest>=8.3",
-    "pytest-cov>=4.1",
-    "pytest-xdist>=3.8",
-]
+docs = ["zensical>=0.0.33"]
+test = ["pytest>=8.3", "pytest-cov>=4.1", "pytest-xdist>=3.8"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "gmt: requires gmt (GMapTool) binary on PATH",
-    "gdal: requires GDAL/rasterio system libraries",
+  "gmt: requires gmt (GMapTool) binary on PATH",
+  "gdal: requires GDAL/rasterio system libraries",
 ]
 
 [tool.ruff.lint.per-file-ignores]

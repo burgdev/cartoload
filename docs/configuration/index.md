@@ -1,6 +1,6 @@
 # Configuration
 
-cartoload uses a unified YAML config format with three sections: **sources** (where to get geodata), **layers** (reusable data definitions), and **targets** (what to build). Configs can be split across files and composed with `includes`.
+cartoload uses a unified YAML config format with sections: **sources** (where to get geodata), **layers** (reusable data definitions), **targets** (what to build), **bounds** (named or anonymous geographic extents), and **products** (server-side product definitions). Configs can be split across files and composed with `includes`.
 
 ## How it works
 
