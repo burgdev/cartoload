@@ -2,7 +2,7 @@ import 'core.just'
 
 # ▶️  Run all checks: lock + lint (default)
 [default]
-all: lock lint
+all: lock lint types
     @info "Tests are not run separately — use 'just tests'."
 
 # 🔒 Check uv lock file is up to date
@@ -18,11 +18,12 @@ lint:
     uv run ruff format --check .
     @success "Linting passed!"
 
-# 🪄 Auto-fix with ruff
+# 🪄 Auto-fix with ruff and ty
 fix:
     @header "Fixing..."
     uv run ruff check --fix .
     uv run ruff format .
+    uv run ty check --fix src/
     @success "Fixes applied!"
 
 # 🔍 Static type checking with ty
