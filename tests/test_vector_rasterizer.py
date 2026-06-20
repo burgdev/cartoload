@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,10 @@ from cartoload.processor.gpkg.vector_rasterizer import (
     tile_bounds,
 )
 from cartoload.style.model import LineStyle
+
+# GDAL Python bindings (osgeo) are an optional system dependency; the pure
+# functions tested above don't need it, but the integration tests below do.
+_osgeo_available = importlib.util.find_spec("osgeo") is not None
 
 
 class TestTileBounds:
@@ -166,6 +171,9 @@ class TestDrawLine:
         assert pixels[50, 50][3] == 0
 
 
+@pytest.mark.skipif(
+    not _osgeo_available, reason="osgeo (GDAL Python bindings) not installed"
+)
 class TestVectorRasterizerIntegration:
     """Integration tests using real GPKG data if available."""
 

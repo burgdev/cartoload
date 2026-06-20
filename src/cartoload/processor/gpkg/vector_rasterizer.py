@@ -11,15 +11,19 @@ import json
 import logging
 import math
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from osgeo import ogr, osr  # ty: ignore
 from PIL import Image, ImageDraw
 from pyproj import Transformer
 
 from cartoload.style import StyleEngine
 from cartoload.style.model import LineStyle
 from cartoload.tile_math import bounds_to_tile_coords
+
+if TYPE_CHECKING:
+    # GDAL Python bindings are an optional system dependency; imported lazily so
+    # the module (and its pure functions) can be used without osgeo installed.
+    from osgeo import osr  # ty: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +50,8 @@ def read_features(
     Returns:
         List of (geometry, attributes) tuples in target_crs.
     """
+    from osgeo import ogr  # ty: ignore
+
     features: list[tuple[Any, dict[str, Any]]] = []
 
     try:
