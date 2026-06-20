@@ -18,7 +18,6 @@ eggs/
 
 # uv
 .python-version
-uv.lock
 
 # Virtual environments
 .venv/

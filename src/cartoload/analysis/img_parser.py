@@ -33,6 +33,7 @@ TRE header layout based on Alex Whiter's QMapShack wiki analysis:
 
 import os
 import struct
+from typing import cast
 
 
 def decode_garmin_date(data):
@@ -213,7 +214,8 @@ class IMGParser:
                 data.extend(chunk)
 
         # Trim to actual size
-        return bytes(data[: sf["size"]])
+        sf_size = cast(int, sf["size"])
+        return bytes(data[:sf_size])
 
     def parse_gmp_container(self, subfile_key):
         """Parse GMP container header to find section offsets."""
@@ -363,9 +365,12 @@ class IMGParser:
             subdivisions = []
             offset = 0
             for li, level in enumerate(parsed_levels):
+                if not isinstance(level, dict):
+                    continue
                 is_last = li == len(parsed_levels) - 1
                 rec_size = 14 if is_last else 16
-                for si in range(level["subdivision_count"]):
+                subdiv_count = cast(int, level["subdivision_count"])
+                for si in range(subdiv_count):
                     if offset + rec_size > len(subdivs_data):
                         break
                     rec = subdivs_data[offset : offset + rec_size]
@@ -858,9 +863,9 @@ class IMGParser:
             result["lbl29"] = {"position": pos, "size": size}
 
         # Parse labels text (GMP-relative)
-        if "labels_position" in result and result["labels_size"] > 0:
-            pos = result["labels_position"]
-            size = result["labels_size"]
+        if "labels_position" in result and cast(int, result["labels_size"]) > 0:
+            pos = cast(int, result["labels_position"])
+            size = cast(int, result["labels_size"])
             labels_data = data[pos : pos + size]
             labels = labels_data.decode("ascii", errors="replace").split("\x00")
             labels = [label for label in labels if label]
