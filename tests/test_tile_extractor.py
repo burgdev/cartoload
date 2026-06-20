@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -41,6 +42,9 @@ def _create_test_geotiff(
     Returns:
         Path to the created GeoTIFF.
     """
+    if not shutil.which("gdal_translate"):
+        pytest.skip("gdal_translate not available")
+
     if bounds is None:
         bounds = (5.0, 45.0, 11.0, 48.0)
     west, south, east, north = bounds

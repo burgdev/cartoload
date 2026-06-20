@@ -890,6 +890,8 @@ class TestIntegrationWrite:
 
     def test_export_via_exporter_class(self, tmp_path):
         """Test the full GarminImgExporter.export() pipeline."""
+        if not shutil.which("gdal_translate"):
+            pytest.skip("gdal_translate not available")
         from cartoload.exporters.garmin_img import GarminImgExporter
 
         # Create a dummy raster (just needs to exist for the test)
@@ -1181,18 +1183,22 @@ class TestLBL28LBL29TypeE0:
 # ---------------------------------------------------------------------------
 
 KNOWN_GOOD_IMG = Path("tests/data/garmin_samples")
+# Reference .img files are symlinks to large local binaries; in CI the symlink
+# targets are absent, so filter to files that actually resolve (is_file follows
+# the link and returns False for a broken symlink).
+_AVAILABLE_REF_IMGS = [p for p in KNOWN_GOOD_IMG.glob("*.img") if p.is_file()]
 
 
 class TestBinaryComparison:
     """Compare writer output against known-good .img files (if available)."""
 
     @pytest.mark.skipif(
-        not KNOWN_GOOD_IMG.exists(),
+        not _AVAILABLE_REF_IMGS,
         reason="No known-good .img files in tests/data/garmin_samples",
     )
     def test_header_magic_matches_reference(self):
         """Compare header magic bytes with reference file."""
-        ref_files = list(KNOWN_GOOD_IMG.glob("*.img"))
+        ref_files = _AVAILABLE_REF_IMGS
         if not ref_files:
             pytest.skip("No .img files found in test data")
 
@@ -1205,12 +1211,12 @@ class TestBinaryComparison:
         assert our_data[0x10:0x16] == ref_data[0x10:0x16]
 
     @pytest.mark.skipif(
-        not KNOWN_GOOD_IMG.exists(),
+        not _AVAILABLE_REF_IMGS,
         reason="No known-good .img files in tests/data/garmin_samples",
     )
     def test_boot_signature_matches_reference(self):
         """Boot signature should match reference."""
-        ref_files = list(KNOWN_GOOD_IMG.glob("*.img"))
+        ref_files = _AVAILABLE_REF_IMGS
         if not ref_files:
             pytest.skip("No .img files found")
 
@@ -1224,12 +1230,12 @@ class TestBinaryComparison:
         assert our_sig == ref_sig == 0xAA55
 
     @pytest.mark.skipif(
-        not KNOWN_GOOD_IMG.exists(),
+        not _AVAILABLE_REF_IMGS,
         reason="No known-good .img files in tests/data/garmin_samples",
     )
     def test_fat_block_number_matches_reference(self):
         """FAT block number at offset 0x40 should match reference."""
-        ref_files = list(KNOWN_GOOD_IMG.glob("*.img"))
+        ref_files = _AVAILABLE_REF_IMGS
         if not ref_files:
             pytest.skip("No .img files found")
 
@@ -1242,12 +1248,12 @@ class TestBinaryComparison:
         assert our_data[0x40] == ref_fat_block == 0x08
 
     @pytest.mark.skipif(
-        not KNOWN_GOOD_IMG.exists(),
+        not _AVAILABLE_REF_IMGS,
         reason="No known-good .img files in tests/data/garmin_samples",
     )
     def test_block_size_exponents_match_reference(self):
         """Block size exponents at 0x61-0x62 should match reference."""
-        ref_files = list(KNOWN_GOOD_IMG.glob("*.img"))
+        ref_files = _AVAILABLE_REF_IMGS
         if not ref_files:
             pytest.skip("No .img files found")
 
@@ -1275,6 +1281,8 @@ class TestE2EValidation:
     @pytest.fixture
     def minimal_geotiff(self, tmp_path):
         """Create a minimal GeoTIFF for testing using gdal_create."""
+        if not shutil.which("gdal_create"):
+            pytest.skip("gdal_create not available")
         geotiff_path = tmp_path / "test_input.tif"
         result = subprocess.run(
             [
