@@ -1,0 +1,13 @@
+.git
+__pycache__
+*.pyc
+.venv
+openspec/
+docs/
+tests/
+*.egg-info
+output/
+cache/
+.ruff_cache/
+dist/
+build/

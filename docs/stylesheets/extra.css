@@ -1,0 +1,156 @@
+/* Cartoload Design System — matches cartoload-server nav */
+
+:root,
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #1A1C18;
+  --md-primary-fg-color--light: #252924;
+  --md-primary-fg-color--dark: #1A1C18;
+  --md-primary-bg-color: #F5F2EC;
+  --md-accent-fg-color: #4E7A5F;
+  --md-accent-fg-color--transparent: rgba(78, 122, 95, 0.1);
+  --md-default-bg-color: #F5F2EC;
+  --md-code-bg-color: #EDE9E0;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #0D0F0C;
+  --md-primary-fg-color--light: #131512;
+  --md-primary-fg-color--dark: #0D0F0C;
+  --md-primary-bg-color: #131512;
+  --md-accent-fg-color: #7DB88C;
+  --md-accent-fg-color--transparent: rgba(125, 184, 140, 0.1);
+  --md-default-bg-color: #131512;
+  --md-default-fg-color: #EDEAE3;
+  --md-typeset-color: #EDEAE3;
+  --md-typeset-a-color: #7DB88C;
+  --md-code-bg-color: #1A1D16;
+}
+
+/* Header — Dark Earth nav matching cartoload-server */
+.md-header {
+  background-color: #1A1C18;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+[data-md-color-scheme="slate"] .md-header {
+  background-color: #0D0F0C;
+}
+
+/* Tabs — slightly lighter shade */
+.md-tabs {
+  background-color: #252924;
+}
+
+[data-md-color-scheme="slate"] .md-tabs {
+  background-color: #131512;
+}
+
+/* Force light text on dark header in ALL modes */
+.md-header,
+.md-header__inner,
+.md-header__button,
+.md-header__link,
+.md-tabs__link {
+  color: rgba(245, 242, 236, 0.7) !important;
+}
+
+.md-tabs__link:hover,
+.md-tabs__link--active,
+.md-header__button:hover {
+  color: #F5F2EC !important;
+}
+
+/* Search button on dark header */
+.md-header .md-search__button {
+  background-color: rgba(245, 242, 236, 0.08);
+  color: rgba(245, 242, 236, 0.6) !important;
+}
+
+.md-header .md-search__button:hover,
+.md-header .md-search__button:focus {
+  background-color: rgba(245, 242, 236, 0.14);
+  color: #F5F2EC !important;
+}
+
+.md-header .md-search__button::before {
+  background-color: rgba(245, 242, 236, 0.6);
+}
+
+.md-header .md-search__button::after {
+  background: rgba(245, 242, 236, 0.1);
+  color: rgba(245, 242, 236, 0.5);
+}
+
+/* Sidebar active link */
+.md-nav__link--active {
+  color: var(--md-accent-fg-color);
+}
+
+/* Logo: dark variant on dark header (both modes — nav is always dark) */
+.md-header .md-logo img,
+[data-md-color-scheme="slate"] .md-header .md-logo img {
+  content: url("../assets/logo-dark.svg");
+}
+
+/* ── Landing page hero ── */
+.landing-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 3rem 1rem 2rem;
+  margin-bottom: 1.5rem;
+}
+
+.landing-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.landing-hero .landing-logo {
+  width: 72px;
+  height: 72px;
+  flex-shrink: 0;
+}
+
+/* Use light logo in light mode, dark logo in dark mode for the hero */
+[data-md-color-scheme="default"] .landing-hero .landing-logo {
+  filter: none;
+}
+
+[data-md-color-scheme="slate"] .landing-hero .landing-logo {
+  content: url("../assets/logo-dark.svg");
+}
+
+.landing-brand h1 {
+  font-size: 2.2rem;
+  font-weight: 700;
+  margin: 0;
+  letter-spacing: -0.02em;
+  text-align: left;
+}
+
+.landing-tagline {
+  font-size: 1.2rem;
+  color: var(--md-default-fg-color--light, rgba(0,0,0,0.54));
+  margin: 0.5rem 0 1.5rem;
+}
+
+.landing-hero .md-button {
+  margin: 0.25rem;
+}
+
+/* Primary button: ensure readable text in both modes */
+.landing-hero .md-button--primary {
+  background-color: var(--md-accent-fg-color);
+  color: #fff;
+  border-color: var(--md-accent-fg-color);
+}
+
+.landing-hero .md-button--primary:hover {
+  background-color: var(--md-accent-fg-color--dark, var(--md-accent-fg-color));
+  color: #fff;
+  border-color: var(--md-accent-fg-color--dark, var(--md-accent-fg-color));
+}

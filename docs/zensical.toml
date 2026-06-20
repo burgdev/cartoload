@@ -1,0 +1,70 @@
+[project]
+site_name = "cartoload"
+site_description = "Convert official geodata into GPS device maps"
+site_url = "https://burgdev.github.io/cartoload/"
+repo_url = "https://github.com/burgdev/cartoload"
+repo_name = "burgdev/cartoload"
+docs_dir = "."
+site_dir = "site"
+extra_css = ["stylesheets/extra.css"]
+
+nav = [
+  { "Home" = "index.md" },
+  { "Getting started" = "getting-started.md" },
+  { "Guides" = [
+    { "Build a map" = "guides/build-a-map.md" },
+    { "Analyze IMG files" = "guides/analyze-img.md" },
+  ] },
+  { "Configuration" = [
+    { "Overview" = "configuration/index.md" },
+    { "Sources" = "configuration/sources.md" },
+    { "Layers" = "configuration/layers.md" },
+  ] },
+  { "Reference" = [
+    { "Overview" = "reference.md" },
+    { "CLI" = "cli.md" },
+    { "API" = "api-reference.md" },
+    { "IMG Format" = [
+      { "Overview" = "img-format/overview.md" },
+      { "Header & FAT" = "img-format/header-fat.md" },
+      { "GMP Container" = "img-format/gmp-container.md" },
+      { "Tile Storage" = "img-format/tile-storage.md" },
+      { "TRE Sections" = "img-format/tre-sections.md" },
+      { "Vector Reference" = "img-format/vector-reference.md" },
+      { "Tools & resources" = "img-format/tools-resources.md" },
+    ] },
+  ] },
+]
+
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/burgdev/cartoload"
+name = "cartoload on GitHub"
+
+[project.theme]
+favicon = "assets/favicon.svg"
+logo = "assets/logo-light.svg"
+language = "en"
+
+[[project.theme.palette]]
+scheme = "default"
+primary = "custom"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+scheme = "slate"
+primary = "custom"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"
+
+[project.theme.features]
+"navigation.tabs" = true
+navigation.sections = true
+navigation.footer = true
+navigation.path = true
+navigation.top = true
+navigation.tracking = true
+search.highlight = true
+content.code.copy = true
+content.code.annotate = true

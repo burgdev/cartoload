@@ -1,0 +1,79 @@
+## MODIFIED Requirements
+
+### Requirement: Source config declares explicit CRS
+
+The `SourceConfig` dataclass SHALL include an optional `crs` field that specifies the coordinate reference system of the source tiles. When set, this overrides any hardcoded assumptions about the source projection.
+
+#### Scenario: WMTS template mode with explicit CRS
+
+- **WHEN** a source config of type `wmts` (template mode) specifies `crs: "EPSG:3857"`
+- **THEN** the system SHALL treat all downloaded tiles as being in EPSG:3857
+- **AND** reprojection to EPSG:4326 SHALL be performed if needed for the target format
+
+#### Scenario: WMTS Capabilities mode with CRS from TileMatrixSet
+
+- **WHEN** a source config of type `wmts` (Capabilities mode) uses a TileMatrixSet with CRS `EPSG:3857` from the Capabilities document
+- **THEN** the system SHALL treat all downloaded tiles as being in EPSG:3857
+- **AND** reprojection to EPSG:4326 SHALL be performed if needed for the target format
+
+#### Scenario: WMTS Capabilities mode with CRS override
+
+- **WHEN** a source config of type `wmts` (Capabilities mode) specifies an explicit `crs` field that differs from the TileMatrixSet CRS
+- **THEN** the explicit `crs` field SHALL take precedence
+- **AND** a warning SHALL be logged if they differ
+
+#### Scenario: Source with CRS already matching target
+
+- **WHEN** a source config specifies `crs: "EPSG:4326"` or the TileMatrixSet CRS is EPSG:4326
+- **THEN** the system SHALL skip reprojection entirely for tiles from this source
+- **AND** tiles SHALL pass through directly from download cache to IMG writer
+
+#### Scenario: No CRS specified — default by source type
+
+- **WHEN** a source config does NOT specify a `crs` field
+- **THEN** the system SHALL apply defaults: WMTS template mode defaults to EPSG:3857, WMTS Capabilities mode reads CRS from the TileMatrixSet, GeoTIFF sources read CRS from file metadata
+- **AND** this preserves backward compatibility with existing configs
+
+#### Scenario: Non-standard CRS
+
+- **WHEN** a source config specifies a non-standard CRS (e.g., `EPSG:21781` for Swiss CH1903)
+- **THEN** the system SHALL reproject tiles from that CRS to EPSG:4326
+- **AND** the reprojection cache SHALL key on the source CRS to avoid mixing projections
+
+### Requirement: CRS used to determine reprojection need
+
+The pipeline SHALL compare the source CRS against the target CRS (EPSG:4326 for Garmin IMG) to decide whether reprojection is needed. For composite layers, this comparison SHALL happen independently per sub-layer — each sub-layer resolves its own source type and CRS from its `source.ref`.
+
+#### Scenario: Composite layer with mixed source types
+
+- **WHEN** a composite layer contains STAC sub-layers (EPSG:4326 mosaics) and WMTS sub-layers (EPSG:3857)
+- **THEN** each sub-layer SHALL independently resolve its CRS from its own source config
+- **AND** WMTS sub-layers SHALL be reprojected from EPSG:3857 to EPSG:4326
+- **AND** STAC sub-layers SHALL use their pre-warped EPSG:4326 mosaics without additional reprojection
+
+#### Scenario: Source CRS differs from target
+
+- **WHEN** source CRS is EPSG:3857 and target CRS is EPSG:4326
+- **THEN** the pipeline SHALL activate per-tile reprojection and use the reprojection cache
+
+#### Scenario: Source CRS matches target
+
+- **WHEN** source CRS is EPSG:4326 and target CRS is EPSG:4326
+- **THEN** the pipeline SHALL skip reprojection and read tiles directly from the download cache
+- **AND** no reprojection cache entries SHALL be created
+
+### Requirement: CRS stored in cache metadata
+
+The source CRS SHALL be recorded in a metadata file within the download cache directory so that the fast path can determine the projection without re-reading the source config.
+
+#### Scenario: Cache metadata file
+
+- **WHEN** tiles are downloaded from a source with `crs: "EPSG:3857"`
+- **THEN** the system SHALL write a `metadata.json` file in `cache/{source_id}/` containing `{"crs": "EPSG:3857"}`
+- **AND** the fast path SHALL read this metadata to determine if reprojection is needed
+
+#### Scenario: WMTS Capabilities source cache metadata
+
+- **WHEN** tiles are downloaded from a WMTS source in Capabilities mode with a TileMatrixSet CRS of EPSG:3857
+- **THEN** the system SHALL write a `metadata.json` file containing `{"crs": "EPSG:3857"}`
+- **AND** the CRS SHALL be derived from the TileMatrixSet if no explicit `crs` override is configured

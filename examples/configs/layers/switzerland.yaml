@@ -1,0 +1,124 @@
+# Switzerland layer definitions and build targets
+
+includes:
+  - ../sources/swisstopo.yaml
+
+# Named bounding box referenced by layers and targets
+bounds:
+  center_switzerland:
+    west: 7.31
+    south: 46.34
+    east: 8.88
+    north: 47.06
+
+# Layer definitions: reusable data source + processing config (no output)
+layers:
+  # Basemaps
+  ch_swisstopo_basemap:
+    name: "Switzerland Basemap"
+    description: "Swisstopo national map"
+    type: raster
+    format: wmts
+    bounds: center_switzerland
+    zoom_levels: [10, 11, 12, 13, 14, 15]
+    source:
+      ref: swisstopo_xyz
+      layer: ch.swisstopo.pixelkarte-farbe
+
+  ch_swisstopo_basemap_pk25:
+    name: "Switzerland 1:25'000"
+    description: "Swisstopo national map 1:25'000"
+    type: raster
+    format: wmts
+    bounds: center_switzerland
+    zoom_levels: [10, 11, 12, 13, 14, 15]
+    source:
+      ref: swisstopo_xyz
+      layer: ch.swisstopo.pixelkarte-farbe-pk25.noscale
+
+  ch_swisstopo_basemap_pk50:
+    name: "Switzerland 1:50'000"
+    description: "Swisstopo national map 1:50'000"
+    type: raster
+    format: wmts
+    bounds: center_switzerland
+    zoom_levels: [10, 11, 12, 13, 14, 15]
+    source:
+      ref: swisstopo_xyz
+      layer: ch.swisstopo.pixelkarte-farbe-pk50.noscale
+
+  ch_swisstopo_hiking:
+    name: "Switzerland Hiking Trails"
+    description: "Swisstopo hiking trails"
+    format: wmts
+    bounds: center_switzerland
+    zoom_levels: [10, 11, 12, 13, 14, 15]
+    source:
+      ref: swisstopo_xyz
+      layer: ch.swisstopo.swisstlm3d-wanderwege
+      extension: png
+
+  ch_swisstopo_designated_wildlife_areas:
+    name: "Switzerland Designated Wildlife Areas"
+    description: ""
+    type: raster_overlay
+    format: wmts
+    bounds: center_switzerland
+    zoom_levels: [10, 11, 12, 13, 14, 15]
+    source:
+      ref: swisstopo_xyz
+      layer: ch.bafu.wrz-wildruhezonen_portal
+      extension: png
+
+  ch_swisstopo_wildlife_reserves:
+    name: "Switzerland Wildlife Reserves"
+    description: ""
+    type: raster_overlay
+    format: wmts
+    bounds: center_switzerland
+    zoom_levels: [10, 11, 12, 13, 14, 15]
+    source:
+      ref: swisstopo_xyz
+      layer: ch.bafu.wrz-jagdbanngebiete_select
+      extension: png
+
+  ch_swisstopo_stac_pk25:
+    name: "Switzerland STAC PK25"
+    description: "swisstopo national map via STAC, 1:25000"
+    type: raster
+    format: geotiff
+    bounds: center_switzerland
+    zoom_levels: [10, 11, 12, 13, 14, 15]
+    source:
+      ref: swisstopo_stac
+      layer: ch.swisstopo.pixelkarte-farbe-pk25.noscale
+
+# Build targets: what to produce (with output files)
+targets:
+  ch_swisstopo_outdoor:
+    name: "CH Outdoor Summer"
+    description: "Swisstopo national map with hiking overlays"
+    output: ch_outdoor_summer.img
+    bounds: center_switzerland
+    zoom_levels: [10, 11, 12, 13, 14, 15]
+    layers:
+      - ref: ch_swisstopo_basemap
+        zoom_levels: [10, 11, 12, 13, 14, 15]
+      - ref: ch_swisstopo_designated_wildlife_areas
+        opacity: { 12: 0.8, 13: 0.8, 14: 0.9, 15: 0.9 }
+        zoom_levels: [12, 13, 14, 15]
+      - ref: ch_swisstopo_wildlife_reserves
+        opacity: 0.7
+        zoom_levels: [12, 13, 14, 15]
+      - ref: ch_swisstopo_hiking
+        opacity: { 14: 0.5, 15: 0.9 }
+        zoom_levels: [14, 15]
+
+  ch_swisstopo_basemap:
+    name: "CH Topo Basemap"
+    description: "Swisstopo national map"
+    output: ch_swisstopo_basemap.img
+    bounds: center_switzerland
+    zoom_levels: [10, 11, 12, 13, 14, 15]
+    layers:
+      - ref: ch_swisstopo_basemap
