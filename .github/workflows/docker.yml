@@ -1,0 +1,170 @@
+name: Build Docker
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: "Image variant: base (default) or mkgmap"
+        required: true
+        default: "base"
+      custom_tag:
+        description: "Custom tag (use 'hash' for git SHA)"
+        required: true
+        default: "hash"
+      add_edge_tag:
+        description: "Add edge tag"
+        required: true
+        type: boolean
+        default: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Only build on main if the merged PR has a "BUILD" label.
+      # Tag pushes and manual dispatch always build.
+      - name: Check for BUILD label on main branch
+        id: check-build
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const commit = context.sha;
+            const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: commit
+            });
+            const hasBuildLabel = prs.some(pr =>
+              pr.labels.some(label => label.name === 'BUILD')
+            );
+            console.log(`Found ${prs.length} PR(s) for commit ${commit}`);
+            console.log(`Has BUILD label: ${hasBuildLabel}`);
+            return hasBuildLabel;
+          result-encoding: string
+
+      - name: Exit if no BUILD label on main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check-build.outputs.result != 'true'
+        run: |
+          echo "Skipping build: No BUILD label found on merged PR"
+          exit 0
+
+      - name: Log in to the Container registry
+        if: |
+          github.event_name != 'push' ||
+          steps.check-build.outputs.result == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine variant
+        id: variant
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VARIANT="${{ github.event.inputs.variant }}"
+          else
+            VARIANT="base"
+          fi
+          echo "variant=$VARIANT" >> "$GITHUB_OUTPUT"
+          if [ "$VARIANT" = "mkgmap" ]; then
+            echo "build_arg=INSTALL_MKGMAP=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "build_arg=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Determine version
+        id: determine-version
+        if: |
+          github.event_name != 'push' ||
+          steps.check-build.outputs.result == 'true'
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION="${{ github.ref_name }}"
+            LATEST="latest"
+            VERSION_TAG=true
+          else
+            VERSION=""
+            LATEST=""
+            VERSION_TAG=false
+          fi
+
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f1-2)
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "VERSION_MINOR=$MINOR" >> "$GITHUB_ENV"
+          echo "VERSION_MAJOR=$MAJOR" >> "$GITHUB_ENV"
+          echo "LATEST=$LATEST" >> "$GITHUB_ENV"
+          echo "GIT_HASH=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "VERSION_TAG=$VERSION_TAG" >> "$GITHUB_ENV"
+
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            if [ "${{ github.event.inputs.custom_tag }}" == "hash" ]; then
+              echo "USE_CUSTOM_TAG=false" >> "$GITHUB_ENV"
+            else
+              echo "USE_CUSTOM_TAG=true" >> "$GITHUB_ENV"
+              echo "CUSTOM_TAG_VALUE=${{ github.event.inputs.custom_tag }}" >> "$GITHUB_ENV"
+            fi
+            echo "ADD_EDGE_TAG=${{ github.event.inputs.add_edge_tag }}" >> "$GITHUB_ENV"
+          else
+            echo "USE_CUSTOM_TAG=false" >> "$GITHUB_ENV"
+            echo "ADD_EDGE_TAG=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        if: |
+          github.event_name != 'push' ||
+          steps.check-build.outputs.result == 'true'
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            suffix=-${{ steps.variant.outputs.variant }},onlatest=true
+          tags: |
+            # Edge tag for main branch
+            type=edge,pattern=main,enable=${{ github.event_name != 'workflow_dispatch' || env.ADD_EDGE_TAG == 'true' }}
+
+            # Custom tag for manual dispatch
+            type=raw,value=${{ env.CUSTOM_TAG_VALUE }},enable=${{ env.USE_CUSTOM_TAG == 'true' }}
+
+            # Semantic version tags on release
+            type=raw,value=${{ env.VERSION }},enable=${{ env.VERSION_TAG }}
+            type=raw,value=${{ env.VERSION_MINOR }},enable=${{ env.VERSION_TAG }}
+            type=raw,value=${{ env.VERSION_MAJOR }},enable=${{ env.VERSION_TAG }}
+            type=raw,value=${{ env.LATEST }},enable=${{ env.VERSION_TAG }}
+
+            # Timestamp + SHA tag
+            type=raw,value={{date 'YYYYMMDDTHHmm'}}-sha-{{sha}},enable=${{ env.USE_CUSTOM_TAG != 'true' }}
+
+      - name: Build and push Docker image
+        id: push
+        if: |
+          github.event_name != 'push' ||
+          steps.check-build.outputs.result == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            ${{ steps.variant.outputs.build_arg }}

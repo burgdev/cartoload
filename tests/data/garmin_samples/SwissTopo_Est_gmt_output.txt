@@ -1,0 +1,31 @@
+gmt v0.8.220.853b  CC BY-SA (C) 2011-2015 AP www.gmaptool.eu
+
+Input file: /home/tobias/kdrive/garmin/my_SwissTopo_Est.img.
+
+
+File:		/home/tobias/kdrive/garmin/my_SwissTopo_Est.img, length 1421049856
+Header:   	20.04.2022 17:10:22, DSKIMG, XOR 00, V 0.00, Ms 0
+Mapset:   	Svizzera_E Raster Map
+fat:		1000h - 1200h - 18000h, block 32768
+maps:		2, sub-files 2
+
+Sub-file         fat     length
+ 013202B4 GMP   1200h 1420912312
+	map 13202b4 (20054708)
+	date 20.04.2022 19:06:47
+	priority 24, parameters 1 4 36 1
+	levels [20,21,22,23,24], zoom [84,83,2,1,0]
+	N: 47.864470, S: 45.802646, W: 8.376818, E: 10.691242
+	Raster Map
+	Copyright 1995-2022 by GARMIN Corporation.
+	CP 1252, Western European
+	Bitmaps 28737, size 1416753453 (4)
+ MAPSOURC MPS  17C00h        98
+
+Map              length s-f  CP    prio  PID   FID  name
+ 013202B4 NT  1420912312  1  1252  24       0     0  013202B4  >Svizzera_E Raster Map
+ MAPSOURC MPS        98  1
+
+Data MPS
+ L: PID 0, FID 0, map 13202B4, (20054708 0),  013202B4  >Svizzera_E Raster Map
+ V: Svizzera_E Raster Map (0)

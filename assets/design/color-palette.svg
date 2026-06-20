@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="902" height="696" viewBox="0 0 902 696">
+<rect width="902" height="696" fill="#F5F2EC"></rect>
+<text x="32" y="88" font-family="sans-serif" font-size="10" font-weight="bold" fill="#9A9E96" letter-spacing="1">ALPINE GREEN</text>
+<rect x="32" y="112" width="96" height="80" rx="8" fill="#1A1C18"></rect>
+<text x="80" y="148" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="600" fill="#F5F2EC">Graphite</text>
+<text x="80" y="164" text-anchor="middle" font-family="monospace" font-size="9" fill="#F5F2EC" opacity="0.65">#1A1C18</text>
+<rect x="138" y="112" width="96" height="80" rx="8" fill="#3A5E47"></rect>
+<text x="186" y="148" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="600" fill="#F5F2EC">Forest Dark</text>
+<text x="186" y="164" text-anchor="middle" font-family="monospace" font-size="9" fill="#F5F2EC" opacity="0.65">#3A5E47</text>
+<rect x="244" y="112" width="96" height="80" rx="8" fill="#4E7A5F"></rect>
+<text x="292" y="148" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="600" fill="#F5F2EC">Forest</text>
+<text x="292" y="164" text-anchor="middle" font-family="monospace" font-size="9" fill="#F5F2EC" opacity="0.65">#4E7A5F</text>
+<rect x="350" y="112" width="96" height="80" rx="8" fill="#6A9E7A"></rect>
+<text x="398" y="148" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="600" fill="#1A1C18">Fern</text>
+<text x="398" y="164" text-anchor="middle" font-family="monospace" font-size="9" fill="#1A1C18" opacity="0.65">#6A9E7A</text>
+<rect x="456" y="112" width="96" height="80" rx="8" fill="#7DB88C"></rect>
+<text x="504" y="148" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="600" fill="#1A1C18">Fern Lt</text>
+<text x="504" y="164" text-anchor="middle" font-family="monospace" font-size="9" fill="#1A1C18" opacity="0.65">#7DB88C</text>
+<rect x="562" y="112" width="96" height="80" rx="8" fill="#D4E8DB" stroke="#D4D0C8" stroke-width="1"></rect>
+<text x="610" y="148" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="600" fill="#1A1C18">Tint</text>
+<text x="610" y="164" text-anchor="middle" font-family="monospace" font-size="9" fill="#1A1C18" opacity="0.65">#D4E8DB</text>
+<text x="32" y="236" font-family="sans-serif" font-size="10" font-weight="bold" fill="#9A9E96" letter-spacing="1">WARM NEUTRALS</text>
+<rect x="32" y="260" width="96" height="80" rx="8" fill="#252924"></rect>
+<text x="80" y="296" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="600" fill="#F5F2EC">Basalt</text>
+<text x="80" y="312" text-anchor="middle" font-family="monospace" font-size="9" fill="#F5F2EC" opacity="0.65">#252924</text>
+<rect x="138" y="260" width="96" height="80" rx="8" fill="#565A52"></rect>
+<text x="186" y="296" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="600" fill="#F5F2EC">Stone</text>
+<text x="186" y="312" text-anchor="middle" font-family="monospace" font-size="9" fill="#F5F2EC" opacity="0.65">#565A52</text>
+<rect x="244" y="260" width="96" height="80" rx="8" fill="#9A9E96"></rect>
+<text x="292" y="296" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="600" fill="#1A1C18">Slate</text>
+<text x="292" y="312" text-anchor="middle" font-family="monospace" font-size="9" fill="#1A1C18" opacity="0.65">#9A9E96</text>
+<rect x="350" y="260" width="96" height="80" rx="8" fill="#D4D0C8"></rect>
+<text x="398" y="296" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="600" fill="#1A1C18">Chalk</text>
+<text x="398" y="312" text-anchor="middle" font-family="monospace" font-size="9" fill="#1A1C18" opacity="0.65">#D4D0C8</text>
+<rect x="456" y="260" width="96" height="80" rx="8" fill="#E8E4DC" stroke="#D4D0C8" stroke-width="1"></rect>
+<text x="504" y="296" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="600" fill="#1A1C18">Dust</text>
+<text x="504" y="312" text-anchor="middle" font-family="monospace" font-size="9" fill="#1A1C18" opacity="0.65">#E8E4DC</text>
+<rect x="562" y="260" width="96" height="80" rx="8" fill="#EDEAE3" stroke="#D4D0C8" stroke-width="1"></rect>
+<text x="610" y="296" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="600" fill="#1A1C18">Smoke</text>
+<text x="610" y="312" text-anchor="middle" font-family="monospace" font-size="9" fill="#1A1C18" opacity="0.65">#EDEAE3</text>
+<rect x="668" y="260" width="96" height="80" rx="8" fill="#F5F2EC" stroke="#D4D0C8" stroke-width="1"></rect>
+<text x="716" y="296" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="600" fill="#1A1C18">Parchment</text>
+<text x="716" y="312" text-anchor="middle" font-family="monospace" font-size="9" fill="#1A1C18" opacity="0.65">#F5F2EC</text>
+<rect x="774" y="260" width="96" height="80" rx="8" fill="#FFFFFF" stroke="#D4D0C8" stroke-width="1"></rect>
+<text x="822" y="296" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="600" fill="#1A1C18">White</text>
+<text x="822" y="312" text-anchor="middle" font-family="monospace" font-size="9" fill="#1A1C18" opacity="0.65">#FFFFFF</text>
+<text x="32" y="384" font-family="sans-serif" font-size="10" font-weight="bold" fill="#9A9E96" letter-spacing="1">DARK MODE</text>
+<rect x="32" y="408" width="96" height="80" rx="8" fill="#131512"></rect>
+<text x="80" y="444" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="600" fill="#F5F2EC">BG</text>
+<text x="80" y="460" text-anchor="middle" font-family="monospace" font-size="9" fill="#F5F2EC" opacity="0.65">#131512</text>
+<rect x="138" y="408" width="96" height="80" rx="8" fill="#1C1F1B"></rect>
+<text x="186" y="444" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="600" fill="#F5F2EC">Card</text>
+<text x="186" y="460" text-anchor="middle" font-family="monospace" font-size="9" fill="#F5F2EC" opacity="0.65">#1C1F1B</text>
+<rect x="244" y="408" width="96" height="80" rx="8" fill="#0D0F0C"></rect>
+<text x="292" y="444" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="600" fill="#F5F2EC">Deep</text>
+<text x="292" y="460" text-anchor="middle" font-family="monospace" font-size="9" fill="#F5F2EC" opacity="0.65">#0D0F0C</text>
+<rect x="350" y="408" width="96" height="80" rx="8" fill="#252924"></rect>
+<text x="398" y="444" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="600" fill="#F5F2EC">Subtle</text>
+<text x="398" y="460" text-anchor="middle" font-family="monospace" font-size="9" fill="#F5F2EC" opacity="0.65">#252924</text>
+<rect x="456" y="408" width="96" height="80" rx="8" fill="#1A2E21"></rect>
+<text x="504" y="444" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="600" fill="#F5F2EC">Accent</text>
+<text x="504" y="460" text-anchor="middle" font-family="monospace" font-size="9" fill="#F5F2EC" opacity="0.65">#1A2E21</text>
+<text x="32" y="532" font-family="sans-serif" font-size="10" font-weight="bold" fill="#9A9E96" letter-spacing="1">SEMANTIC</text>
+<rect x="32" y="556" width="96" height="80" rx="8" fill="#A8352A"></rect>
+<text x="80" y="592" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="600" fill="#F5F2EC">Danger</text>
+<text x="80" y="608" text-anchor="middle" font-family="monospace" font-size="9" fill="#F5F2EC" opacity="0.65">#A8352A</text>
+<rect x="138" y="556" width="96" height="80" rx="8" fill="#F5E6E5" stroke="#D4D0C8" stroke-width="1"></rect>
+<text x="186" y="592" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="600" fill="#1A1C18">Danger BG</text>
+<text x="186" y="608" text-anchor="middle" font-family="monospace" font-size="9" fill="#1A1C18" opacity="0.65">#F5E6E5</text>
+<rect x="244" y="556" width="96" height="80" rx="8" fill="#3A7A52"></rect>
+<text x="292" y="592" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="600" fill="#F5F2EC">Success</text>
+<text x="292" y="608" text-anchor="middle" font-family="monospace" font-size="9" fill="#F5F2EC" opacity="0.65">#3A7A52</text>
+<rect x="350" y="556" width="96" height="80" rx="8" fill="#E3F0E9" stroke="#D4D0C8" stroke-width="1"></rect>
+<text x="398" y="592" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="600" fill="#1A1C18">Success BG</text>
+<text x="398" y="608" text-anchor="middle" font-family="monospace" font-size="9" fill="#1A1C18" opacity="0.65">#E3F0E9</text>
+<rect x="456" y="556" width="96" height="80" rx="8" fill="#B87030"></rect>
+<text x="504" y="592" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="600" fill="#F5F2EC">Warning</text>
+<text x="504" y="608" text-anchor="middle" font-family="monospace" font-size="9" fill="#F5F2EC" opacity="0.65">#B87030</text>
+<rect x="562" y="556" width="96" height="80" rx="8" fill="#F5EADC" stroke="#D4D0C8" stroke-width="1"></rect>
+<text x="610" y="592" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="600" fill="#1A1C18">Warning BG</text>
+<text x="610" y="608" text-anchor="middle" font-family="monospace" font-size="9" fill="#1A1C18" opacity="0.65">#F5EADC</text>
+<text x="32" y="52" font-family="serif" font-size="16" font-weight="bold" fill="#1A1C18">Carto</text>
+<text x="84" y="52" font-family="sans-serif" font-size="14" font-weight="300" fill="#4E7A5F">load</text>
+<text x="870" y="52" text-anchor="end" font-family="sans-serif" font-size="10" fill="#9A9E96">Design System · Color Palette</text>
+<line x1="32" y1="62" x2="870" y2="62" stroke="#D4D0C8" stroke-width="1"></line>
+</svg>

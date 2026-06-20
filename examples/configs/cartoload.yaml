@@ -1,0 +1,5 @@
+# cartoload example config — composes sources and layers via includes
+
+includes:
+  - sources/swisstopo.yaml
+  - layers/switzerland.yaml
