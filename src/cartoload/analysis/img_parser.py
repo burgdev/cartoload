@@ -213,7 +213,7 @@ class IMGParser:
                 data.extend(chunk)
 
         # Trim to actual size
-        return bytes(data[: int(sf["size"])])
+        return bytes(data[: sf["size"]])
 
     def parse_gmp_container(self, subfile_key):
         """Parse GMP container header to find section offsets."""
