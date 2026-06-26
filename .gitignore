@@ -35,6 +35,8 @@ htmlcov/
 cache/
 output/
 docs/site/
+# Generated from src/cartoload/cli.py by scripts/generate-cli-docs.py
+docs/cli.md
 
 # IDE
 .idea/
