@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - "v*.*.*"
+  repository_dispatch:
+    types: [new-tag-created]
 
 jobs:
   create-release:
@@ -26,15 +28,24 @@ jobs:
       - name: Install dependencies
         run: uv sync --only-group dev
 
+      - name: Determine tag
+        id: tag
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${{ github.event.client_payload.tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Get changelog for this version
         id: changelog
         run: |
-          VERSION="${{ github.ref_name }}"
-          echo "version=$VERSION" >> "$GITHUB_ENV"
+          TAG="${{ steps.tag.outputs.name }}"
+          echo "version=$TAG" >> "$GITHUB_ENV"
           echo "body<<EOF" >> "$GITHUB_ENV"
           # Extract changelog for this version from CHANGELOG.md
           if [ -f CHANGELOG.md ]; then
-            BODY=$(uv run git-cliff --tag "$VERSION" --strip all | tail -n +2 || true)
+            BODY=$(uv run git-cliff --tag "$TAG" --strip all | tail -n +2 || true)
           else
             BODY=""
           fi
@@ -44,7 +55,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.version }}
+          tag_name: ${{ steps.tag.outputs.name }}
           name: ${{ env.version }}
           body: ${{ env.body }}
           draft: false

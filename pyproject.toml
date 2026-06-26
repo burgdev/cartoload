@@ -1,6 +1,6 @@
 [project]
 name = "cartoload"
-version = "0.1.1"
+version = "0.1.0"
 description = "Convert raster geodata into GPS raser device maps"
 readme = "README.md"
 requires-python = ">=3.11"
