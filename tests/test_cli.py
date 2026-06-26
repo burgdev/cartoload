@@ -9,6 +9,7 @@ import click.testing
 import pytest
 import yaml
 
+from cartoload import __version__
 from cartoload.cli import (
     _compute_bounds_from_center,
     _human_size,
@@ -66,6 +67,19 @@ def _make_config_file(
 @pytest.fixture
 def runner() -> click.testing.CliRunner:
     return click.testing.CliRunner()
+
+
+# ---------------------------------------------------------------------------
+# main group: --version
+# ---------------------------------------------------------------------------
+
+
+class TestVersion:
+    def test_version_flag(self, runner):
+        result = runner.invoke(main, ["--version"])
+        assert result.exit_code == 0
+        assert __version__ in result.output
+        assert "cartoload" in result.output
 
 
 # ---------------------------------------------------------------------------
